@@ -1,0 +1,133 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Spark Steps - Documentation</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f9f9f9;
+        }
+        h1, h2, h3 {
+            color: #333;
+        }
+        pre {
+            background-color: #eee;
+            padding: 10px;
+            border-left: 4px solid #ccc;
+            overflow-x: auto;
+        }
+        nav {
+            background-color: #fff;
+            padding: 15px;
+            border: 1px solid #ddd;
+            margin-bottom: 20px;
+        }
+        nav ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        nav li {
+            margin-bottom: 8px;
+        }
+        nav a {
+            text-decoration: none;
+            color: #007acc;
+        }
+        nav a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Spark Steps - Documentation</h1>
+
+<nav>
+    <strong>Table des matières / Table of Contents</strong>
+    <ul>
+        <li><a href="#fr-fonctionnement">🇫🇷 Fonctionnement des étapes Spark</a></li>
+        <li><a href="#en-structure">🇬🇧 Spark Step Structure</a></li>
+        <li><a href="#diagram">📊 Pipeline Diagram</a></li>
+    </ul>
+</nav>
+
+<section id="fr-fonctionnement">
+<p>Objet : Fonctionnement des tapes Spark bases sur AbstractStep et AbstractStepMap</p>
+
+<p>Bonjour [Nom du destinataire],</p>
+
+<p>Je vous partage une explication sur la conception des tapes (steps) Spark dans notre pipeline, structures autour des classes abstraites AbstractStep<T> et AbstractStepMap<T>.</p>
+
+<p>AbstractStep<T>
+Cette classe est utilise pour dfinir une tape Spark gnrique. Elle permet denchaner dynamiquement des traitements de chargement ou de sauvegarde sur un Dataset<T>. En ltendant, on peut :
+- Charger les donnes depuis nimporte quelle source (CSV, Parquet, Hive, etc.)
+- Excuter une logique personnalise dans la mthode launch
+- Exporter les donnes transformes</p>
+
+<p>Exemples :
+- ArivaLoad : chargement dun fichier CSV et mapping vers des objets Ariva
+- ArivaSave : export dun Dataset<Ariva> au format Parquet</p>
+
+<p>AbstractStepMap<T>
+Cette classe est utilise lorsquon souhaite modifier chaque ligne dun Dataset<T>. Elle fournit la mthode execute(T row) qui sapplique  chaque lment.</p>
+
+<p>Exemple :
+- ArivaTransform : modification de champs ligne par ligne, comme lajout dune date dingestion.</p>
+
+<p>Orchestration des tapes
+Chaque step est annot avec @Step(StepConstants.XXX), ce qui permet au systme de les excuter automatiquement dans lordre dfini par les constantes. On peut donc enchaner plusieurs transformations, chargements et exports sans gestion manuelle de lordre dexcution.</p>
+
+<p>Cela garantit une architecture modulaire, testable et extensible pour le traitement de nos fichiers.</p>
+
+<p>Bien cordialement,
+[Votre Prnom Nom]</p>
+
+</section>
+
+<hr>
+
+<section id="en-structure">
+<p>Subject: Understanding Spark pipeline with AbstractStep and AbstractStepMap</p>
+
+<p>Hi [Recipient's Name],</p>
+
+<p>Heres a detailed explanation of how our Spark steps are designed using the abstract classes AbstractStep<T> and AbstractStepMap<T>.</p>
+
+<p>AbstractStep<T>
+This class defines a general-purpose Spark step. It enables dynamic chaining of load or export operations on a Dataset<T>. When extended, it allows you to:
+- Load data from any source (CSV, Parquet, Hive, etc.)
+- Customize logic inside the launch method
+- Export the transformed dataset</p>
+
+<p>Examples:
+- ArivaLoad: loads a CSV file and maps it to Ariva objects
+- ArivaSave: exports a Dataset<Ariva> to Parquet format</p>
+
+<p>AbstractStepMap<T>
+This class is used when we need to process each record of a dataset individually. It provides an execute(T row) method applied to each element.</p>
+
+<p>Example:
+- ArivaTransform: modifies individual fields, such as adding an ingestion date to each record.</p>
+
+<p>Step orchestration
+Each step is annotated with @Step(StepConstants.XXX), allowing the system to execute them in a predefined order. This way, multiple transformations, loads, and exports can be chained without manually handling execution sequence.</p>
+
+<p>This structure ensures a modular, testable, and extensible Spark pipeline.</p>
+
+<p>Best regards,
+[Your First Name Last Name]</p>
+
+</section>
+
+<hr>
+
+<section id="diagram">
+<h2>📊 Pipeline Diagram</h2>
+<img src="SparkSteps_Pipeline_Diagram.png" alt="Pipeline Diagram" width="800">
+</section>
+
+</body>
+</html>

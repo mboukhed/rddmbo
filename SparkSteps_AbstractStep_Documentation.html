@@ -1,0 +1,68 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Spark Steps Documentation</title>
+</head>
+<body>
+<h1>Spark Step Design — AbstractStep &amp; AbstractStepMap</h1>
+
+<h2>🇫🇷 Fonctionnement des étapes Spark</h2>
+
+<h3><code>AbstractStep&lt;T&gt;</code></h3>
+
+<p>Cette classe permet de :
+- Charger des données depuis des sources (CSV, Parquet, Hive…)
+- Appliquer une logique dans <code>launch</code>
+- Exporter les données</p>
+
+<p><strong>Exemples</strong> :
+- <code>ArivaLoad</code> : charge un CSV vers des objets <code>Ariva</code>
+- <code>ArivaSave</code> : exporte en Parquet</p>
+
+<h3><code>AbstractStepMap&lt;T&gt;</code></h3>
+
+<p>Permet de transformer ligne par ligne avec la méthode <code>execute(T row)</code></p>
+
+<p><strong>Exemple</strong> :
+- <code>ArivaTransform</code> : ajoute une date d’ingestion</p>
+
+<h3>Orchestration</h3>
+
+<p>Chaque étape est annotée avec <code>@Step(StepConstants.XYZ)</code> pour garantir l’ordre d’exécution.</p>
+
+<hr />
+
+<h2>🇬🇧 Spark Step Structure</h2>
+
+<h3><code>AbstractStep&lt;T&gt;</code></h3>
+
+<p>This class allows:
+- Loading data from sources (CSV, Parquet, Hive…)
+- Custom logic in <code>launch</code>
+- Exporting transformed datasets</p>
+
+<p><strong>Examples</strong>:
+- <code>ArivaLoad</code>: load CSV into <code>Ariva</code> objects
+- <code>ArivaSave</code>: export to Parquet</p>
+
+<h3><code>AbstractStepMap&lt;T&gt;</code></h3>
+
+<p>Used to transform each record via <code>execute(T row)</code></p>
+
+<p><strong>Example</strong>:
+- <code>ArivaTransform</code>: adds ingestion date</p>
+
+<h3>Execution Order</h3>
+
+<p>Each step uses <code>@Step(StepConstants.XYZ)</code> to define execution sequence.</p>
+
+<hr />
+
+<h2>📊 Pipeline Diagram</h2>
+
+<p><img src="SparkSteps_Pipeline_Diagram.png" alt="Pipeline Diagram" /></p>
+
+</body>
+</html>
