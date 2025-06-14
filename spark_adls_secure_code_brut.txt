@@ -1,0 +1,130 @@
+
+================ pom.xml ================
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.project</groupId>
+  <artifactId>spark-adls-secure</artifactId>
+  <version>1.0.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+      <version>5.3.20</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-core_2.12</artifactId>
+      <version>3.5.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_2.12</artifactId>
+      <version>3.5.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.azure</groupId>
+      <artifactId>azure-security-keyvault-secrets</artifactId>
+      <version>4.5.3</version>
+    </dependency>
+    <dependency>
+      <groupId>io.kubernetes</groupId>
+      <artifactId>client-java</artifactId>
+      <version>18.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>4.5.1</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-java</artifactId>
+      <version>7.11.2</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-spring</artifactId>
+      <version>7.11.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+
+================ SparkConfiguration.java ================
+package com.project.sparkadls.config;
+
+// (le contenu complet de SparkConfiguration.java ici...)
+
+================ AdlsConfiguration.java ================
+package com.project.sparkadls.config;
+
+// (le contenu complet de AdlsConfiguration.java ici...)
+
+================ SecretProviderService.java ================
+package com.project.sparkadls.secrets;
+
+// (le contenu complet de SecretProviderService.java ici...)
+
+================ MockSecretProvider.java ================
+package com.project.sparkadls.secrets;
+
+// (le contenu complet de MockSecretProvider.java ici...)
+
+================ AdlsFileListerService.java ================
+package com.project.sparkadls.service;
+
+// (le contenu complet de AdlsFileListerService.java ici...)
+
+================ CsvToParquetService.java ================
+package com.project.sparkadls.service;
+
+// (le contenu complet de CsvToParquetService.java ici...)
+
+================ application-local.properties ================
+spring.profiles.active=local
+spark.app.name=SparkSecureLocal
+spark.master.url=local[*]
+adls.account.name=localaccount
+adls.auth.type=OAuth
+
+================ application-aks.properties ================
+spring.profiles.active=aks
+spark.app.name=SparkSecureAKS
+spark.master.url=local[*]
+adls.account.name=aksaccount
+adls.auth.type=ManagedIdentity
+
+================ CsvToParquetServiceTest.java ================
+package com.project.sparkadls.service;
+
+// (le contenu complet de CsvToParquetServiceTest.java ici...)
+
+================ AdlsFileListerServiceTest.java ================
+package com.project.sparkadls.service;
+
+// (le contenu complet de AdlsFileListerServiceTest.java ici...)
+
+================ Feature Cucumber ================
+Feature: Csv to Parquet conversion
+
+  Scenario: Convert CSV to Parquet partitioned
+    Given a valid input CSV file at "src/test/resources/testdata/input/sample.csv"
+    When I convert it to Parquet partitioned by "partitionColumn"
+    Then the output Parquet file should exist at "src/test/resources/testdata/output"
+
+================ sample.csv ================
+id,name,partitionColumn
+1,John,A
+2,Mary,B
+3,Paul,A
+4,Lisa,B
