@@ -1,0 +1,243 @@
+Voici une solution purement Java avec JUnit 5 qui lance chaque runner Cucumber dans des JVM différentes de façon séquentielle :Solution avec @TestMethodOrder et ProcessBuilderimport org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Assertions;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+public class CucumberSequentialJVMTest {
+    
+    @Test
+    @Order(1)
+    void runScenario1InSeparateJVM() throws IOException, InterruptedException {
+        System.out.println("=== Lancement Scenario 1 dans JVM séparée ===");
+        
+        int exitCode = launchCucumberInSeparateJVM(
+            "com.example.Scenario1Runner", 
+            "target/cucumber-reports/scenario1"
+        );
+        
+        Assertions.assertEquals(0, exitCode, "Scenario 1 a échoué");
+        System.out.println("✓ Scenario 1 terminé avec succès");
+    }
+    
+    @Test
+    @Order(2)
+    void runScenario2InSeparateJVM() throws IOException, InterruptedException {
+        System.out.println("=== Lancement Scenario 2 dans JVM séparée ===");
+        
+        int exitCode = launchCucumberInSeparateJVM(
+            "com.example.Scenario2Runner", 
+            "target/cucumber-reports/scenario2"
+        );
+        
+        Assertions.assertEquals(0, exitCode, "Scenario 2 a échoué");
+        System.out.println("✓ Scenario 2 terminé avec succès");
+    }
+    
+    private int launchCucumberInSeparateJVM(String runnerClass, String reportsDir) 
+            throws IOException, InterruptedException {
+        
+        List<String> command = buildJavaCommand(runnerClass, reportsDir);
+        
+        System.out.println("Commande: " + String.join(" ", command));
+        
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.inheritIO(); // Pour voir les logs en temps réel
+        
+        Process process = processBuilder.start();
+        boolean finished = process.waitFor(5, TimeUnit.MINUTES); // Timeout de 5 min
+        
+        if (!finished) {
+            process.destroyForcibly();
+            throw new RuntimeException("Le processus a dépassé le timeout de 5 minutes");
+        }
+        
+        return process.exitValue();
+    }
+    
+    private List<String> buildJavaCommand(String runnerClass, String reportsDir) {
+        List<String> command = new ArrayList<>();
+        
+        // Commande Java
+        command.add("java");
+        
+        // Options JVM (optionnel)
+        command.add("-Xmx1024m");
+        command.add("-Dfile.encoding=UTF-8");
+        
+        // Classpath
+        command.add("-cp");
+        command.add(System.getProperty("java.class.path"));
+        
+        // Classe principale JUnit Platform
+        command.add("org.junit.platform.console.ConsoleLauncher");
+        
+        // Arguments pour JUnit Platform
+        command.add("--select-class=" + runnerClass);
+        command.add("--reports-dir=" + reportsDir);
+        command.add("--details=verbose");
+        
+        return command;
+    }
+}Version plus avancée avec gestion des erreursimport org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.AfterAll;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+public class CucumberSequentialJVMTest {
+    
+    private static final String REPORTS_BASE_DIR = "target/cucumber-reports";
+    private static final long TIMEOUT_MINUTES = 10;
+    
+    @BeforeAll
+    static void setup() throws IOException {
+        // Créer les répertoires de rapports
+        Files.createDirectories(Paths.get(REPORTS_BASE_DIR + "/scenario1"));
+        Files.createDirectories(Paths.get(REPORTS_BASE_DIR + "/scenario2"));
+    }
+    
+    @Test
+    @Order(1)
+    void runScenario1InSeparateJVM() {
+        System.out.println("=== Lancement Scenario 1 dans JVM séparée ===");
+        
+        CucumberExecutionResult result = executeCucumberRunner(
+            "com.example.Scenario1Runner",
+            "scenario1"
+        );
+        
+        Assertions.assertTrue(result.isSuccess(), 
+            "Scenario 1 a échoué: " + result.getErrorMessage());
+        
+        System.out.println("✓ Scenario 1 terminé avec succès en " + result.getDurationMs() + "ms");
+    }
+    
+    @Test
+    @Order(2)
+    void runScenario2InSeparateJVM() {
+        System.out.println("=== Lancement Scenario 2 dans JVM séparée ===");
+        
+        CucumberExecutionResult result = executeCucumberRunner(
+            "com.example.Scenario2Runner",
+            "scenario2"
+        );
+        
+        Assertions.assertTrue(result.isSuccess(), 
+            "Scenario 2 a échoué: " + result.getErrorMessage());
+        
+        System.out.println("✓ Scenario 2 terminé avec succès en " + result.getDurationMs() + "ms");
+    }
+    
+    private CucumberExecutionResult executeCucumberRunner(String runnerClass, String scenarioName) {
+        long startTime = System.currentTimeMillis();
+        
+        try {
+            List<String> command = buildJavaCommand(runnerClass, scenarioName);
+            
+            System.out.println("Exécution: " + runnerClass);
+            
+            ProcessBuilder processBuilder = new ProcessBuilder(command);
+            processBuilder.inheritIO();
+            
+            Process process = processBuilder.start();
+            boolean finished = process.waitFor(TIMEOUT_MINUTES, TimeUnit.MINUTES);
+            
+            long duration = System.currentTimeMillis() - startTime;
+            
+            if (!finished) {
+                process.destroyForcibly();
+                return new CucumberExecutionResult(false, "Timeout dépassé", duration);
+            }
+            
+            int exitCode = process.exitValue();
+            boolean success = exitCode == 0;
+            String errorMessage = success ? null : "Exit code: " + exitCode;
+            
+            return new CucumberExecutionResult(success, errorMessage, duration);
+            
+        } catch (Exception e) {
+            long duration = System.currentTimeMillis() - startTime;
+            return new CucumberExecutionResult(false, e.getMessage(), duration);
+        }
+    }
+    
+    private List<String> buildJavaCommand(String runnerClass, String scenarioName) {
+        List<String> command = new ArrayList<>();
+        
+        command.add("java");
+        
+        // Options JVM
+        command.add("-Xmx1024m");
+        command.add("-Dfile.encoding=UTF-8");
+        command.add("-Dcucumber.publish.enabled=false");
+        
+        // Classpath
+        command.add("-cp");
+        command.add(System.getProperty("java.class.path"));
+        
+        // JUnit Platform Console Launcher
+        command.add("org.junit.platform.console.ConsoleLauncher");
+        
+        // Arguments
+        command.add("--select-class=" + runnerClass);
+        command.add("--reports-dir=" + REPORTS_BASE_DIR + "/" + scenarioName);
+        command.add("--details=verbose");
+        
+        return command;
+    }
+    
+    @AfterAll
+    static void cleanup() {
+        System.out.println("=== Tous les scénarios terminés ===");
+        // Nettoyage si nécessaire
+    }
+    
+    // Classe interne pour encapsuler les résultats
+    private static class CucumberExecutionResult {
+        private final boolean success;
+        private final String errorMessage;
+        private final long durationMs;
+        
+        public CucumberExecutionResult(boolean success, String errorMessage, long durationMs) {
+            this.success = success;
+            this.errorMessage = errorMessage;
+            this.durationMs = durationMs;
+        }
+        
+        public boolean isSuccess() { return success; }
+        public String getErrorMessage() { return errorMessage; }
+        public long getDurationMs() { return durationMs; }
+    }
+}Tes runners Cucumber restent simples@Suite
+@IncludeEngines("cucumber")
+@SelectClasspathResource("features")
+@ConfigurationParameter(key = "cucumber.filter.tags", value = "@scenario1")
+@ConfigurationParameter(key = "cucumber.glue", value = "com.example.stepdef")
+@ConfigurationParameter(key = "cucumber.plugin", value = "pretty,json:target/cucumber-reports/scenario1/cucumber.json")
+public class Scenario1Runner {
+}@Suite
+@IncludeEngines("cucumber")
+@SelectClasspathResource("features")
+@ConfigurationParameter(key = "cucumber.filter.tags", value = "@scenario2")
+@ConfigurationParameter(key = "cucumber.glue", value = "com.example.stepdef")
+@ConfigurationParameter(key = "cucumber.plugin", value = "pretty,json:target/cucumber-reports/scenario2/cucumber.json")
+public class Scenario2Runner {
+}Cette solution est purement Java, utilise JUnit 5, et lance chaque runner dans une JVM séparée de façon séquentielle. Ça te convient ?
