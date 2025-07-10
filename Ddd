@@ -1,0 +1,108 @@
+Ah oui, avec Cucumber ! Voici comment faire pour lancer deux runners Cucumber de façon séquentielle :1. Classe principale avec runners Cucumber séquentielsimport io.cucumber.junit.Cucumber;
+import io.cucumber.junit.CucumberOptions;
+import org.junit.runner.JUnitCore;
+import org.junit.runner.Result;
+import org.junit.runner.RunWith;
+
+public class CucumberSequentialRunner {
+    
+    @RunWith(Cucumber.class)
+    @CucumberOptions(
+        features = "src/test/resources/features",
+        glue = "com.example.stepdef",
+        tags = "@scenario1",
+        plugin = {"pretty", "html:target/cucumber-reports/scenario1"}
+    )
+    public static class Scenario1Runner {}
+    
+    @RunWith(Cucumber.class)
+    @CucumberOptions(
+        features = "src/test/resources/features",
+        glue = "com.example.stepdef", 
+        tags = "@scenario2",
+        plugin = {"pretty", "html:target/cucumber-reports/scenario2"}
+    )
+    public static class Scenario2Runner {}
+    
+    public static void main(String[] args) {
+        System.out.println("=== Lancement séquentiel des tests Cucumber ===");
+        
+        // Exécution du premier scénario
+        System.out.println("\n--- Exécution Scenario 1 ---");
+        Result result1 = JUnitCore.runClasses(Scenario1Runner.class);
+        printResult("Scenario 1", result1);
+        
+        // Exécution du deuxième scénario
+        System.out.println("\n--- Exécution Scenario 2 ---");
+        Result result2 = JUnitCore.runClasses(Scenario2Runner.class);
+        printResult("Scenario 2", result2);
+        
+        // Résultat global
+        boolean success = result1.wasSuccessful() && result2.wasSuccessful();
+        System.out.println("\n=== Résultat global: " + (success ? "SUCCESS" : "FAILURE") + " ===");
+    }
+    
+    private static void printResult(String scenarioName, Result result) {
+        System.out.println(scenarioName + " - Tests exécutés: " + result.getRunCount());
+        System.out.println(scenarioName + " - Échecs: " + result.getFailureCount());
+        System.out.println(scenarioName + " - Statut: " + (result.wasSuccessful() ? "SUCCESS" : "FAILURE"));
+        
+        if (!result.wasSuccessful()) {
+            result.getFailures().forEach(failure -> {
+                System.out.println("Erreur: " + failure.getMessage());
+            });
+        }
+    }
+}2. Avec runners séparés (plus propre)Scenario1Runner.java :@RunWith(Cucumber.class)
+@CucumberOptions(
+    features = "src/test/resources/features",
+    glue = "com.example.stepdef",
+    tags = "@scenario1",
+    plugin = {"pretty", "json:target/cucumber-reports/scenario1/cucumber.json"}
+)
+public class Scenario1Runner {}Scenario2Runner.java :@RunWith(Cucumber.class)  
+@CucumberOptions(
+    features = "src/test/resources/features",
+    glue = "com.example.stepdef",
+    tags = "@scenario2", 
+    plugin = {"pretty", "json:target/cucumber-reports/scenario2/cucumber.json"}
+)
+public class Scenario2Runner {}CucumberSequentialExecutor.java :public class CucumberSequentialExecutor {
+    public static void main(String[] args) {
+        executeScenario("Scenario 1", Scenario1Runner.class);
+        executeScenario("Scenario 2", Scenario2Runner.class);
+    }
+    
+    private static void executeScenario(String name, Class<?> runnerClass) {
+        System.out.println("=== Début " + name + " ===");
+        long startTime = System.currentTimeMillis();
+        
+        Result result = JUnitCore.runClasses(runnerClass);
+        
+        long duration = System.currentTimeMillis() - startTime;
+        System.out.println(name + " terminé en " + duration + "ms");
+        System.out.println("Statut: " + (result.wasSuccessful() ? "✓ SUCCESS" : "✗ FAILURE"));
+        
+        if (!result.wasSuccessful()) {
+            result.getFailures().forEach(failure -> 
+                System.out.println("Échec: " + failure.getMessage())
+            );
+        }
+        System.out.println("=== Fin " + name + " ===\n");
+    }
+}3. Avec Suite JUnit (plus élégant)@RunWith(Suite.class)
+@Suite.SuiteClasses({
+    Scenario1Runner.class,
+    Scenario2Runner.class
+})
+public class CucumberSequentialSuite {
+    // Les tests s'exécutent séquentiellement dans l'ordre déclaré
+}Dans tes features, assure-toi d'avoir les tags appropriés :@scenario1
+Feature: Premier scénario
+  Scenario: Test 1
+    Given ...
+
+@scenario2  
+Feature: Deuxième scénario
+  Scenario: Test 2
+    Given ...Quelle approche préfères-tu ?
