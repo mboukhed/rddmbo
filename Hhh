@@ -1,0 +1,204 @@
+L'erreur 206 indique que le classpath est trop long pour Windows. Voici plusieurs solutions pour résoudre ce problème :Solution 1: Créer un fichier JAR manifest temporaireimport org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Assertions;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.jar.Attributes;
+import java.util.jar.JarOutputStream;
+import java.util.jar.Manifest;
+
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+public class CucumberSequentialJVMTest {
+    
+    @Test
+    @Order(1)
+    void runScenario1InSeparateJVM() throws IOException, InterruptedException {
+        System.out.println("=== Lancement Scenario 1 dans JVM séparée ===");
+        
+        int exitCode = launchCucumberInSeparateJVM("com.example.Scenario1Runner", "scenario1");
+        
+        Assertions.assertEquals(0, exitCode, "Scenario 1 a échoué");
+        System.out.println("✓ Scenario 1 terminé avec succès");
+    }
+    
+    @Test
+    @Order(2)
+    void runScenario2InSeparateJVM() throws IOException, InterruptedException {
+        System.out.println("=== Lancement Scenario 2 dans JVM séparée ===");
+        
+        int exitCode = launchCucumberInSeparateJVM("com.example.Scenario2Runner", "scenario2");
+        
+        Assertions.assertEquals(0, exitCode, "Scenario 2 a échoué");
+        System.out.println("✓ Scenario 2 terminé avec succès");
+    }
+    
+    private int launchCucumberInSeparateJVM(String runnerClass, String scenarioName) 
+            throws IOException, InterruptedException {
+        
+        // Créer un JAR manifest temporaire pour éviter le problème de classpath long
+        Path tempJar = createClasspathJar();
+        
+        try {
+            List<String> command = buildJavaCommandWithJar(runnerClass, scenarioName, tempJar);
+            
+            ProcessBuilder processBuilder = new ProcessBuilder(command);
+            processBuilder.inheritIO();
+            
+            Process process = processBuilder.start();
+            boolean finished = process.waitFor(5, TimeUnit.MINUTES);
+            
+            if (!finished) {
+                process.destroyForcibly();
+                throw new RuntimeException("Timeout dépassé");
+            }
+            
+            return process.exitValue();
+            
+        } finally {
+            // Nettoyer le fichier temporaire
+            Files.deleteIfExists(tempJar);
+        }
+    }
+    
+    private Path createClasspathJar() throws IOException {
+        Path tempJar = Files.createTempFile("cucumber-classpath", ".jar");
+        
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        
+        // Convertir le classpath en Class-Path manifest
+        String classpath = System.getProperty("java.class.path");
+        String[] classpathEntries = classpath.split(System.getProperty("path.separator"));
+        
+        StringBuilder manifestClasspath = new StringBuilder();
+        for (String entry : classpathEntries) {
+            if (manifestClasspath.length() > 0) {
+                manifestClasspath.append(" ");
+            }
+            // Convertir en URI pour le manifest
+            Path path = Paths.get(entry);
+            if (path.isAbsolute()) {
+                manifestClasspath.append(path.toUri().toString());
+            } else {
+                manifestClasspath.append("file:").append(path.toString().replace("\\", "/"));
+            }
+        }
+        
+        manifest.getMainAttributes().put(Attributes.Name.CLASS_PATH, manifestClasspath.toString());
+        
+        try (JarOutputStream jarOut = new JarOutputStream(Files.newOutputStream(tempJar), manifest)) {
+            // JAR vide, seul le manifest compte
+        }
+        
+        return tempJar;
+    }
+    
+    private List<String> buildJavaCommandWithJar(String runnerClass, String scenarioName, Path classpathJar) {
+        List<String> command = new ArrayList<>();
+        
+        command.add("java");
+        command.add("-Xmx1024m");
+        command.add("-Dfile.encoding=UTF-8");
+        
+        // Utiliser le JAR au lieu du classpath long
+        command.add("-jar");
+        command.add(classpathJar.toString());
+        
+        // Classe principale
+        command.add("org.junit.platform.console.ConsoleLauncher");
+        
+        // Arguments
+        command.add("--select-class=" + runnerClass);
+        command.add("--reports-dir=target/cucumber-reports/" + scenarioName);
+        
+        return command;
+    }
+}Solution 2: Utiliser @argfile (Java 9+)private int launchCucumberInSeparateJVM(String runnerClass, String scenarioName) 
+        throws IOException, InterruptedException {
+    
+    // Créer un fichier d'arguments temporaire
+    Path argFile = Files.createTempFile("cucumber-args", ".txt");
+    
+    try {
+        List<String> args = new ArrayList<>();
+        args.add("-Xmx1024m");
+        args.add("-Dfile.encoding=UTF-8");
+        args.add("-cp");
+        args.add(System.getProperty("java.class.path"));
+        args.add("org.junit.platform.console.ConsoleLauncher");
+        args.add("--select-class=" + runnerClass);
+        args.add("--reports-dir=target/cucumber-reports/" + scenarioName);
+        
+        Files.write(argFile, args);
+        
+        List<String> command = new ArrayList<>();
+        command.add("java");
+        command.add("@" + argFile.toString());
+        
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.inheritIO();
+        
+        Process process = processBuilder.start();
+        boolean finished = process.waitFor(5, TimeUnit.MINUTES);
+        
+        if (!finished) {
+            process.destroyForcibly();
+            throw new RuntimeException("Timeout dépassé");
+        }
+        
+        return process.exitValue();
+        
+    } finally {
+        Files.deleteIfExists(argFile);
+    }
+}Solution 3: Simplifiée avec répertoire de travailprivate int launchCucumberInSeparateJVM(String runnerClass, String scenarioName) 
+        throws IOException, InterruptedException {
+    
+    List<String> command = new ArrayList<>();
+    command.add("java");
+    command.add("-Xmx1024m");
+    command.add("-Dfile.encoding=UTF-8");
+    
+    // Utiliser un classpath relatif plus court
+    command.add("-cp");
+    command.add("target/classes" + File.pathSeparator + 
+                "target/test-classes" + File.pathSeparator + 
+                "target/lib/*");
+    
+    command.add("org.junit.platform.console.ConsoleLauncher");
+    command.add("--select-class=" + runnerClass);
+    command.add("--reports-dir=target/cucumber-reports/" + scenarioName);
+    
+    ProcessBuilder processBuilder = new ProcessBuilder(command);
+    processBuilder.inheritIO();
+    
+    // Définir le répertoire de travail sur le projet
+    processBuilder.directory(new File(System.getProperty("user.dir")));
+    
+    Process process = processBuilder.start();
+    boolean finished = process.waitFor(5, TimeUnit.MINUTES);
+    
+    if (!finished) {
+        process.destroyForcibly();
+        throw new RuntimeException("Timeout dépassé");
+    }
+    
+    return process.exitValue();
+}Solution 4: Maven Surefire avec forkSi tu utilises Maven, tu peux aussi configurer le plugin Surefire pour forker :<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <version>3.0.0-M9</version>
+    <configuration>
+        <forkCount>1</forkCount>
+        <reuseForks>false</reuseForks>
+        <argLine>-Xmx1024m</argLine>
+    </configuration>
+</plugin>La Solution 1 avec le JAR manifest est la plus robuste. Quelle solution préfères-tu tester ?
