@@ -1,0 +1,486 @@
+@Component
+public class CucumberHooks {
+    
+    private static final Logger logger = LoggerFactory.getLogger(CucumberHooks.class);
+    
+    // Cache pour éviter de rescanner les classes à chaque fois
+    private static final Set<Class<?>> scannedClasses = new HashSet<>();
+    private static final Map<Class<?>, List<Field>> classFieldsCache = new HashMap<>();
+    
+    @After
+    public void resetAfterScenario() {
+        long startTime = System.currentTimeMillis();
+        
+        try {
+            ApplicationContext context = getApplicationContext();
+            
+            if (context != null) {
+                // 1. Reset tous les beans par réflexion
+                resetAllBeansByReflection(context);
+                
+                // 2. Reset toutes les classes statiques par réflexion
+                resetAllStaticFieldsByReflection();
+                
+                // 3. Reset les caches par réflexion
+                clearAllCachesByReflection(context);
+                
+                // 4. Reset spécifique pour Spark
+                resetSparkContext();
+                
+                // 5. Forcer le garbage collection
+                System.gc();
+            }
+            
+            logger.info("Reset complet effectué en {}ms", System.currentTimeMillis() - startTime);
+            
+        } catch (Exception e) {
+            logger.error("Erreur lors du reset complet", e);
+        }
+    }
+    
+    private ApplicationContext getApplicationContext() {
+        try {
+            return SpringApplication.getApplicationContext();
+        } catch (Exception e) {
+            logger.warn("Impossible de récupérer l'ApplicationContext", e);
+            return null;
+        }
+    }
+    
+    private void resetAllBeansByReflection(ApplicationContext context) {
+        String[] beanNames = context.getBeanDefinitionNames();
+        
+        for (String beanName : beanNames) {
+            try {
+                Object bean = context.getBean(beanName);
+                if (bean != null && !isSpringInternalBean(bean)) {
+                    resetBeanCompletely(bean);
+                }
+            } catch (Exception e) {
+                logger.debug("Impossible de reset le bean: {}", beanName, e);
+            }
+        }
+    }
+    
+    private boolean isSpringInternalBean(Object bean) {
+        String className = bean.getClass().getName();
+        return className.startsWith("org.springframework.") ||
+               className.startsWith("org.apache.catalina.") ||
+               className.startsWith("org.eclipse.jetty.") ||
+               className.contains("$$SpringCGLIB$$") ||
+               className.contains("$$EnhancerBySpringCGLIB$$");
+    }
+    
+    private void resetBeanCompletely(Object bean) {
+        Class<?> clazz = bean.getClass();
+        
+        // Utiliser le cache des champs
+        List<Field> fields = getFieldsFromCache(clazz);
+        
+        for (Field field : fields) {
+            if (shouldResetField(field)) {
+                resetFieldValue(field, bean);
+            }
+        }
+    }
+    
+    private List<Field> getFieldsFromCache(Class<?> clazz) {
+        return classFieldsCache.computeIfAbsent(clazz, this::getAllFields);
+    }
+    
+    private List<Field> getAllFields(Class<?> clazz) {
+        List<Field> allFields = new ArrayList<>();
+        Class<?> currentClass = clazz;
+        
+        while (currentClass != null && currentClass != Object.class) {
+            Field[] fields = currentClass.getDeclaredFields();
+            allFields.addAll(Arrays.asList(fields));
+            currentClass = currentClass.getSuperclass();
+        }
+        
+        return allFields;
+    }
+    
+    private boolean shouldResetField(Field field) {
+        int modifiers = field.getModifiers();
+        String fieldName = field.getName();
+        
+        return !Modifier.isStatic(modifiers) && 
+               !Modifier.isFinal(modifiers) &&
+               !fieldName.startsWith("$") &&
+               !fieldName.equals("logger") &&
+               !fieldName.equals("log") &&
+               !isSpringManagedField(field);
+    }
+    
+    private boolean isSpringManagedField(Field field) {
+        return field.isAnnotationPresent(Autowired.class) ||
+               field.isAnnotationPresent(Value.class) ||
+               field.isAnnotationPresent(Resource.class) ||
+               field.isAnnotationPresent(Inject.class);
+    }
+    
+    private void resetFieldValue(Field field, Object bean) {
+        try {
+            field.setAccessible(true);
+            Object value = field.get(bean);
+            
+            if (value == null) {
+                return;
+            }
+            
+            Class<?> fieldType = field.getType();
+            
+            // Reset des collections
+            if (value instanceof Collection) {
+                ((Collection<?>) value).clear();
+            }
+            // Reset des maps
+            else if (value instanceof Map) {
+                ((Map<?, ?>) value).clear();
+            }
+            // Reset des arrays
+            else if (fieldType.isArray()) {
+                resetArray(field, bean, fieldType);
+            }
+            // Reset des types atomiques
+            else if (value instanceof AtomicInteger) {
+                ((AtomicInteger) value).set(0);
+            }
+            else if (value instanceof AtomicLong) {
+                ((AtomicLong) value).set(0L);
+            }
+            else if (value instanceof AtomicBoolean) {
+                ((AtomicBoolean) value).set(false);
+            }
+            else if (value instanceof AtomicReference) {
+                ((AtomicReference<?>) value).set(null);
+            }
+            // Reset des types primitifs
+            else if (fieldType.isPrimitive()) {
+                setDefaultPrimitiveValue(field, bean, fieldType);
+            }
+            // Reset des wrappers
+            else if (isWrapperType(fieldType)) {
+                field.set(bean, null);
+            }
+            // Reset String
+            else if (fieldType == String.class) {
+                field.set(bean, null);
+            }
+            // Reset des StringBuilder/StringBuffer
+            else if (value instanceof StringBuilder) {
+                ((StringBuilder) value).setLength(0);
+            }
+            else if (value instanceof StringBuffer) {
+                ((StringBuffer) value).setLength(0);
+            }
+            // Reset des Date/Time
+            else if (value instanceof Date) {
+                field.set(bean, null);
+            }
+            else if (value instanceof LocalDateTime || value instanceof LocalDate || value instanceof LocalTime) {
+                field.set(bean, null);
+            }
+            // Reset des Optional
+            else if (value instanceof Optional) {
+                field.set(bean, Optional.empty());
+            }
+            // Reset des CompletableFuture
+            else if (value instanceof CompletableFuture) {
+                ((CompletableFuture<?>) value).cancel(true);
+                field.set(bean, null);
+            }
+            // Reset des objets custom (remettre à null)
+            else if (isCustomObject(fieldType)) {
+                field.set(bean, null);
+            }
+            
+        } catch (Exception e) {
+            logger.debug("Erreur lors du reset du field {}: {}", field.getName(), e.getMessage());
+        }
+    }
+    
+    private void resetArray(Field field, Object bean, Class<?> fieldType) throws IllegalAccessException {
+        Class<?> componentType = fieldType.getComponentType();
+        
+        if (componentType.isPrimitive()) {
+            // Créer un nouveau tableau vide
+            Object newArray = Array.newInstance(componentType, 0);
+            field.set(bean, newArray);
+        } else {
+            // Tableau d'objets - remettre à null
+            field.set(bean, null);
+        }
+    }
+    
+    private void setDefaultPrimitiveValue(Field field, Object bean, Class<?> type) throws IllegalAccessException {
+        if (type == int.class) {
+            field.setInt(bean, 0);
+        } else if (type == long.class) {
+            field.setLong(bean, 0L);
+        } else if (type == boolean.class) {
+            field.setBoolean(bean, false);
+        } else if (type == double.class) {
+            field.setDouble(bean, 0.0);
+        } else if (type == float.class) {
+            field.setFloat(bean, 0.0f);
+        } else if (type == short.class) {
+            field.setShort(bean, (short) 0);
+        } else if (type == byte.class) {
+            field.setByte(bean, (byte) 0);
+        } else if (type == char.class) {
+            field.setChar(bean, '\0');
+        }
+    }
+    
+    private boolean isWrapperType(Class<?> type) {
+        return type == Integer.class || type == Long.class || type == Boolean.class ||
+               type == Double.class || type == Float.class || type == Short.class ||
+               type == Byte.class || type == Character.class;
+    }
+    
+    private boolean isCustomObject(Class<?> type) {
+        return !type.isPrimitive() && 
+               !isWrapperType(type) && 
+               type != String.class && 
+               !type.getName().startsWith("java.") && 
+               !type.getName().startsWith("javax.") &&
+               !type.getName().startsWith("org.springframework.") &&
+               !type.getName().startsWith("org.apache.spark.");
+    }
+    
+    private void resetAllStaticFieldsByReflection() {
+        // Liste de vos packages à scanner
+        String[] packagesToScan = {
+            "com.yourpackage",
+            "com.yourcompany" 
+        };
+        
+        for (String packageName : packagesToScan) {
+            resetStaticFieldsInPackage(packageName);
+        }
+    }
+    
+    private void resetStaticFieldsInPackage(String packageName) {
+        try {
+            // Scanner avec ClassGraph pour de meilleures performances
+            scanPackageForStaticFields(packageName);
+        } catch (Exception e) {
+            logger.debug("Erreur lors du scan du package {}: {}", packageName, e.getMessage());
+        }
+    }
+    
+    private void scanPackageForStaticFields(String packageName) {
+        try {
+            ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+            String path = packageName.replace('.', '/');
+            
+            // Utiliser les ressources du classpath
+            Enumeration<URL> resources = classLoader.getResources(path);
+            
+            while (resources.hasMoreElements()) {
+                URL resource = resources.nextElement();
+                File directory = new File(resource.getFile());
+                
+                if (directory.exists() && directory.isDirectory()) {
+                    scanDirectory(directory, packageName);
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Erreur lors du scan du package {}: {}", packageName, e.getMessage());
+        }
+    }
+    
+    private void scanDirectory(File directory, String packageName) {
+        File[] files = directory.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    scanDirectory(file, packageName + "." + file.getName());
+                } else if (file.getName().endsWith(".class")) {
+                    String className = packageName + "." + file.getName().substring(0, file.getName().length() - 6);
+                    resetStaticFieldsInClass(className);
+                }
+            }
+        }
+    }
+    
+    private void resetStaticFieldsInClass(String className) {
+        try {
+            Class<?> clazz = Class.forName(className);
+            
+            // Éviter de rescanner les classes déjà traitées
+            if (!scannedClasses.contains(clazz)) {
+                scannedClasses.add(clazz);
+                
+                Field[] fields = clazz.getDeclaredFields();
+                
+                for (Field field : fields) {
+                    if (Modifier.isStatic(field.getModifiers()) && 
+                        !Modifier.isFinal(field.getModifiers()) &&
+                        !field.getName().startsWith("$") &&
+                        !field.getName().equals("logger") &&
+                        !field.getName().equals("log")) {
+                        
+                        resetStaticField(field);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Impossible de reset les champs statiques de {}: {}", className, e.getMessage());
+        }
+    }
+    
+    private void resetStaticField(Field field) {
+        try {
+            field.setAccessible(true);
+            Object value = field.get(null);
+            
+            if (value == null) {
+                return;
+            }
+            
+            Class<?> fieldType = field.getType();
+            
+            // Reset des collections statiques
+            if (value instanceof Collection) {
+                ((Collection<?>) value).clear();
+            }
+            // Reset des maps statiques
+            else if (value instanceof Map) {
+                ((Map<?, ?>) value).clear();
+            }
+            // Reset des types atomiques statiques
+            else if (value instanceof AtomicInteger) {
+                ((AtomicInteger) value).set(0);
+            }
+            else if (value instanceof AtomicLong) {
+                ((AtomicLong) value).set(0L);
+            }
+            else if (value instanceof AtomicBoolean) {
+                ((AtomicBoolean) value).set(false);
+            }
+            else if (value instanceof AtomicReference) {
+                ((AtomicReference<?>) value).set(null);
+            }
+            // Reset des primitifs statiques
+            else if (fieldType.isPrimitive()) {
+                setDefaultStaticPrimitiveValue(field, fieldType);
+            }
+            // Reset des objets statiques
+            else if (isCustomObject(fieldType)) {
+                field.set(null, null);
+            }
+            
+        } catch (Exception e) {
+            logger.debug("Erreur lors du reset du champ statique {}: {}", field.getName(), e.getMessage());
+        }
+    }
+    
+    private void setDefaultStaticPrimitiveValue(Field field, Class<?> type) throws IllegalAccessException {
+        if (type == int.class) {
+            field.setInt(null, 0);
+        } else if (type == long.class) {
+            field.setLong(null, 0L);
+        } else if (type == boolean.class) {
+            field.setBoolean(null, false);
+        } else if (type == double.class) {
+            field.setDouble(null, 0.0);
+        } else if (type == float.class) {
+            field.setFloat(null, 0.0f);
+        } else if (type == short.class) {
+            field.setShort(null, (short) 0);
+        } else if (type == byte.class) {
+            field.setByte(null, (byte) 0);
+        } else if (type == char.class) {
+            field.setChar(null, '\0');
+        }
+    }
+    
+    private void clearAllCachesByReflection(ApplicationContext context) {
+        String[] beanNames = context.getBeanDefinitionNames();
+        
+        for (String beanName : beanNames) {
+            try {
+                Object bean = context.getBean(beanName);
+                if (bean != null) {
+                    clearBeanCaches(bean);
+                }
+            } catch (Exception e) {
+                logger.debug("Impossible de clear les caches du bean {}: {}", beanName, e.getMessage());
+            }
+        }
+    }
+    
+    private void clearBeanCaches(Object bean) {
+        Class<?> clazz = bean.getClass();
+        
+        Method[] methods = clazz.getDeclaredMethods();
+        
+        for (Method method : methods) {
+            String methodName = method.getName().toLowerCase();
+            
+            // Méthodes sans paramètres qui semblent être des méthodes de clearing
+            if (method.getParameterCount() == 0 && 
+                (methodName.contains("clear") || 
+                 methodName.contains("reset") || 
+                 methodName.contains("evict") ||
+                 methodName.contains("flush") ||
+                 methodName.contains("invalidate"))) {
+                
+                try {
+                    method.setAccessible(true);
+                    method.invoke(bean);
+                    logger.debug("Méthode {} appelée sur {}", methodName, bean.getClass().getSimpleName());
+                } catch (Exception e) {
+                    logger.debug("Erreur lors de l'appel de {} sur {}: {}", methodName, bean.getClass().getSimpleName(), e.getMessage());
+                }
+            }
+        }
+    }
+    
+    private void resetSparkContext() {
+        try {
+            // Reset spécifique pour Spark
+            Class<?> sparkContextClass = Class.forName("org.apache.spark.SparkContext");
+            Method getOrCreateMethod = sparkContextClass.getMethod("getOrCreate");
+            Object sparkContext = getOrCreateMethod.invoke(null);
+            
+            if (sparkContext != null) {
+                Method stopMethod = sparkContextClass.getMethod("stop");
+                stopMethod.invoke(sparkContext);
+                logger.debug("SparkContext arrêté");
+            }
+            
+            // Reset SparkSession
+            Class<?> sparkSessionClass = Class.forName("org.apache.spark.sql.SparkSession");
+            Method getActiveSessionMethod = sparkSessionClass.getMethod("getActiveSession");
+            Object activeSession = getActiveSessionMethod.invoke(null);
+            
+            if (activeSession != null) {
+                Method stopMethod = sparkSessionClass.getMethod("stop");
+                stopMethod.invoke(activeSession);
+                logger.debug("SparkSession arrêtée");
+            }
+            
+            // Clear les propriétés système Spark
+            System.clearProperty("spark.driver.port");
+            System.clearProperty("spark.hostPort");
+            System.clearProperty("spark.master");
+            
+        } catch (Exception e) {
+            logger.debug("Erreur lors du reset de Spark: {}", e.getMessage());
+        }
+    }
+    
+    // Méthode pour ajouter des exclusions personnalisées
+    public void addFieldExclusion(String fieldName) {
+        // Logique pour exclure certains champs du reset
+    }
+    
+    // Méthode pour ajouter des classes à ignorer
+    public void addClassExclusion(String className) {
+        // Logique pour exclure certaines classes du reset
+    }
+}
