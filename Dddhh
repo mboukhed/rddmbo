@@ -1,0 +1,74 @@
+package com.example.test.steps;
+
+import org.junit.Assert;
+import io.cucumber.java.en.*;
+import io.cucumber.java.Before;
+import io.cucumber.java.After;
+import io.cucumber.java.Scenario;
+
+/**
+ * Step definitions for data processing tests.
+ */
+public class CucumberSteps extends BaseTest {
+
+    public CucumberSteps() throws Exception {
+        super();
+    }
+
+    private Scenario scenario;
+
+    @Before
+    public void before(Scenario scenario) {
+        this.scenario = scenario;
+    }
+
+    @Given("^Charger la table (.*)$")
+    public void charger_table(String tableName_fileSqlInput_fileCsvInput) throws Throwable {
+        String[] parm = tableName_fileSqlInput_fileCsvInput.replace(" ", "").split("\\|");
+
+        Class<?> className = getEntityName(parm[0]);
+
+        if (className != null) {
+            initEntity(className, parm[2], parm[1]);
+            scenario.write("<a href=\"" + tableCharged.get(2) + "\"><p><font color=\"green\">** " 
+                + tableCharged.get(0).toUpperCase() + " ** " + tableCharged.get(1) + "</font></p></a>");
+        } else {
+            System.out.println("[TEST : table " + parm[0] + " déjà chargée]");
+        }
+    }
+
+    @When("^Exporter les objets métiers (.*)$")
+    public void execute_export(String objectName_frequence) throws Throwable {
+        String[] parm = objectName_frequence.replace(" ", "").split("\\|");
+
+        ExportLauncher.getInstance().processAndExport(session, parm[1], parm[0]);
+        resetConfig();
+    }
+
+    @Then("^Comparer le fichier exporté avec (.*)$")
+    public void compar_result(String reffileCompar_objectName_frequence) throws Throwable {
+        String[] parm = reffileCompar_objectName_frequence.replace(" ", "").split("\\|");
+
+        boolean isok = isOutputIsEquals(parm[0], parm[2], parm[1]);
+
+        scenario.write("<a href=\"" + fileGenerated.get(0) + "\"><p><font color=\"green\"><b>** fichier référence : " 
+            + fileGenerated.get(0) + "</b></font></p></a>");
+
+        if (!isok) {
+            scenario.write("<a href=\"" + fileGenerated.get(2) + "\"><b><font color=\"red\">** resultat comparaison : " 
+                + fileGenerated.get(2) + "</font></b></a>");
+            scenario.write("<a href=\"" + fileGenerated.get(1) + "\"><b><font color=\"red\">** fichier exporté : " 
+                + fileGenerated.get(1) + "</font></b></a>");
+        } else {
+            scenario.write("<a href=\"" + fileGenerated.get(1) + "\"><p><font color=\"green\"><b>** fichier exporté : " 
+                + fileGenerated.get(1) + "</b></font></p></a>");
+        }
+
+        Assert.assertEquals("Fichier exporté non identique au fichier de référence", true, isok);
+    }
+
+    @After
+    public void after() throws Exception {
+        openCucumberUI(true);
+    }
+}
