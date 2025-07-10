@@ -1,0 +1,146 @@
+Parfait ! Avec JUnit 5 et Cucumber, voici comment faire :1. Dépendances Maven nécessaires<dependencies>
+    <dependency>
+        <groupId>io.cucumber</groupId>
+        <artifactId>cucumber-junit-platform-engine</artifactId>
+        <version>7.14.0</version>
+        <scope>test</scope>
+    </dependency>
+    <dependency>
+        <groupId>org.junit.platform</groupId>
+        <artifactId>junit-platform-suite</artifactId>
+        <version>1.9.3</version>
+        <scope>test</scope>
+    </dependency>
+    <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>5.9.3</version>
+        <scope>test</scope>
+    </dependency>
+</dependencies>2. Runners JUnit 5 avec @SuiteScenario1Runner.java :import org.junit.platform.suite.api.ConfigurationParameter;
+import org.junit.platform.suite.api.IncludeEngines;
+import org.junit.platform.suite.api.SelectClasspathResource;
+import org.junit.platform.suite.api.Suite;
+
+@Suite
+@IncludeEngines("cucumber")
+@SelectClasspathResource("features")
+@ConfigurationParameter(key = "cucumber.filter.tags", value = "@scenario1")
+@ConfigurationParameter(key = "cucumber.glue", value = "com.example.stepdef")
+@ConfigurationParameter(key = "cucumber.plugin", value = "pretty,html:target/cucumber-reports/scenario1")
+public class Scenario1Runner {
+}Scenario2Runner.java :@Suite
+@IncludeEngines("cucumber")
+@SelectClasspathResource("features")
+@ConfigurationParameter(key = "cucumber.filter.tags", value = "@scenario2")
+@ConfigurationParameter(key = "cucumber.glue", value = "com.example.stepdef")
+@ConfigurationParameter(key = "cucumber.plugin", value = "pretty,html:target/cucumber-reports/scenario2")
+public class Scenario2Runner {
+}3. Exécution séquentielle avec JUnit 5import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.platform.launcher.Launcher;
+import org.junit.platform.launcher.LauncherDiscoveryRequest;
+import org.junit.platform.launcher.core.LauncherFactory;
+import org.junit.platform.launcher.listeners.SummaryGeneratingListener;
+
+import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClass;
+import static org.junit.platform.launcher.core.LauncherDiscoveryRequestBuilder.request;
+
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+public class CucumberSequentialRunner {
+    
+    @Test
+    @Order(1)
+    void runScenario1() {
+        System.out.println("=== Exécution Scenario 1 ===");
+        executeRunner(Scenario1Runner.class, "Scenario 1");
+    }
+    
+    @Test
+    @Order(2)
+    void runScenario2() {
+        System.out.println("=== Exécution Scenario 2 ===");
+        executeRunner(Scenario2Runner.class, "Scenario 2");
+    }
+    
+    private void executeRunner(Class<?> runnerClass, String scenarioName) {
+        Launcher launcher = LauncherFactory.create();
+        SummaryGeneratingListener listener = new SummaryGeneratingListener();
+        
+        LauncherDiscoveryRequest request = request()
+            .selectors(selectClass(runnerClass))
+            .build();
+        
+        launcher.registerTestExecutionListeners(listener);
+        launcher.execute(request);
+        
+        // Affichage des résultats
+        var summary = listener.getSummary();
+        System.out.println(scenarioName + " - Tests trouvés: " + summary.getTestsFoundCount());
+        System.out.println(scenarioName + " - Tests réussis: " + summary.getTestsSucceededCount());
+        System.out.println(scenarioName + " - Tests échoués: " + summary.getTestsFailedCount());
+        System.out.println("=== Fin " + scenarioName + " ===\n");
+    }
+}4. Approche plus simple avec @Nestedimport org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.MethodOrderer;
+
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+public class CucumberSequentialSuite {
+    
+    @Nested
+    @Order(1)
+    class Scenario1Test extends Scenario1Runner {
+        @Test
+        void placeholder() {
+            // Ce test ne sera pas exécuté car Cucumber prend le contrôle
+        }
+    }
+    
+    @Nested
+    @Order(2)
+    class Scenario2Test extends Scenario2Runner {
+        @Test
+        void placeholder() {
+            // Ce test ne sera pas exécuté car Cucumber prend le contrôle
+        }
+    }
+}5. Avec une classe principalepublic class CucumberSequentialMain {
+    public static void main(String[] args) {
+        System.out.println("=== Lancement séquentiel Cucumber avec JUnit 5 ===");
+        
+        // Scenario 1
+        runCucumberSuite(Scenario1Runner.class, "Scenario 1");
+        
+        // Scenario 2  
+        runCucumberSuite(Scenario2Runner.class, "Scenario 2");
+        
+        System.out.println("=== Tous les scénarios terminés ===");
+    }
+    
+    private static void runCucumberSuite(Class<?> suiteClass, String suiteName) {
+        System.out.println("\n--- Début " + suiteName + " ---");
+        
+        Launcher launcher = LauncherFactory.create();
+        SummaryGeneratingListener listener = new SummaryGeneratingListener();
+        
+        LauncherDiscoveryRequest request = request()
+            .selectors(selectClass(suiteClass))
+            .build();
+        
+        launcher.registerTestExecutionListeners(listener);
+        launcher.execute(request);
+        
+        var summary = listener.getSummary();
+        boolean success = summary.getTestsFailedCount() == 0;
+        
+        System.out.println(suiteName + " terminé - " + (success ? "SUCCESS" : "FAILURE"));
+        System.out.println("Tests: " + summary.getTestsSucceededCount() + " réussis, " + 
+                          summary.getTestsFailedCount() + " échoués");
+        System.out.println("--- Fin " + suiteName + " ---");
+    }
+}Quelle approche préfères-tu avec JUnit 5 ?
