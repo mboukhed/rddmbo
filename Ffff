@@ -1,0 +1,4 @@
+ClassLoader sys = ClassLoader.getSystemClassLoader();
+URLClassLoader parent = (sys instanceof URLClassLoader) ? (URLClassLoader) sys
+                                                        : new URLClassLoader(new java.net.URL[]{}, null);
+Thread.currentThread().setContextClassLoader(new org.apache.spark.util.MutableURLClassLoader(new java.net.URL[]{}, parent));
