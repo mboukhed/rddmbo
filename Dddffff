@@ -1,0 +1,53 @@
+<dependencyManagement>
+  <dependencies>
+    <!-- Force la bonne version partout -->
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro</artifactId>
+      <version>1.10.2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro-mapred</artifactId>
+      <version>1.10.2</version>
+      <classifier>hadoop3</classifier>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+
+<dependencies>
+  <!-- Spark Avro -->
+  <dependency>
+    <groupId>org.apache.spark</groupId>
+    <artifactId>spark-avro_2.12</artifactId>
+    <version>3.3.3</version>
+  </dependency>
+
+  <!-- Hive (si nécessaire) en excluant Avro -->
+  <dependency>
+    <groupId>org.apache.hive</groupId>
+    <artifactId>hive-metastore</artifactId>
+    <version>3.1.3</version>
+    <exclusions>
+      <exclusion><groupId>org.apache.avro</groupId><artifactId>avro</artifactId></exclusion>
+      <exclusion><groupId>org.apache.avro</groupId><artifactId>avro-mapred</artifactId></exclusion>
+    </exclusions>
+  </dependency>
+  <dependency>
+    <groupId>org.apache.hive</groupId>
+    <artifactId>hive-exec</artifactId>
+    <version>3.1.3</version>
+    <exclusions>
+      <exclusion><groupId>org.apache.avro</groupId><artifactId>avro</artifactId></exclusion>
+      <exclusion><groupId>org.apache.avro</groupId><artifactId>avro-mapred</artifactId></exclusion>
+    </exclusions>
+  </dependency>
+
+  <!-- Ajoute explicitement avro-mapred hadoop3 -->
+  <dependency>
+    <groupId>org.apache.avro</groupId>
+    <artifactId>avro-mapred</artifactId>
+    <version>1.10.2</version>
+    <classifier>hadoop3</classifier>
+  </dependency>
+</dependencies>
