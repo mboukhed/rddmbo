@@ -1,0 +1,4 @@
+System.out.println("FsInput from: " +
+  org.apache.avro.mapred.FsInput.class.getProtectionDomain().getCodeSource().getLocation());
+System.out.println("GenericDatumReader from: " +
+  org.apache.avro.generic.GenericDatumReader.class.getProtectionDomain().getCodeSource().getLocation());
