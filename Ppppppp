@@ -1,0 +1,40 @@
+<assembly xmlns="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.3"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.3
+                              https://maven.apache.org/xsd/assembly-1.1.3.xsd">
+  <id>fat</id>
+  <formats>
+    <format>jar</format>
+  </formats>
+  <includeBaseDirectory>false</includeBaseDirectory>
+
+  <!-- Jar de l'app -->
+  <moduleSets>
+    <moduleSet>
+      <useAllReactorProjects>false</useAllReactorProjects>
+      <binaries>
+        <outputDirectory>/</outputDirectory>
+        <unpack>false</unpack>
+        <includeDependencies>false</includeDependencies>
+      </binaries>
+    </moduleSet>
+  </moduleSets>
+
+  <!-- Dépendances (runtime = compile + runtime ; exclude provided/test) -->
+  <dependencySets>
+    <dependencySet>
+      <outputDirectory>/</outputDirectory>
+      <scope>runtime</scope>
+      <useProjectArtifact>false</useProjectArtifact>
+      <useTransitive>true</useTransitive>
+      <unpack>true</unpack>
+      <unpackOptions>
+        <excludes>
+          <exclude>META-INF/*.SF</exclude>
+          <exclude>META-INF/*.DSA</exclude>
+          <exclude>META-INF/*.RSA</exclude>
+        </excludes>
+      </unpackOptions>
+    </dependencySet>
+  </dependencySets>
+</assembly>
