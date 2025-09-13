@@ -1,0 +1,274 @@
+Parfait. Voilà une stratégie propre multi-modules qui couvre exactement ton besoin :
+
+module-app (= ton module1 exécutable)
+
+produit 2 artefacts :
+
+1. JAR normal (pour JFrog Maven)
+
+
+2. fat-jar pour Spark (non déployé dans JFrog Maven)
+
+
+
+
+module-core et module-model (librairies sans main)
+
+produisent JAR normaux (poussés dans JFrog Maven)
+
+
+
+
+---
+
+1) Parent pom.xml
+
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>project-parent</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+
+  <modules>
+    <module>module-core</module>
+    <module>module-model</module>
+    <module>module-app</module>
+  </modules>
+
+  <!-- JFrog (repo Maven) -->
+  <distributionManagement>
+    <repository>
+      <id>jfrog-releases</id>
+      <url>https://artifactory.example.com/artifactory/maven-releases</url>
+    </repository>
+    <snapshotRepository>
+      <id>jfrog-snapshots</id>
+      <url>https://artifactory.example.com/artifactory/maven-snapshots</url>
+    </snapshotRepository>
+  </distributionManagement>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- versions centralisées -->
+      <dependency>
+        <groupId>org.springframework</groupId>
+        <artifactId>spring-context</artifactId>
+        <version>${spring.version}</version>
+      </dependency>
+      <!-- … -->
+    </dependencies>
+  </dependencyManagement>
+</project>
+
+
+---
+
+2) module-core/pom.xml (lib)
+
+<project>
+  <parent>…</parent>
+  <artifactId>module-core</artifactId>
+  <dependencies>
+    <!-- deps de lib -->
+  </dependencies>
+</project>
+
+3) module-model/pom.xml (lib)
+
+<project>
+  <parent>…</parent>
+  <artifactId>module-model</artifactId>
+  <dependencies>
+    <!-- deps de lib -->
+  </dependencies>
+</project>
+
+
+---
+
+4) module-app/pom.xml (exécutable + fat-jar)
+
+<project>
+  <parent>…</parent>
+  <artifactId>module-app</artifactId>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>module-core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>module-model</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!-- libs à EMBARQUER dans le fat-jar -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+
+    <!-- libs fournies par le cluster → EXCLUES du fat-jar -->
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_2.12</artifactId>
+      <version>${spark.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client</artifactId>
+      <version>${hadoop.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <version>${scala.version}</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Jar normal avec Main-Class -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.1</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>com.example.app.Launcher</mainClass>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+
+      <!-- Fat-jar via Assembly (N’EST PAS attaché → pas poussé dans JFrog Maven) -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <version>3.3.0</version>
+        <executions>
+          <execution>
+            <id>fat-jar</id>
+            <phase>package</phase>
+            <goals><goal>single</goal></goals>
+            <configuration>
+              <descriptors>
+                <descriptor>src/assembly/assembly.xml</descriptor>
+              </descriptors>
+              <finalName>module-app</finalName>
+              <appendAssemblyId>false</appendAssemblyId>
+              <attach>false</attach> <!-- ← clé : ne pas déployer le fat-jar -->
+              <archive>
+                <manifest>
+                  <mainClass>com.example.app.Launcher</mainClass>
+                </manifest>
+              </archive>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+
+module-app/src/assembly/assembly.xml
+
+<assembly xmlns="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.3"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.3
+                              https://maven.apache.org/xsd/assembly-1.1.3.xsd">
+  <id>fat</id>
+  <formats><format>jar</format></formats>
+  <includeBaseDirectory>false</includeBaseDirectory>
+
+  <!-- L’artifact du module (déjà compilé) -->
+  <moduleSets>
+    <moduleSet>
+      <binaries>
+        <outputDirectory>/</outputDirectory>
+        <includeDependencies>false</includeDependencies>
+      </binaries>
+    </moduleSet>
+  </moduleSets>
+
+  <!-- TOUTES les deps runtime (compile+runtime), exclut automatiquement provided/test -->
+  <dependencySets>
+    <dependencySet>
+      <outputDirectory>/</outputDirectory>
+      <scope>runtime</scope>
+      <useTransitive>true</useTransitive>
+      <useProjectArtifact>false</useProjectArtifact>
+      <unpack>true</unpack>
+      <unpackOptions>
+        <excludes>
+          <exclude>META-INF/*.SF</exclude>
+          <exclude>META-INF/*.DSA</exclude>
+          <exclude>META-INF/*.RSA</exclude>
+        </excludes>
+      </unpackOptions>
+    </dependencySet>
+  </dependencySets>
+</assembly>
+
+
+---
+
+5) Build & publication
+
+Build
+
+mvn -DskipTests clean package
+# Résultats :
+# - module-core/target/module-core-1.0.0.jar
+# - module-model/target/module-model-1.0.0.jar
+# - module-app/target/module-app-1.0.0.jar          (normal)
+# - module-app/target/module-app.jar                (fat-jar pour Spark)
+
+Push vers JFrog (Maven repo)
+
+mvn -DskipTests clean deploy
+# Déploie : module-core, module-model et module-app JAR "normaux" + POMs.
+# (le fat-jar n’est pas attaché → pas publié)
+
+Déploiement runtime (Spark)
+
+Utilise module-app/target/module-app.jar (le fat-jar) pour spark-submit.
+
+Tu peux l’uploader où tu veux (ADLS, S3, Artifactory generic, etc.).
+
+
+spark-submit \
+  --class com.example.app.Launcher \
+  --conf spark.driver.userClassPathFirst=true \
+  --conf spark.executor.userClassPathFirst=true \
+  abfs:/path/to/module-app.jar
+
+
+---
+
+6) Variante si tu veux aussi archiver le fat-jar dans JFrog (repo generic)
+
+Laisse attach=false (pour ne pas polluer le repo Maven).
+
+Ajoute un pas Jenkins/Curl pour uploader target/module-app.jar dans un repo generic (ou ADLS).
+
+
+
+---
+
+Si tu veux, je te fournis un Jenkinsfile minimal qui :
+
+1. mvn deploy (pousse les JAR normaux des 3 modules dans JFrog Maven)
+
+
+2. copie le fat-jar de module-app vers ADLS (ou vers un repo generic JFrog).
+
+
+
