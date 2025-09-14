@@ -1,0 +1,189 @@
+Parfait — on ne touche à rien dans le parent.
+Tout se fait dans tes modules (et éventuellement un petit “packaging” optionnel si tu veux regrouper les jars).
+
+Ce que tu obtiens
+
+module1 :
+
+module1-<ver>.jar (normal)
+
+module1-<ver>-fat.jar (exécutable, via shade)
+
+(optionnel) un dossier target/dist/ qui copie aussi les JARs de module2 et module3 — sans modifier le parent.
+
+
+module2, module3 : JARs normaux.
+
+
+
+---
+
+module1/pom.xml
+
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent-project</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <artifactId>module1</artifactId>
+  <packaging>jar</packaging>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>module2</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>module3</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Jar normal (avec Main-Class si tu veux pouvoir l'exécuter aussi) -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>com.example.app.Main</mainClass>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+
+      <!-- Fat jar : on garde le jar normal et on attache un classifier "fat" -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.3</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <shadedArtifactAttached>true</shadedArtifactAttached>
+              <shadedClassifierName>fat</shadedClassifierName>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.example.app.Main</mainClass>
+                </transformer>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+              <!-- mets en scope provided ce que tu ne veux pas embarquer -->
+              <!-- <minimizeJar>true</minimizeJar> -->
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- (Optionnel) Copier les 3 JARs + le fat dans target/dist SANS toucher le parent -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.6.1</version>
+        <executions>
+          <!-- module1 - fat -->
+          <execution>
+            <id>copy-module1-fat</id>
+            <phase>package</phase>
+            <goals><goal>copy</goal></goals>
+            <configuration>
+              <artifact>com.example:module1:jar:fat:${project.version}</artifact>
+              <outputDirectory>${project.build.directory}/dist</outputDirectory>
+            </configuration>
+          </execution>
+          <!-- module1 - normal -->
+          <execution>
+            <id>copy-module1-jar</id>
+            <phase>package</phase>
+            <goals><goal>copy</goal></goals>
+            <configuration>
+              <artifact>com.example:module1:${project.version}</artifact>
+              <outputDirectory>${project.build.directory}/dist</outputDirectory>
+            </configuration>
+          </execution>
+          <!-- module2 -->
+          <execution>
+            <id>copy-module2</id>
+            <phase>package</phase>
+            <goals><goal>copy</goal></goals>
+            <configuration>
+              <artifact>com.example:module2:${project.version}</artifact>
+              <outputDirectory>${project.build.directory}/dist</outputDirectory>
+            </configuration>
+          </execution>
+          <!-- module3 -->
+          <execution>
+            <id>copy-module3</id>
+            <phase>package</phase>
+            <goals><goal>copy</goal></goals>
+            <configuration>
+              <artifact>com.example:module3:${project.version}</artifact>
+              <outputDirectory>${project.build.directory}/dist</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+
+module2/pom.xml et module3/pom.xml
+
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent-project</artifactId>
+    <version>1.0.0</version>
+  </parent>
+  <artifactId>module2</artifactId> <!-- ou module3 -->
+  <packaging>jar</packaging>
+</project>
+
+
+---
+
+Build & résultats
+
+Compile sans modifier le parent :
+
+# depuis la racine du projet parent existant
+mvn -pl module1,module2,module3 -am clean package
+
+Tu obtiens :
+
+module1/target/module1-1.0.0.jar
+
+module1/target/module1-1.0.0-fat.jar
+
+module2/target/module2-1.0.0.jar
+
+module3/target/module3-1.0.0.jar
+
+(optionnel) module1/target/dist/ contenant les 4 fichiers ci-dessus, pratique pour push/copie.
+
+
+
+---
+
+Notes rapides
+
+Mets en provided dans module1 les libs que tu ne veux pas dans le fat jar (ex: Spark, drivers, etc.).
+
+Le dependency:copy fonctionne parce que les trois modules sont dans le même reactor (même build).
+
+Si tu préfères un ZIP au lieu d’un dossier, on peut ajouter maven-assembly-plugin dans module1 pour zipper target/dist — toujours sans toucher le parent.
+
+
+Tu veux la variante “ZIP dist” prête à coller ?
+
