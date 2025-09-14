@@ -1,0 +1,108 @@
+Merci pour les nouvelles photos 👌
+Là on voit clairement le problème :
+
+Caused by: java.lang.ClassCastException:
+The chosen LogFactory implementation does not extend LogFactory.
+at org.apache.commons.logging.LogFactory.newFactory
+...
+Caused by: java.lang.UnsupportedOperationException:
+Operation not supported in jcl-over-slf4j. 
+See also http://www.slf4j.org/codes.html#unsupported_jcl
+
+
+---
+
+🔎 Ce qui se passe
+
+Tu as un conflit entre plusieurs implémentations de logging :
+
+commons-logging (Apache Commons Logging, utilisé par Spring, etc.)
+
+jcl-over-slf4j (bridge qui redirige Commons Logging vers SLF4J)
+
+slf4j-api + slf4j-log4j ou log4j-to-slf4j (selon ton setup Spark)
+
+
+⚠️ Mais dans ton fat jar, Maven Shade a embarqué à la fois commons-logging et jcl-over-slf4j.
+Du coup, quand Spring essaye d’utiliser Commons Logging → il tombe sur la version bridgée qui ne supporte pas certaines opérations, et tu as ce UnsupportedOperationException.
+
+
+---
+
+🛠 Solution
+
+👉 Tu dois exclure commons-logging des dépendances, et garder uniquement jcl-over-slf4j.
+
+Dans ton pom.xml (module1 par ex.)
+
+Ajoute :
+
+<dependencyManagement>
+  <dependencies>
+    <!-- Forcer Commons Logging à passer par SLF4J -->
+    <dependency>
+      <groupId>commons-logging</groupId>
+      <artifactId>commons-logging</artifactId>
+      <version>99-empty</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+
+Et dans tes vraies deps (Spring, etc.), tu exclus Commons Logging :
+
+<dependency>
+  <groupId>org.springframework</groupId>
+  <artifactId>spring-context</artifactId>
+  <version>5.3.30</version>
+  <exclusions>
+    <exclusion>
+      <groupId>commons-logging</groupId>
+      <artifactId>commons-logging</artifactId>
+    </exclusion>
+  </exclusions>
+</dependency>
+
+Puis tu ajoutes le pont :
+
+<dependency>
+  <groupId>org.slf4j</groupId>
+  <artifactId>jcl-over-slf4j</artifactId>
+  <version>2.0.13</version>
+</dependency>
+
+<dependency>
+  <groupId>org.slf4j</groupId>
+  <artifactId>slf4j-api</artifactId>
+  <version>2.0.13</version>
+</dependency>
+
+<!-- backend de log : log4j2 ou logback -->
+<dependency>
+  <groupId>ch.qos.logback</groupId>
+  <artifactId>logback-classic</artifactId>
+  <version>1.4.14</version>
+</dependency>
+
+
+---
+
+✅ Résultat attendu
+
+Plus de ClassCastException → tout Commons Logging est redirigé proprement vers SLF4J.
+
+Ton fat jar contient seulement :
+
+jcl-over-slf4j
+
+slf4j-api
+
+ton backend (logback-classic ou log4j2)
+
+
+
+
+---
+
+👉 Veux-tu que je t’écrive la config complète dependencyManagement + exclusions pour Spark + Spring (les plus courants), histoire que tu copies-colles et relances direct ?
+
