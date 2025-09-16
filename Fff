@@ -1,0 +1,15 @@
+sparkConf:
+  spark.serializer: org.apache.spark.serializer.KryoSerializer
+  spark.kryoserializer.buffer: 32m
+  spark.kryoserializer.buffer.max: 512m
+  spark.broadcast.compress: "true"
+  spark.io.compression.codec: lz4
+  spark.broadcast.blockSize: 4m              # en général 1–8 Mo est optimal
+  spark.sql.broadcastTimeout: "600"          # secondes (évite les timeouts sur gros clusters)
+  spark.sql.autoBroadcastJoinThreshold: 20m  # au-delà, Spark ne tente pas de broadcast
+  spark.sql.adaptive.enabled: "true"
+  spark.sql.adaptive.coalescePartitions.enabled: "true"
+  spark.sql.adaptive.skewJoin.enabled: "true"
+  spark.rpc.message.maxSize: 512
+  spark.driver.memoryOverhead: 1024          # augmente si ton broadcast est gros
+  spark.executor.memoryOverhead: 1024
