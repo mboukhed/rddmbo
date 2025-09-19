@@ -1,0 +1,115 @@
+Oui, ton screenshot montre que org/slf4j/** est carrément empaqueté dans une dépendance (ex: spark-excel_2.12-3.3.1_0.18.5.jar).
+Pas grave : on peut empêcher que ces classes se retrouvent dans ton fat-jar et ne garder qu’un seul binding côté cluster (Spark).
+
+Ce que je te conseille (rapide et sûr pour Spark K8s)
+
+1. Ne mets aucun binding SLF4J dans ton appli
+Pas de logback-classic, pas de slf4j-log4j12. Laisse Spark fournir le logging.
+Si tu as besoin de slf4j-api, mets-le en provided.
+
+<dependency>
+  <groupId>org.slf4j</groupId>
+  <artifactId>slf4j-api</artifactId>
+  <version>1.7.36</version>
+  <scope>provided</scope>
+</dependency>
+
+Et exclus tout binding qui viendrait en transitif (spring, etc.) :
+
+<dependency>
+  <groupId>org.springframework</groupId>
+  <artifactId>spring-core</artifactId>
+  <version>...</version>
+  <exclusions>
+    <exclusion>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+    </exclusion>
+    <exclusion>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-log4j12</artifactId>
+    </exclusion>
+  </exclusions>
+</dependency>
+
+
+2. Nettoie ton fat-jar avec Shade (même si une dépendance embarque org/slf4j/**) :
+
+<plugin>
+  <groupId>org.apache.maven.plugins</groupId>
+  <artifactId>maven-shade-plugin</artifactId>
+  <version>3.5.1</version>
+  <executions>
+    <execution>
+      <phase>package</phase>
+      <goals><goal>shade</goal></goals>
+      <configuration>
+        <createDependencyReducedPom>false</createDependencyReducedPom>
+        <filters>
+          <filter>
+            <artifact>*:*</artifact>
+            <excludes>
+              <exclude>META-INF/*.SF</exclude>
+              <exclude>META-INF/*.DSA</exclude>
+              <exclude>META-INF/*.RSA</exclude>
+              <!-- retire toute copie embarquée -->
+              <exclude>org/slf4j/**</exclude>
+              <exclude>ch/qos/logback/**</exclude>
+              <exclude>org/apache/log4j/**</exclude>
+              <exclude>org/apache/logging/log4j/**</exclude>
+            </excludes>
+          </filter>
+        </filters>
+      </configuration>
+    </execution>
+  </executions>
+</plugin>
+
+=> Même si spark-excel contient org/slf4j/LoggerFactory.class, il ne sera pas recopié dans ton fat-jar.
+
+
+3. Vérifications rapides
+
+Quelles libs tirent du logging ?
+
+mvn dependency:tree -Dincludes=org.slf4j:*,ch.qos.logback:*,org.apache.logging.log4j:* -DincludeScope=runtime
+
+Ton fat-jar est propre ?
+
+jar tf target/ton-fat.jar | grep -Ei 'slf4j|logback|log4j'
+
+(=> doit ne rien afficher, ou seulement des fichiers de conf.)
+
+
+
+4. (Optionnel) Fail build si doublons :
+
+<plugin>
+  <groupId>org.apache.maven.plugins</groupId>
+  <artifactId>maven-enforcer-plugin</artifactId>
+  <version>3.4.1</version>
+  <executions>
+    <execution>
+      <goals><goal>enforce</goal></goals>
+      <configuration>
+        <rules>
+          <banDuplicateClasses>
+            <ignoreWhenIdentical>true</ignoreWhenIdentical>
+            <findAllDuplicates>true</findAllDuplicates>
+            <includes>
+              <include>org/slf4j/**</include>
+              <include>ch/qos/logback/**</include>
+              <include>org/apache/log4j/**</include>
+              <include>org/apache/logging/log4j/**</include>
+            </includes>
+          </banDuplicateClasses>
+        </rules>
+      </configuration>
+    </execution>
+  </executions>
+</plugin>
+
+
+
+En bref : pas de binding dans ton JAR, exclure/filtrer org.slf4j/** avec Shade, et laisser Spark gérer le logging côté cluster.
+
