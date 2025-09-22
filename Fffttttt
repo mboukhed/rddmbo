@@ -1,0 +1,71 @@
+Oui, c’est normal : Surefire/Failsafe lance les tests dans une JVM forkée, et par défaut la sortie de cette JVM n’est pas affichée en console.
+Les logs/stacktraces partent dans des fichiers sous le workspace Jenkins.
+
+Où voir les logs tout de suite
+
+Unit tests (Surefire) : target/surefire-reports/
+
+*.txt, *.dumpstream, TEST-*.xml
+
+
+IT (Failsafe) : target/failsafe-reports/
+
+
+Faire apparaître les logs dans la console Jenkins
+
+Choisis l’une des deux approches.
+
+A) Garder la JVM séparée mais imprimer en console
+
+Dans ton pom.xml (Surefire 3.2.x conseillé) :
+
+<plugin>
+  <groupId>org.apache.maven.plugins</groupId>
+  <artifactId>maven-surefire-plugin</artifactId>
+  <version>3.2.5</version>
+  <configuration>
+    <useFile>false</useFile>                <!-- imprime stdout/stderr en console -->
+    <trimStackTrace>false</trimStackTrace>  <!-- stacktraces complets -->
+    <forkCount>1</forkCount>
+    <reuseForks>true</reuseForks>
+  </configuration>
+</plugin>
+
+Et/ou dans la commande Jenkins :
+
+mvn -B -q test -Dsurefire.useFile=false -DtrimStackTrace=false
+
+B) Désactiver le fork (tout dans la JVM Maven)
+
+Utile pour déboguer rapidement :
+
+<configuration>
+  <forkCount>0</forkCount>          <!-- pas de JVM séparée -->
+  <reuseForks>false</reuseForks>
+  <useFile>false</useFile>
+  <trimStackTrace>false</trimStackTrace>
+</configuration>
+
+Si tu utilises Cucumber
+
+Ajoute plugin = {"pretty","summary"} dans @CucumberOptions pour forcer l’impression des steps/erreurs.
+
+Vérifie que ta conf logs est visible dans la JVM forkée : place src/test/resources/log4j2-test.xml (ou logback-test.xml) et, si besoin, passe la propriété :
+
+-Dlog4j.configurationFile=classpath:log4j2-test.xml
+
+
+Astuces utiles
+
+Forcer quelques infos en début de test (profil, chemin, master Spark) :
+
+System.out.println("profile=" + System.getProperty("spring.profiles.active"));
+System.out.println("spark.master=" + spark.sparkContext().master());
+
+Activer le debug Surefire (remote attach possible) :
+
+mvn -Dsurefire.debug test
+
+
+Tu me colles ta ligne Maven Jenkins actuelle ? Je te la renvoie prête avec -Dsurefire.useFile=false, le profil, spark.master=local[2], etc.
+
