@@ -1,0 +1,81 @@
+Yes, c’est exactement ça : tu as tout exclu (log4j, slf4j, logback) → tes TU démarrent Spark sans binding SLF4J et ça casse au StaticLoggerBinder.
+
+Fais simple et sûr :
+
+Option rapide (débloquer tout de suite)
+
+Ajoute un seul binding côté test :
+
+<properties>
+  <slf4j.version>1.7.36</slf4j.version> <!-- aligne avec Spark 3.3/3.4/3.5 généralement -->
+</properties>
+
+<dependencies>
+  <!-- Fournit StaticLoggerBinder aux tests -->
+  <dependency>
+    <groupId>org.slf4j</groupId>
+    <artifactId>slf4j-simple</artifactId>
+    <version>${slf4j.version}</version>
+    <scope>test</scope>
+  </dependency>
+</dependencies>
+
+Laisse tes exclusions sur spring-core/spring-aop si tu veux, mais ne mets aucun autre binding (pas de logback-classic, pas de log4j-slf4j-impl) dans le scope test.
+
+Option “propre Spark/Log4j2”
+
+Si tu préfères Log4j2 (recommandé pour contrôler les logs) :
+
+<properties>
+  <log4j2.version>2.17.2</log4j2.version>
+</properties>
+
+<dependencies>
+  <dependency>
+    <groupId>org.apache.logging.log4j</groupId>
+    <artifactId>log4j-slf4j-impl</artifactId>
+    <version>${log4j2.version}</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.apache.logging.log4j</groupId>
+    <artifactId>log4j-core</artifactId>
+    <version>${log4j2.version}</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.apache.logging.log4j</groupId>
+    <artifactId>log4j-api</artifactId>
+    <version>${log4j2.version}</version>
+    <scope>test</scope>
+  </dependency>
+</dependencies>
+
+Et mets src/test/resources/log4j2-test.xml (minimal) :
+
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+  <Appenders>
+    <Console name="Console" target="SYSTEM_OUT">
+      <PatternLayout pattern="%d{HH:mm:ss} %-5p %c{1} - %m%n"/>
+    </Console>
+  </Appenders>
+  <Loggers>
+    <Logger name="org.apache.spark" level="WARN"/>
+    <Root level="INFO"><AppenderRef ref="Console"/></Root>
+  </Loggers>
+</Configuration>
+
+Points à vérifier
+
+Il doit rester un seul binding SLF4J sur le classpath de test.
+
+Garde tes exclusions “agressives” uniquement sur Spring si tu veux, évite d’exclure log4j/slf4j depuis les artefacts Spark.
+
+Si jamais tu vois encore une erreur, lance :
+mvn -q -DincludeScope=test dependency:tree | grep -E "slf4j|log4j|logback"
+et supprime les bindings en double.
+
+
+Tu me dis ta version de Spark et je te fournis les versions exactes à épingler si tu veux du 100% aligné.
+
