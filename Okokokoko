@@ -1,0 +1,96 @@
+Parfait pour le forkCount=1.
+Si tu ne vois toujours pas les logs, fais ces 3 réglages et tu auras tout en console (local + Jenkins) :
+
+1) Surefire : afficher la sortie console de la JVM forkée
+
+Dans le pom.xml :
+
+<plugin>
+  <groupId>org.apache.maven.plugins</groupId>
+  <artifactId>maven-surefire-plugin</artifactId>
+  <version>3.2.5</version>
+  <configuration>
+    <forkCount>1</forkCount>
+    <reuseForks>true</reuseForks>
+    <useFile>false</useFile>              <!-- stdout/stderr en console Jenkins -->
+    <trimStackTrace>false</trimStackTrace>
+    <systemPropertyVariables>
+      <file.encoding>UTF-8</file.encoding>
+      <!-- si Log4j2 -->
+      <log4j.configurationFile>classpath:log4j2-test.xml</log4j.configurationFile>
+      <log4j2.isThreadContextMapInheritable>true</log4j2.isThreadContextMapInheritable>
+      <!-- Spark -->
+      <spark.ui.showConsoleProgress>false</spark.ui.showConsoleProgress>
+    </systemPropertyVariables>
+  </configuration>
+</plugin>
+
+En ligne de commande tu peux forcer pareil :
+
+mvn test -Dsurefire.forkCount=1 -Dsurefire.useFile=false -DtrimStackTrace=false
+
+2) Mettre une conf logging de test sur le classpath
+
+Place src/test/resources/log4j2-test.xml (si tu es en Log4j2). Exemple minimal qui imprime tout en console :
+
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+  <Appenders>
+    <Console name="CONSOLE">
+      <PatternLayout pattern="[%d{HH:mm:ss.SSS}] %-5level [%t] %c{1} - %msg%n"/>
+    </Console>
+  </Appenders>
+
+  <Loggers>
+    <!-- ton code -->
+    <Logger name="com.ste" level="info" additivity="false">
+      <AppenderRef ref="CONSOLE"/>
+    </Logger>
+
+    <!-- Cucumber -->
+    <Logger name="io.cucumber" level="info" additivity="false">
+      <AppenderRef ref="CONSOLE"/>
+    </Logger>
+
+    <!-- Spark (réduire le bruit si besoin) -->
+    <Logger name="org.apache.spark" level="warn" additivity="false">
+      <AppenderRef ref="CONSOLE"/>
+    </Logger>
+
+    <Root level="info">
+      <AppenderRef ref="CONSOLE"/>
+    </Root>
+  </Loggers>
+</Configuration>
+
+(Si tu es en Logback, crée src/test/resources/logback-test.xml équivalent.)
+
+3) Cucumber : forcer l’impression des steps/erreurs
+
+Dans ton runner JUnit 5 :
+
+@Suite
+@IncludeEngines("cucumber")
+@SelectClasspathResource("features")
+@ConfigurationParameter(key = "cucumber.plugin", value = "pretty,summary")
+@ConfigurationParameter(key = "cucumber.publish.quiet", value = "true")
+public class CucumberPipelineRTCTest {}
+
+(JUnit4 : @RunWith(Cucumber.class) + @CucumberOptions(plugin={"pretty","summary"}))
+
+
+---
+
+Récap express
+
+forkCount=1 ✔
+
+useFile=false → logs de la JVM forkée s’affichent dans Jenkins/IntelliJ
+
+log4j2-test.xml dans src/test/resources → mise en forme et niveaux de logs maîtrisés
+
+pretty,summary côté Cucumber → steps + échecs lisibles
+
+
+Si tu veux, dis-moi si tu es en Log4j2 ou Logback, et je te mets le fichier exact prêt à coller.
+
