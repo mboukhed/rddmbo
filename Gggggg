@@ -1,0 +1,60 @@
+Yes 👍 tu as défini un choice dans ton properties mais tu n’as mis que la valeur affichée (equity, marketshare).
+
+👉 Si tu veux directement enchaîner choix → module_name, tu peux coder ça de deux manières :
+
+
+---
+
+1. Garder le choice simple et mapper ensuite
+
+Tu déclares tes choix comme tu l’as fait :
+
+properties([
+  parameters([
+    choice(name: 'project_name', choices: ['equity','marketshare'], description: 'Set the project'),
+    choice(name: 'deploy_location', choices: ['personal','dev'], description: 'Set the location')
+  ])
+])
+
+Puis tu crées un mapping dans ton pipeline :
+
+def moduleMap = [
+  'equity'      : 'minecraft-equity',
+  'marketshare' : 'minecraft-marketshare'
+]
+
+def module_name = moduleMap[params.project_name]
+
+
+---
+
+2. Encoder directement module_name dans le choix
+
+Tu peux mettre dans choices des libellés + parser :
+
+choice(
+  name: 'project_name',
+  choices: [
+    'equity:minecraft-equity',
+    'marketshare:minecraft-marketshare'
+  ],
+  description: 'Select project'
+)
+
+Puis dans le pipeline :
+
+def (shortName, module_name) = params.project_name.split(':')
+echo "Choisi ${shortName} → module = ${module_name}"
+
+
+---
+
+👉 En résumé :
+
+Solution 1 = plus lisible côté Jenkins UI (juste “equity” ou “marketshare”), et tu fais le mapping toi-même.
+
+Solution 2 = encode tout dans le paramètre, plus automatique, mais l’utilisateur verra “equity:minecraft-equity” dans la liste.
+
+
+Tu veux que je te prépare la solution 1 prête à copier-coller pour ton Jenkinsfile actuel ?
+
