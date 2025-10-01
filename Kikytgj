@@ -1,0 +1,22 @@
+boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+
+List<String> jvm = new ArrayList<>();
+jvm.add("-ea");
+jvm.add("-Xmx2g");
+
+if (isWindows) {
+    Path moduleRoot = Paths.get(
+        CucumberUtils.class.getProtectionDomain().getCodeSource().getLocation().toURI()
+    ).getParent()      // .../target/test-classes
+     .getParent()      // .../target
+     .getParent()      // .../<module>
+     .toRealPath();
+
+    Path hadoopHome = moduleRoot.resolve("winutils").resolve("hadoop");
+    jvm.add("-Dhadoop.home.dir=" + hadoopHome.toString());
+    jvm.add("-Djava.library.path=" + hadoopHome.resolve("bin").toString());
+} else {
+    jvm.add("-Dhadoop.native.lib=false");
+}
+
+// puis -cp, main, etc.
