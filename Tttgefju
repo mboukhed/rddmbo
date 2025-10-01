@@ -1,0 +1,35 @@
+<properties>
+  <jacoco.version>0.8.11</jacoco.version>
+</properties>
+
+<build>
+  <plugins>
+    <!-- 1) Injecte l'agent -->
+    <plugin>
+      <groupId>org.jacoco</groupId>
+      <artifactId>jacoco-maven-plugin</artifactId>
+      <version>${jacoco.version}</version>
+      <executions>
+        <execution><goals><goal>prepare-agent</goal></goals></execution>
+        <execution>
+          <id>report</id><phase>verify</phase>
+          <goals><goal>report</goal></goals>
+        </execution>
+      </executions>
+    </plugin>
+
+    <!-- 2) NE SURTOUT PAS ÉCRASER ${argLine} -->
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-surefire-plugin</artifactId>
+      <version>3.2.5</version>
+      <configuration>
+        <!-- Si tu as déjà un argLine, préfixe par ${argLine} -->
+        <argLine>${argLine} -Xmx2g --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
+        <!-- Optionnel, mais évite les surprises -->
+        <forkCount>1</forkCount>
+        <reuseForks>true</reuseForks>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
