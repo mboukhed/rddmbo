@@ -1,0 +1,90 @@
+Oui. Les valeurs que tu choisis dans les menus input sont renvoyées à ton pipeline et tu peux les utiliser dans tes stages comme n’importe quelles variables.
+
+Comment ça marche (scripted)
+
+Le premier input te renvoie mode (string).
+
+Le deuxième input te renvoie un Map (clé = nom du paramètre, valeur = ce que tu as choisi).
+
+Tu lis ensuite ci.project_name, ci.skip_tests, etc. dans tes stages.
+
+
+Exemple clair (reprend tes champs exacts)
+
+node('any') {
+  // 1) Choix du menu
+  def mode = input message: 'Choisis le mode', parameters: [
+    choice(name: 'MODE', choices: ['CI','CD'], description: 'CI ou CD ?')
+  ]
+
+  if (mode == 'CI') {
+    // 2) TON MENU CI (choice, choice, booleans)
+    def ci = input message: 'Paramètres CI', parameters: [
+      choice(name: 'project_name',    choices: ['equity','marketshare'], description: 'Set the project you want to build'),
+      choice(name: 'deploy_location', choices: ['personal','azure'],     description: 'Set the location (if needed for CI)'),
+      booleanParam(name: 'store_in_jfrog',   defaultValue: false, description: 'Store artifacts in JFrog'),
+      booleanParam(name: 'release_version',  defaultValue: false, description: 'Release version'),
+      booleanParam(name: 'skip_tests',       defaultValue: false, description: 'Skip tests'),
+      booleanParam(name: 'skip_quality',     defaultValue: false, description: 'Skip quality checks')
+    ]
+    // ci est un Map : [project_name: 'equity', deploy_location: 'personal', skip_tests: true, …]
+
+    stage('Compile') {
+      echo "Build ${ci.project_name} (loc=${ci.deploy_location})"
+      sh "mvn -B clean install ${ci.skip_tests ? '-DskipTests' : ''} -pl ${ci.project_name}"
+    }
+    stage('Release?') {
+      if (ci.release_version) {
+        echo "Release version ON"
+        // tes commandes de release ici
+      } else {
+        echo "Release version OFF"
+      }
+    }
+    stage('Publish to JFrog?') {
+      if (ci.store_in_jfrog) {
+        echo "Deploy to JFrog"
+        // ex: sh "mvn -B -s settings.xml deploy -DskipTests -pl ${ci.project_name}"
+      }
+    }
+  }
+  else { // mode == 'CD'
+    // 2) TON MENU CD
+    def cd = input message: 'Paramètres CD', parameters: [
+      choice(name: 'project_name',    choices: ['equity','marketshare'], description: 'Set the project you want to deploy'),
+      choice(name: 'deploy_location', choices: ['personal','azure'],     description: 'Target location'),
+      booleanParam(name: 'deploy_in_azure', defaultValue: false,         description: 'Deploy in AZURE')
+    ]
+    // cd est un Map : [project_name: 'equity', deploy_location: 'azure', deploy_in_azure: true]
+
+    stage('Deploy') {
+      echo "Deploy ${cd.project_name} to ${cd.deploy_location}"
+      if (cd.deploy_in_azure) {
+        sh "./deploy.sh azure ${cd.project_name}"
+      } else {
+        sh "./deploy.sh ${cd.deploy_location} ${cd.project_name}"
+      }
+    }
+  }
+}
+
+Points utiles
+
+input retourne un Map → utilise map.clef dans les stages.
+
+Si tu veux les rendre visibles partout (même hors script), exporte-les :
+
+env.PROJECT_NAME = ci.project_name
+env.SKIP_TESTS   = ci.skip_tests.toString()
+
+Pour éviter un blocage si personne ne clique, entoure l’input d’un timeout :
+
+timeout(time: 15, unit: 'MINUTES') {
+  def mode = input(…)
+}
+
+En déclaratif, fais l’input dans un script { … }, puis stocke en env.* et utilise-les dans les stages suivants.
+
+
+Bref : oui, tes choice et booleanParam seront bien utilisés dans tes stages — tu les lis depuis le Map renvoyé par input comme montré ci-dessus.
+
