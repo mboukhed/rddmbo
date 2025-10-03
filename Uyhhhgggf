@@ -1,0 +1,88 @@
+Oui, ça c’est le piège classique avec Active Choices :
+si tu mets directement un choice ou booleanParam, Jenkins les affiche tout le temps.
+Pour que le menu apparaisse/disparaisse selon ton bouton radio, il faut que ces paramètres aussi soient définis comme des CascadeChoiceParameter (ou DynamicReferenceParameter).
+
+En clair :
+
+choice(...) → doit être encapsulé dans un CascadeChoiceParameter avec if (MODE == "CI") … else [].
+
+Idem pour tes booleanParam(...) → convertis en CascadeChoiceParameter avec PT_CHECKBOX.
+Sinon Jenkins les affiche par défaut même quand MODE n’est pas sélectionné.
+
+
+
+---
+
+Exemple corrigé de ton menu CI
+
+properties([
+  parameters([
+    // Bouton radio principal
+    [$class: 'ChoiceParameter',
+     name: 'MODE',
+     description: 'Choisir CI ou CD',
+     choiceType: 'PT_RADIO',
+     script: [$class: 'GroovyScript',
+              script: [sandbox:true, script:'return ["CI","CD"]'],
+              defaultGroovyScript:[sandbox:true, script:'return "CI"']] ],
+
+    // --- project_name ---
+    [$class: 'CascadeChoiceParameter',
+     name: 'project_name',
+     description: 'Set the project you want to build',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'GroovyScript',
+              script:[sandbox:true, script:'''
+                if (MODE == "CI") { return ["equity","marketshare"] }
+                return []
+              '''],
+              defaultGroovyScript:[sandbox:true, script:'return "equity"']] ],
+
+    // --- deploy_location ---
+    [$class: 'CascadeChoiceParameter',
+     name: 'deploy_location',
+     description: 'Set the location (if needed for CI)',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'GroovyScript',
+              script:[sandbox:true, script:'''
+                if (MODE == "CI") { return ["personal","azure"] }
+                return []
+              '''],
+              defaultGroovyScript:[sandbox:true, script:'return "personal"']] ],
+
+    // --- booleans transformés en checkboxes ---
+    [$class: 'CascadeChoiceParameter',
+     name: 'ci_flags',
+     description: 'Options CI',
+     choiceType: 'PT_CHECKBOX',
+     referencedParameters: 'MODE',
+     script: [$class:'GroovyScript',
+              script:[sandbox:true, script:'''
+                if (MODE == "CI") {
+                  return ["store_in_jfrog","release_version","skip_tests","skip_quality"]
+                }
+                return []
+              '''],
+              defaultGroovyScript:[sandbox:true, script:'return "skip_tests"']] ]
+  ])
+])
+
+
+---
+
+Résultat dans l’UI
+
+Tu vois d’abord ton bouton radio CI/CD.
+
+Par défaut il coche CI, mais les menus CI ne s’affichent que si CI est coché.
+
+Si tu passes à CD → tout disparaît (et tu pourras mettre ton menu CD en miroir).
+
+
+
+---
+
+👉 Veux-tu que je te prépare le bloc CD complet aussi (project_name, deploy_location, deploy_in_azure) avec la même logique, comme ça tu n’auras plus qu’à copier/coller ?
+
