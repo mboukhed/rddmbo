@@ -1,0 +1,130 @@
+Gotcha — tu veux aucune case cochée par défaut et rien n’afficher tant que tu n’as pas choisi CI ou CD.
+
+Fais ces 2 ajustements :
+
+1. Pour que rien ne soit sélectionné au départ, mets un choix “(select)” dans le bouton radio.
+
+
+2. Pour que aucune checkbox ne soit cochée par défaut, renvoie "" (vide) dans defaultGroovyScript des paramètres PT_CHECKBOX.
+
+
+
+Voici le bloc prêt à coller :
+
+properties([
+  parameters([
+
+    // --- Radio CI/CD avec état neutre ---
+    [$class: 'org.biouno.unochoice.ChoiceParameter',
+     name: 'MODE',
+     description: 'Choisir CI ou CD',
+     choiceType: 'PT_RADIO',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox:true, script:'return ["(select)","CI","CD"]'],
+       fallbackScript: [sandbox:true, script:'return ["(select)"]']
+     ],
+     // pas de défaut "CI" → neutre
+    ],
+
+    // ===== MENU CI (visible seulement si MODE == "CI") =====
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'project_name',
+     description: 'Set the project you want to build',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'org.biouno.unochoice.model.GroovyScript',
+       script:[sandbox:true, script:'''
+         if (MODE == "CI") return ["equity","marketshare"]
+         return []
+       '''],
+       fallbackScript:[sandbox:true, script:'return []']
+     ]
+    ],
+
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'deploy_location',
+     description: 'Set the location (if needed for CI)',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'org.biouno.unochoice.model.GroovyScript',
+       script:[sandbox:true, script:'''
+         if (MODE == "CI") return ["personal","azure"]
+         return []
+       '''],
+       fallbackScript:[sandbox:true, script:'return []']
+     ]
+    ],
+
+    // aucune case cochée par défaut -> defaultGroovyScript: return ""
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'ci_flags',
+     description: 'CI Options',
+     choiceType: 'PT_CHECKBOX',
+     referencedParameters: 'MODE',
+     script: [$class:'org.biouno.unochoice.model.GroovyScript',
+       script:[sandbox:true, script:'''
+         if (MODE == "CI") return ["store_in_jfrog","release_version","skip_tests","skip_quality"]
+         return []
+       '''],
+       fallbackScript:[sandbox:true, script:'return []'],
+       defaultGroovyScript:[sandbox:true, script:'return ""']
+     ]
+    ],
+
+    // ===== MENU CD (visible seulement si MODE == "CD") =====
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'project_name_cd',
+     description: 'Set the project you want to deploy',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'org.biouno.unochoice.model.GroovyScript',
+       script:[sandbox:true, script:'''
+         if (MODE == "CD") return ["equity","marketshare"]
+         return []
+       '''],
+       fallbackScript:[sandbox:true, script:'return []']
+     ]
+    ],
+
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'deploy_location_cd',
+     description: 'Target location',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'org.biouno.unochoice.model.GroovyScript',
+       script:[sandbox:true, script:'''
+         if (MODE == "CD") return ["personal","azure"]
+         return []
+       '''],
+       fallbackScript:[sandbox:true, script:'return []']
+     ]
+    ],
+
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'cd_flags',
+     description: 'CD Options',
+     choiceType: 'PT_CHECKBOX',
+     referencedParameters: 'MODE',
+     script: [$class:'org.biouno.unochoice.model.GroovyScript',
+       script:[sandbox:true, script:'''
+         if (MODE == "CD") return ["deploy_in_azure"]
+         return []
+       '''],
+       fallbackScript:[sandbox:true, script:'return []'],
+       defaultGroovyScript:[sandbox:true, script:'return ""'] // aucune case cochée
+     ]
+    ]
+  ])
+])
+
+Résumé :
+
+Au chargement : rien n’est coché (radio = “(select)”, menus masqués).
+
+Tu choisis CI → seul le menu CI apparaît, zéro case pré-cochée.
+
+Tu choisis CD → seul le menu CD apparaît, zéro case pré-cochée.
+
+
+Si tu préfères un libellé différent que “(select)”, remplace-le dans la liste.
+
