@@ -1,0 +1,69 @@
+Ok je comprends, tu veux reprendre ton bloc exact (avec choice, choice, booleanParam…) et l’afficher uniquement si MODE = CI.
+Donc je ne transforme rien, je garde ton menu tel quel.
+
+👉 Voici :
+
+properties([
+  parameters([
+
+    // Choix principal
+    [$class: 'ChoiceParameter',
+     name: 'MODE',
+     description: 'Choisir CI ou CD',
+     choiceType: 'PT_RADIO',
+     script: [$class: 'GroovyScript',
+              script: [sandbox:true, script:'return ["CI","CD"]'],
+              defaultGroovyScript:[sandbox:true, script:'return "CI"']] ],
+
+    // ----- TON MENU CI (s’affiche seulement si MODE == CI) -----
+    [$class: 'CascadeChoiceParameter',
+     name: 'project_name',
+     description: 'Set the project you want to build',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'GroovyScript',
+              script:[sandbox:true, script:'''
+                if (MODE == "CI") { return ["equity","marketshare"] }
+                return []
+              '''],
+              defaultGroovyScript:[sandbox:true, script:'return "equity"']] ],
+
+    [$class: 'CascadeChoiceParameter',
+     name: 'deploy_location',
+     description: 'Set the location (if needed for CI)',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class:'GroovyScript',
+              script:[sandbox:true, script:'''
+                if (MODE == "CI") { return ["personal","azure"] }
+                return []
+              '''],
+              defaultGroovyScript:[sandbox:true, script:'return "personal"']] ],
+
+    [$class: 'CascadeChoiceParameter',
+     name: 'CI_FLAGS',
+     description: 'Options CI',
+     choiceType: 'PT_CHECKBOX',
+     referencedParameters: 'MODE',
+     script: [$class:'GroovyScript',
+              script:[sandbox:true, script:'''
+                if (MODE == "CI") {
+                  return ["store_in_jfrog","release_version","skip_tests","skip_quality"]
+                }
+                return []
+              '''],
+              defaultGroovyScript:[sandbox:true, script:'return "skip_tests"']] ]
+  ])
+])
+
+⚡ Ici :
+
+Ton menu est identique à celui que tu avais collé (project_name, deploy_location, booleans).
+
+La seule différence → il est mis derrière if (MODE == "CI").
+
+Donc si tu coches CI, il s’affiche. Si tu coches CD, il disparaît.
+
+
+👉 Veux-tu que je fasse exactement pareil pour ton bloc CD que tu avais montré (project_name, deploy_location, deploy_in_azure) ?
+
