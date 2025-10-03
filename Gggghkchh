@@ -1,0 +1,149 @@
+OK, on fixe ça proprement avec un exemple minimal qui marche + la checklist des pièges.
+
+Jenkinsfile minimal (CI ↔ CD, un seul menu visible)
+
+> À coller tout en haut du Jenkinsfile (avant tout node {} ou pipeline {}).
+
+
+
+// --- Active Choices required ---
+// Works in Scripted or Declarative. Put BEFORE any node/pipeline blocks.
+
+properties([
+  parameters([
+
+    // 1) Radio CI/CD
+    [$class: 'org.biouno.unochoice.ChoiceParameter',
+     name: 'MODE',
+     description: 'Choisir CI ou CD',
+     choiceType: 'PT_RADIO',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox: true, script: 'return ["CI","CD"]'],
+       fallbackScript: [sandbox: true, script: 'return ["CI"]']
+     ]
+    ],
+
+    // ======= MENU CI (s’affiche SEULEMENT si MODE == CI) =======
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'project_name',
+     description: 'Set the project you want to build',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox: true, script: '''
+         if (MODE == "CI") { return ["equity","marketshare"] }
+         return []
+       '''],
+       fallbackScript: [sandbox: true, script: 'return []']
+     ]
+    ],
+
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'deploy_location',
+     description: 'Set the location (if needed for CI)',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox: true, script: '''
+         if (MODE == "CI") { return ["personal","azure"] }
+         return []
+       '''],
+       fallbackScript: [sandbox: true, script: 'return []']
+     ]
+    ],
+
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'ci_flags',
+     description: 'CI Options',
+     choiceType: 'PT_CHECKBOX',
+     referencedParameters: 'MODE',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox: true, script: '''
+         if (MODE == "CI") {
+           return ["store_in_jfrog","release_version","skip_tests","skip_quality"]
+         }
+         return []
+       '''],
+       fallbackScript: [sandbox: true, script: 'return []']
+     ]
+    ],
+
+    // ======= MENU CD (s’affiche SEULEMENT si MODE == CD) =======
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'project_name_cd',
+     description: 'Set the project you want to deploy',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox: true, script: '''
+         if (MODE == "CD") { return ["equity","marketshare"] }
+         return []
+       '''],
+       fallbackScript: [sandbox: true, script: 'return []']
+     ]
+    ],
+
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'deploy_location_cd',
+     description: 'Target location',
+     choiceType: 'PT_SINGLE_SELECT',
+     referencedParameters: 'MODE',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox: true, script: '''
+         if (MODE == "CD") { return ["personal","azure"] }
+         return []
+       '''],
+       fallbackScript: [sandbox: true, script: 'return []']
+     ]
+    ],
+
+    [$class: 'org.biouno.unochoice.CascadeChoiceParameter',
+     name: 'cd_flags',
+     description: 'CD Options',
+     choiceType: 'PT_CHECKBOX',
+     referencedParameters: 'MODE',
+     script: [$class: 'org.biouno.unochoice.model.GroovyScript',
+       script: [sandbox: true, script: '''
+         if (MODE == "CD") { return ["deploy_in_azure"] }
+         return []
+       '''],
+       fallbackScript: [sandbox: true, script: 'return []']
+     ]
+    ]
+  ])
+])
+
+// --- Exemple d’écho pour vérifier (tu peux supprimer) ---
+println "MODE=${params?.MODE} CI=${params?.project_name}/${params?.deploy_location} FLAGS=${params?.ci_flags} | CD=${params?.project_name_cd}/${params?.deploy_location_cd} FLAGS=${params?.cd_flags}"
+
+Checklist (très importante)
+
+1. Plugin Active Choices installé (et à jour).
+
+
+2. Mets properties([...]) tout en haut du Jenkinsfile (pas dans un stage).
+
+
+3. Multibranch ? Au premier run, Jenkins enregistre les paramètres. Ouvre Build with Parameters au run suivant pour voir les radios/menus.
+
+
+4. Utilise les classes FQCN (comme ci-dessus) si $class: 'ChoiceParameter' ne marche pas dans ta version.
+
+
+5. Laisse sandbox: true pour éviter les approvals.
+
+
+6. Les booleans natifs booleanParam ne peuvent pas être masqués dynamiquement → on les remplace par un PT_CHECKBOX dans un CascadeChoiceParameter (c’est ce que je fais).
+
+
+
+Si après ça, l’écran ne montre toujours pas le radio et un seul menu à la fois, envoie-moi juste :
+
+si c’est un Multibranch ou un job Pipeline simple,
+
+la version du plugin Active Choices,
+
+où tu as placé properties([...]) dans le fichier.
+Je te corrige pile-poil ta config.
+
+
