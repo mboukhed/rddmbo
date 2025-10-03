@@ -1,0 +1,115 @@
+Parfait 👍 je t’ai adapté le Jenkinsfile pour que :
+
+CI soit sélectionné par défaut,
+
+et dans le menu CI, Build soit pré-sélectionné.
+
+
+
+---
+
+pipeline {
+  agent any
+
+  stages {
+    stage('Init parameters') {
+      steps {
+        script {
+          properties([
+            parameters([
+              // Radios : CI ou CD (CI sélectionné par défaut)
+              [$class: 'ChoiceParameter',
+               name: 'MODE',
+               description: 'Choisis ton pipeline',
+               choiceType: 'PT_RADIO',
+               script: [$class: 'GroovyScript',
+                        script: [sandbox: true, script: 'return ["CI","CD"]'],
+                        fallbackScript: [sandbox: true, script: 'return ["CI"]'],
+                        defaultGroovyScript: [sandbox: true, script: 'return "CI"']] ],
+
+              // Menu CI (visible uniquement si MODE == CI)
+              [$class: 'CascadeChoiceParameter',
+               name: 'CI_MENU',
+               description: 'Actions CI',
+               choiceType: 'PT_SINGLE_SELECT',
+               referencedParameters: 'MODE',
+               script: [$class: 'GroovyScript',
+                        script: [sandbox: true, script: '''
+                          if (MODE == "CI") {
+                            return ["Build", "UnitTests", "Sonar"]
+                          }
+                          return []
+                        '''],
+                        fallbackScript: [sandbox: true, script: 'return []'],
+                        defaultGroovyScript: [sandbox: true, script: 'return "Build"']] ],
+
+              // Menu CD (visible uniquement si MODE == CD)
+              [$class: 'CascadeChoiceParameter',
+               name: 'CD_MENU',
+               description: 'Actions CD',
+               choiceType: 'PT_SINGLE_SELECT',
+               referencedParameters: 'MODE',
+               script: [$class: 'GroovyScript',
+                        script: [sandbox: true, script: '''
+                          if (MODE == "CD") {
+                            return ["DeployDev", "DeployRec", "DeployProd"]
+                          }
+                          return []
+                        '''],
+                        fallbackScript: [sandbox: true, script: 'return []'],
+                        defaultGroovyScript: [sandbox: true, script: 'return "DeployDev"']] ]
+            ])
+          ])
+        }
+      }
+    }
+
+    stage('Run CI') {
+      when { expression { return params.MODE == 'CI' } }
+      steps {
+        script {
+          echo "CI selected: ${params.CI_MENU}"
+          if (params.CI_MENU == 'Build')     sh 'mvn clean package -DskipTests'
+          if (params.CI_MENU == 'UnitTests') sh 'mvn test'
+          if (params.CI_MENU == 'Sonar')     sh 'mvn sonar:sonar'
+        }
+      }
+    }
+
+    stage('Run CD') {
+      when { expression { return params.MODE == 'CD' } }
+      steps {
+        script {
+          echo "CD selected: ${params.CD_MENU}"
+          if (params.CD_MENU == 'DeployDev') sh './deploy.sh dev'
+          if (params.CD_MENU == 'DeployRec') sh './deploy.sh rec'
+          if (params.CD_MENU == 'DeployProd') {
+            input message: "Confirmer déploiement PROD ?"
+            sh './deploy.sh prod'
+          }
+        }
+      }
+    }
+  }
+}
+
+
+---
+
+✅ Résultat
+
+Quand tu lances Build with Parameters :
+
+CI est déjà coché,
+
+et Build est déjà choisi dans le menu.
+
+
+Si tu passes sur CD, tu vois alors le menu CD avec DeployDev par défaut.
+
+
+
+---
+
+👉 Veux-tu que je rende aussi possible la sélection de plusieurs actions en même temps (par exemple lancer Build et Tests d’un coup) ?
+
