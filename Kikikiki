@@ -1,0 +1,83 @@
+Parfait. Voilà un scripted pipeline avec un paramètre MODE (CI/CD) et deux blocs if qui englobent tous tes stages.
+Tu n’as qu’à copier/coller tes stages existants dans les zones indiquées – sans rien changer dedans.
+
+// === Définition du paramètre au chargement du job ===
+properties([
+  parameters([
+    choice(name: 'MODE', choices: ['CI', 'CD'], description: 'Choisir le pipeline à exécuter')
+  ])
+])
+
+// Exemple : tu as déjà un label d’agent/pod
+node(POD_LABEL) {
+
+  // (optionnel) ton stage d’initialisation actuel
+  stage('git_clone_set_env') {
+    echo "DEBUG -> deploy_in_azure : ${params.deploy_in_azure}"
+    echo "DEBUG -> spn_name       : ${env.spn_name}"
+    echo "DEBUG -> storage_account: ${env.storage_account_name}"
+    echo "DEBUG -> project_name   : ${env.project_name}"
+    echo "DEBUG -> module_name    : ${env.module_name}"
+    // load etc.
+    // common = load "Jenkinsfile-common-equity"
+  }
+
+  // ========================= CI ONLY =========================
+  if (params.MODE == 'CI') {
+
+    // >>>>> Colle ici, SANS MODIFIER, tous tes stages CI existants <<<<<
+    stage('compile_project') {
+      container('maven-1') {
+        withCredentials([file(credentialsId: 'settings-for_jfrog.xml', variable: 'settings')]) {
+          // ex. appel commun
+          // if (params.release_version.toBoolean() && env.BRANCH_NAME == 'dev') { common.setReleaseMavenVersion("minecraft.version", settings) }
+          sh "mvn clean install -B -q -DskipTests=true -pl minecraft-core,minecraft-model,minecraft-equity"
+        }
+      }
+    }
+
+    stage('test_project') {
+      container('maven-1') {
+        sh "mvn -B -q test -pl minecraft-core,minecraft-model,minecraft-equity"
+      }
+    }
+
+    stage('sonar') {
+      container('maven-1') {
+        sh "mvn -B -q sonar:sonar"
+      }
+    }
+    // >>>>> Fin des stages CI <<<<<
+  }
+
+  // ========================= CD ONLY =========================
+  if (params.MODE == 'CD') {
+
+    // >>>>> Colle ici, SANS MODIFIER, tous tes stages CD existants <<<<<
+    stage('deploy_dev') {
+      container('cdeploy') {
+        sh "./deploy.sh dev"
+      }
+    }
+
+    stage('deploy_prod') {
+      container('cdeploy') {
+        input message: "Confirmer déploiement PROD ?"
+        sh "./deploy.sh prod"
+      }
+    }
+    // >>>>> Fin des stages CD <<<<<
+  }
+}
+
+Notes rapides
+
+Tu n’as rien à toucher à l’intérieur de tes stages : seul l’encadrement par if (params.MODE == 'CI') / if (params.MODE == 'CD') change.
+
+Le choix CI/CD se fait au lancement via Build with Parameters.
+
+Tu peux mettre CI par défaut en ajoutant defaultValue: 'CI' si tu préfères un string param, mais avec choice ce n’est pas nécessaire (le premier est pris par défaut).
+
+
+Si tu veux, je te mets la même structure avec un troisième mode (ex. “Tools” ou “Rollback”), prêt à étendre.
+
