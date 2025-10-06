@@ -1,0 +1,125 @@
+Parfait 💪
+Voici une classe Spring Core réutilisable et propre pour enregistrer à l’exécution n’importe quel type d’objet (List, Map, Set, POJO, etc.) dans le contexte Spring, afin qu’il soit injecté ensuite via @Autowired / @Qualifier.
+
+
+---
+
+✅ Classe générique : DynamicBeanRegistry.java
+
+package com.example.springcore.util;
+
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.stereotype.Service;
+
+import java.util.Map;
+import java.util.List;
+import java.util.Collection;
+
+@Service
+public class DynamicBeanRegistry {
+
+    private final DefaultListableBeanFactory beanFactory;
+
+    public DynamicBeanRegistry(ConfigurableApplicationContext context) {
+        this.beanFactory = (DefaultListableBeanFactory) context.getBeanFactory();
+    }
+
+    /**
+     * Enregistre dynamiquement un bean dans le contexte Spring.
+     * @param beanName le nom du bean
+     * @param instance l'instance à enregistrer
+     */
+    public void registerBean(String beanName, Object instance) {
+        if (beanFactory.containsSingleton(beanName)) {
+            beanFactory.destroySingleton(beanName);
+        }
+        beanFactory.registerSingleton(beanName, instance);
+    }
+
+    /**
+     * Enregistre une Map dans le contexte.
+     */
+    public <K, V> void registerMap(String beanName, Map<K, V> map) {
+        registerBean(beanName, map);
+    }
+
+    /**
+     * Enregistre une List dans le contexte.
+     */
+    public <T> void registerList(String beanName, List<T> list) {
+        registerBean(beanName, list);
+    }
+
+    /**
+     * Enregistre une Collection générique.
+     */
+    public <T> void registerCollection(String beanName, Collection<T> collection) {
+        registerBean(beanName, collection);
+    }
+
+    /**
+     * Enregistre un POJO ou n’importe quel objet.
+     */
+    public <T> void registerObject(String beanName, T obj) {
+        registerBean(beanName, obj);
+    }
+}
+
+
+---
+
+✅ Exemple d’utilisation
+
+@Autowired
+private DynamicBeanRegistry registry;
+
+public void loadDynamicData() {
+    // Exemple 1 : Map
+    Map<String, String> files = Map.of("A", "/data/A.csv", "B", "/data/B.csv");
+    registry.registerMap("ARIVA_MAP_FILES", files);
+
+    // Exemple 2 : Liste
+    List<MyObject> objects = List.of(new MyObject("x"), new MyObject("y"));
+    registry.registerList("MY_OBJECTS", objects);
+
+    // Exemple 3 : Objet simple
+    registry.registerObject("CURRENT_CONFIG", new Config("dev", true));
+}
+
+
+---
+
+✅ Injection ultérieure
+
+@Autowired
+@Qualifier("ARIVA_MAP_FILES")
+private Map<String, String> arivaMap;
+
+@Autowired
+@Qualifier("MY_OBJECTS")
+private List<MyObject> myObjects;
+
+@Autowired
+@Qualifier("CURRENT_CONFIG")
+private Config currentConfig;
+
+
+---
+
+⚙️ Ce que cette classe fait
+
+Gère tous les types d’objets Spring-compatible (List, Map, Collection, POJO…)
+
+Écrase automatiquement les anciens beans du même nom
+
+Fonctionne dans Spring Core pur (pas besoin de Spring Boot)
+
+Les beans enregistrés sont injectables immédiatement s’ils sont créés avant injection
+
+
+
+---
+
+Souhaites-tu que je t’ajoute une méthode registerOrUpdate() qui met à jour automatiquement un bean existant sans le recréer (utile si tu veux rafraîchir une Map pendant que l’app tourne) ?
+
