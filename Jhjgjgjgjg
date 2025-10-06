@@ -1,0 +1,87 @@
+Ok. Voilà un service Spring Core qui sait register / replace / get n’importe quel bean (Map, List, POJO…). Pas besoin de @Qualifier : tu peux le récupérer par nom via get(...).
+
+DynamicBeanRegistry.java
+
+package com.example.springcore.util;
+
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.lang.Nullable;
+import org.springframework.stereotype.Service;
+
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+
+@Service
+public class DynamicBeanRegistry {
+
+    private final DefaultListableBeanFactory bf;
+
+    public DynamicBeanRegistry(ConfigurableApplicationContext ctx) {
+        this.bf = (DefaultListableBeanFactory) ctx.getBeanFactory();
+    }
+
+    /** Crée ou remplace un singleton (Map, List, POJO, etc.) */
+    public synchronized void register(String beanName, Object instance) {
+        if (bf.containsSingleton(beanName)) {
+            bf.destroySingleton(beanName);
+        }
+        bf.registerSingleton(beanName, instance);
+    }
+
+    // Helpers pratiques
+    public <K,V> void registerMap(String beanName, Map<K,V> map) { register(beanName, map); }
+    public <T> void registerList(String beanName, List<T> list)   { register(beanName, list); }
+    public <T> void registerCollection(String beanName, Collection<T> c) { register(beanName, c); }
+    public <T> void registerObject(String beanName, T obj)        { register(beanName, obj); }
+
+    /** Récupère un bean par nom et type (exception si absent) */
+    public <T> T get(String beanName, Class<T> type) {
+        return type.cast(bf.getSingleton(beanName));
+    }
+
+    /** Récupère un bean si présent, sinon null (pas d’exception) */
+    @Nullable
+    public <T> T getIfPresent(String beanName, Class<T> type) {
+        Object o = bf.getSingleton(beanName);
+        return (o == null) ? null : type.cast(o);
+    }
+
+    /** Vrai si déjà enregistré. */
+    public boolean exists(String beanName) {
+        return bf.containsSingleton(beanName);
+    }
+
+    /** Supprime un singleton si besoin. */
+    public void remove(String beanName) {
+        if (bf.containsSingleton(beanName)) {
+            bf.destroySingleton(beanName);
+        }
+    }
+}
+
+Utilisation (runtime)
+
+@Autowired
+private DynamicBeanRegistry registry;
+
+public void loadAtRuntime() {
+    Map<String,String> files = Map.of("A","/data/A.csv","B","/data/B.csv");
+    registry.register("ARIVA_MAP_FILES", files);
+
+    // Plus tard, quand tu en as besoin :
+    Map<String,String> m = registry.get("ARIVA_MAP_FILES", Map.class);
+    // ... utiliser m
+}
+
+Notes flash
+
+Tu contournes totalement @Qualifier : get("nom", Type.class) suffit.
+
+register() remplace si le bean existe déjà.
+
+getIfPresent() évite l’exception si pas encore enregistré.
+
+
