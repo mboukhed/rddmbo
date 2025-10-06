@@ -1,0 +1,20 @@
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+
+public final class Timestamps {
+    private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+
+    /** Sans fuseau : interprété dans le fuseau système. */
+    public static Timestamp parseToSqlTimestamp(String text) {
+        LocalDateTime ldt = LocalDateTime.parse(text, FMT);
+        return Timestamp.valueOf(ldt); // équivaut à ldt au fuseau système
+    }
+
+    /** Avec fuseau explicite (ex: UTC). */
+    public static Timestamp parseToSqlTimestamp(String text, ZoneId zone) {
+        LocalDateTime ldt = LocalDateTime.parse(text, FMT);
+        return Timestamp.from(ldt.atZone(zone).toInstant());
+    }
+}
