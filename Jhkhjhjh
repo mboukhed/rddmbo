@@ -1,0 +1,69 @@
+Ok—tu es en statique et tu as encore Missing an output location for shuffle.
+Dans 90% des cas sur AKS, c’est parce qu’un executor crashe/perd le disque pendant le shuffle (OOM, /tmp plein, timeout). Tes captures montrent aussi spark.sql.shuffle.partitions: "2" → beaucoup trop bas ⇒ partitions géantes ⇒ OOM ⇒ perte de shuffle.
+
+À faire tout de suite (ordre d’impact)
+
+1. Augmente le nombre de partitions shuffle (ou enlève la ligne)
+
+
+
+spark.sql.shuffle.partitions: "200"   # ou supprime pour revenir au défaut (200)
+spark.sql.adaptive.enabled: "true"
+spark.sql.adaptive.coalescePartitions.enabled: "true"
+spark.sql.adaptive.skewJoin.enabled: "true"
+# optionnel
+spark.sql.adaptive.shuffle.targetPostShuffleInputSize: "256MB"
+
+2. Plus de marge mémoire hors-heap
+
+
+
+spark.executor.memoryOverhead: "3072"   # (était 1024)
+spark.driver.memoryOverhead: "2048"
+
+3. Évite que Spark déclare les executors “perdus” trop vite
+
+
+
+spark.network.timeout: "600s"
+spark.executor.heartbeatInterval: "60s"
+spark.storage.blockManagerTimeoutIntervalMs: "1200000"
+spark.shuffle.io.maxRetries: "10"
+spark.shuffle.io.retryWait: "10s"
+
+4. Disque local pour le shuffle (évite /tmp saturé)
+
+
+
+spark.local.dir: "/mnt/spark/tmp"
+
+…et monte un volume (emptyDir ou disque éphémère) sur ce path.
+
+5. Pendant l’écriture (réduit la pression finale)
+
+
+
+df.coalesce(50)              // ou un nombre adapté
+  .write()
+  .mode(SaveMode.Overwrite)
+  .parquet(path);
+
+6. Désactive la spéculation si activée (tue des tasks encore utiles)
+
+
+
+spark.speculation: "false"
+
+Pourquoi ça marche
+
+Plus de partitions = blocs shuffle plus petits ⇒ moins d’OOM ⇒ pas de “missing output”.
+
+Plus de memoryOverhead = place pour la sérialisation/Shuffle.
+
+Timeouts et retries = moins de “perte” d’executors vue par le driver.
+
+spark.local.dir dédié = moins de nettoyages/kills sur /tmp.
+
+
+Si tu veux, envoie-moi ton YAML actuel et je te renvoie un bloc propre prêt à coller avec ces réglages.
+
