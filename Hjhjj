@@ -1,0 +1,145 @@
+Excellent réflexe d’avoir pris la photo — cette fois, l’erreur est différente et plus profonde côté Spark shuffle.
+Regardons la partie clé du log 👇
+
+org.apache.spark.shuffle.MetadataFetchFailedException: Missing an output location for shuffle 0 partition 1
+at org.apache.spark.MapOutputTracker$.validateStatus(...)
+
+
+---
+
+💥 Cause technique
+
+Cette erreur :
+
+> MetadataFetchFailedException: Missing an output location for shuffle
+
+
+
+signifie que Spark ne retrouve pas la sortie d’une tâche shuffle (stage précédent).
+C’est un problème typique de shuffle fetch failure, lié à une des causes suivantes :
+
+
+---
+
+⚠️ Causes fréquentes
+
+1️⃣ Un ou plusieurs executors sont morts / supprimés avant la lecture du shuffle
+
+➡ Spark perd les métadonnées d’emplacement (shuffle blocks).
+Symptômes :
+
+Erreur Missing an output location
+
+Tâches relancées plusieurs fois avant l’abandon
+
+Peut être intermittent
+
+
+Solutions possibles :
+
+Augmenter la tolérance :
+
+--conf spark.task.maxFailures=8
+
+Vérifier les logs des executors (OOM, timeouts, pertes réseau)
+
+
+
+---
+
+2️⃣ Un disque temporaire / répertoire shuffle supprimé ou plein
+
+➡ Spark écrit les fichiers shuffle sur /tmp ou /localdir (configurable).
+
+Solutions :
+
+Vérifie les disques sur les nœuds exécutants :
+
+df -h
+
+Nettoyer /tmp si un nettoyage automatique supprime les blocs trop tôt.
+
+Ajouter un répertoire shuffle explicite :
+
+--conf spark.local.dir=/mnt/spark/tmp
+
+
+
+---
+
+3️⃣ Cluster instable (AKS, YARN, K8s)
+
+Si tu es sur AKS (Azure Kubernetes Service) (ce qui est ton cas), il arrive que :
+
+un Pod Spark Executor soit tué par le scheduler Kubernetes (OOM, eviction, scale down…)
+
+donc Spark perd les fichiers shuffle intermédiaires (non répliqués).
+
+
+Solutions AKS spécifiques :
+
+--conf spark.shuffle.service.enabled=true
+--conf spark.dynamicAllocation.enabled=true
+--conf spark.shuffle.service.port=7337
+--conf spark.executor.memoryOverhead=2048
+
+💡 Cela garde les fichiers shuffle même si un executor est relâché.
+
+
+---
+
+4️⃣ Opérations lourdes avant le write (join, groupByKey, repartition…)
+
+Si ton SparkExportHelper fait un join, groupByKey, distinct ou repartition avant le .write(), alors le shuffle peut saturer.
+
+Solutions :
+
+Utiliser .coalesce(n) avant le .write() pour réduire les partitions :
+
+dataset.coalesce(10)
+       .write()
+       .mode(SaveMode.Overwrite)
+       .parquet(path);
+
+Ou utiliser repartition() uniquement si nécessaire, pas systématiquement.
+
+
+
+---
+
+5️⃣ Timeout entre driver et executors
+
+Vérifie dans les logs s’il y a des lignes comme :
+
+Lost executor X due to heartbeat timeout
+
+ou
+
+Connection reset by peer
+
+Si oui, augmente :
+
+--conf spark.network.timeout=600s
+--conf spark.executor.heartbeatInterval=60s
+
+
+
+---
+
+✅ Résumé rapide des actions à tester
+
+Catégorie	Action
+
+Existence du répertoire	.mode(SaveMode.Overwrite)
+Nombre de partitions	.coalesce(10) avant .write()
+Shuffle persistant	--conf spark.shuffle.service.enabled=true
+Timeout réseau	--conf spark.network.timeout=600s
+Cluster stable	Vérifie les logs AKS pour PodKilled / OOM
+Espace disque	df -h sur les nœuds exécutants
+
+
+
+---
+
+Souhaites-tu que je t’envoie un exemple de configuration SparkSession AKS robuste (avec toutes les options réseau, shuffle, mémoire et retry configurées pour éviter ce type d’erreur) ?
+
