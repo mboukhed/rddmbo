@@ -1,0 +1,42 @@
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.Path;
+import java.io.IOException;
+import java.net.URISyntaxException;
+
+public boolean moveFile(String sourceFilePath, String targetDirectoryPath)
+        throws IOException, URISyntaxException {
+
+    FileSystem fs = FileSystemUtils.getFileSystem(sourceFilePath); // ou ton helper existant
+    Path src = new Path(sourceFilePath);
+
+    // Récupération du nom de fichier (ex: file.txt)
+    String fileName = src.getName();
+
+    // Construit le chemin cible complet
+    Path dstDir = new Path(targetDirectoryPath);
+    Path dstFile = new Path(dstDir, fileName);
+
+    // Si le répertoire de destination n’existe pas → le créer
+    if (!fs.exists(dstDir)) {
+        fs.mkdirs(dstDir);
+    }
+
+    // Si le fichier existe déjà → suppression avant déplacement
+    if (fs.exists(dstFile)) {
+        fs.delete(dstFile, false);
+    }
+
+    // Déplacement du fichier (équivalent mv)
+    boolean success = fs.rename(src, dstFile);
+
+    // Si déplacement échoue (par ex. FS différents), on fait un copy + delete
+    if (!success) {
+        success = FileUtil.copy(fs, src, fs, dstFile, false, true, fs.getConf());
+        if (success) {
+            fs.delete(src, false);
+        }
+    }
+
+    return success;
+}
