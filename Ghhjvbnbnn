@@ -1,0 +1,28 @@
+public static String getDirectoryName(String azurePath) {
+    if (azurePath == null || azurePath.isEmpty()) {
+        return "";
+    }
+
+    // Supprime un éventuel "/" à la fin
+    String cleanPath = azurePath.endsWith("/") 
+            ? azurePath.substring(0, azurePath.length() - 1)
+            : azurePath;
+
+    // Récupère la dernière partie après le dernier "/"
+    int lastSlashIndex = cleanPath.lastIndexOf('/');
+    if (lastSlashIndex == -1) {
+        return cleanPath; // pas de slash → le path est déjà un nom
+    }
+
+    return cleanPath.substring(lastSlashIndex + 1);
+}
+
+public static void main(String[] args) {
+    String path1 = "abfss://data@account.dfs.core.windows.net/input/archive/raw_data_2025";
+    String path2 = "abfss://data@account.dfs.core.windows.net/input/archive/raw_data_2025/";
+    String path3 = "raw_data_2025";
+
+    System.out.println(getDirectoryName(path1)); // raw_data_2025
+    System.out.println(getDirectoryName(path2)); // raw_data_2025
+    System.out.println(getDirectoryName(path3)); // raw_data_2025
+}
