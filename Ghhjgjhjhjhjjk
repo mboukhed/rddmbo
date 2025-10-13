@@ -1,0 +1,17 @@
+Oui ✅
+Ma méthode removeAccentsAndSpecials traite tous les caractères que tu listes.
+Le résultat attendu (sans accents/diacritiques) est :
+
+aaaaaaceeeeiiiinooooouuuuyyAAAAAACEEEEIIIINOOOOOUUUUY
+
+Tu peux vérifier avec ce mini test :
+
+public static void main(String[] args) {
+    String in = "àáâäãåçèéêëìíîïñòóôöõùúûüýÿÀÁÂÄÃÅÇÈÉÊËÌÍÎÏÑÒÓÔÖÕÙÚÛÜÝ";
+    String out = ClickHouseStringNormalizer.removeAccentsAndSpecials(in);
+    System.out.println(out);
+    // -> aaaaaaceeeeiiiinooooouuuuyyAAAAAACEEEEIIIINOOOOOUUUUY
+}
+
+Rappel : la méthode gère aussi les cas spéciaux type ß→ss, œ→oe, etc., même s’ils ne sont pas dans ta liste. Si tu veux une version “clé” (ASCII strict, lowercase, _ pour les espaces), dis-moi et je te la donne prête à coller.
+
