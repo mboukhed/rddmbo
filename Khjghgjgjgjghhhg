@@ -1,0 +1,39 @@
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+
+public class TimestampUtils {
+
+    /**
+     * Construit un Timestamp SQL à partir d'une date (yyyyMMdd)
+     * et d'une heure (HHmmss). Gère les zéros ("00") sans problème.
+     */
+    public static Timestamp toSqlTimestamp(String dateStr, String timeStr) {
+        if (dateStr == null || timeStr == null ||
+            dateStr.length() != 8 || timeStr.length() != 6) {
+            throw new IllegalArgumentException("Format attendu : date=yyyyMMdd, time=HHmmss");
+        }
+
+        // Combine proprement en une seule chaîne ISO-complète
+        String combined = dateStr + timeStr; // ex: "20251122155000"
+
+        // Définition du pattern
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+
+        // Conversion vers LocalDateTime
+        LocalDateTime ldt = LocalDateTime.parse(combined, formatter);
+
+        // Conversion finale en Timestamp SQL
+        return Timestamp.valueOf(ldt);
+    }
+
+    public static void main(String[] args) {
+        Timestamp ts1 = toSqlTimestamp("20251122", "155000");
+        Timestamp ts2 = toSqlTimestamp("20251122", "000000");
+        Timestamp ts3 = toSqlTimestamp("20251122", "235959");
+
+        System.out.println(ts1); // 2025-11-22 15:50:00.0
+        System.out.println(ts2); // 2025-11-22 00:00:00.0
+        System.out.println(ts3); // 2025-11-22 23:59:59.0
+    }
+}
