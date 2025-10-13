@@ -1,0 +1,19 @@
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+
+public class DateUtils {
+
+    /**
+     * Retourne la date/heure actuelle formatée sous la forme "yyyy_MM_dd_HH_mm_ss"
+     * Exemple : 2025_10_13_15_42_08
+     */
+    public static String getNowAsUnderscoreString() {
+        LocalDateTime now = LocalDateTime.now();
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy_MM_dd_HH_mm_ss");
+        return now.format(formatter);
+    }
+
+    public static void main(String[] args) {
+        System.out.println(getNowAsUnderscoreString());
+    }
+}
