@@ -1,0 +1,200 @@
+Très bien 👍
+Voici une explication claire et complète d’Apache Airflow, suivie d’un exemple concret d’intégration avec un job Spark (idéal pour ton contexte AKS / Big Data).
+
+
+---
+
+🚀 1. Qu’est-ce qu’Apache Airflow ?
+
+Airflow est un orchestrateur de workflows open-source créé par Airbnb (maintenant Apache).
+Il permet de planifier, exécuter et surveiller des workflows complexes sous forme de DAGs (Directed Acyclic Graphs).
+
+Un DAG décrit une séquence de tâches (tasks) avec des dépendances.
+
+Airflow est souvent utilisé pour :
+
+Orchestrer des jobs ETL/ELT (Spark, Hive, Python, etc.)
+
+Lancer des pipelines quotidiens / horaires
+
+Surveiller les dépendances entre jobs
+
+Relancer automatiquement en cas d’échec
+
+Gérer les environnements (dev, prod…)
+
+
+
+---
+
+🧩 2. Concepts clés
+
+Élément	Description
+
+DAG (Directed Acyclic Graph)	Le pipeline logique (ensemble des tâches et leurs dépendances)
+Task	Une étape d’exécution (ex: lancer un job Spark, exécuter un script)
+Operator	Gabarit d’exécution (PythonOperator, BashOperator, SparkSubmitOperator, etc.)
+Scheduler	Programme qui planifie les DAGs selon leur fréquence
+Executor	Mécanisme d’exécution (LocalExecutor, CeleryExecutor, KubernetesExecutor…)
+Web UI	Interface graphique pour surveiller les DAGs et tâches
+
+
+
+---
+
+⚙️ 3. Exemple simple : DAG qui exécute un job Spark
+
+Imaginons que tu as un job Spark dans ton AKS ou un cluster YARN :
+
+🧾 Fichier : spark_job.py
+
+from pyspark.sql import SparkSession
+
+if __name__ == "__main__":
+    spark = SparkSession.builder \
+        .appName("ExampleAirflowSparkJob") \
+        .getOrCreate()
+
+    df = spark.read.csv("abfss://data@storageaccount.dfs.core.windows.net/input/customers.csv", header=True)
+    df_filtered = df.filter(df["age"] > 30)
+    df_filtered.write.mode("overwrite").parquet("abfss://data@storageaccount.dfs.core.windows.net/output/customers_filtered/")
+
+    spark.stop()
+
+
+---
+
+🪶 4. DAG Airflow : lancement du job Spark
+
+📄 Fichier : spark_dag.py
+
+(à placer dans ton dossier ~/airflow/dags/)
+
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+
+default_args = {
+    'owner': 'data_engineer',
+    'depends_on_past': False,
+    'email_on_failure': True,
+    'email': ['alert@mycompany.com'],
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5)
+}
+
+with DAG(
+    dag_id='spark_etl_customers',
+    default_args=default_args,
+    description='DAG to run Spark ETL job on AKS or YARN',
+    schedule_interval='@daily',
+    start_date=datetime(2025, 10, 13),
+    catchup=False,
+    tags=['spark', 'etl', 'aks']
+) as dag:
+
+    run_spark_job = SparkSubmitOperator(
+        task_id='run_customers_etl',
+        application='/opt/spark/jobs/spark_job.py',
+        conn_id='spark_default',  # connexion configurée dans Airflow UI
+        executor_memory='4g',
+        driver_memory='2g',
+        num_executors=2,
+        executor_cores=2,
+        conf={
+            'spark.yarn.maxAppAttempts': 1,
+            'spark.sql.shuffle.partitions': 10
+        }
+    )
+
+    run_spark_job
+
+
+---
+
+🔧 5. Configuration requise
+
+a) Connexion Airflow → Spark
+
+Dans l’interface Airflow UI → Admin → Connections → spark_default :
+
+Conn Type: Spark
+
+Host: spark://<spark-master>:7077 (ou yarn si YARN)
+
+Extra:
+
+{
+  "queue": "default",
+  "deploy-mode": "cluster"
+}
+
+
+b) Installation
+
+Sur ton serveur Airflow (Docker ou VM) :
+
+pip install apache-airflow-providers-apache-spark
+
+
+---
+
+☁️ 6. Exemple sur AKS (Azure Kubernetes Service)
+
+Si ton Spark est déployé sur AKS :
+
+Utilise le KubernetesExecutor d’Airflow
+
+Le SparkSubmitOperator peut soumettre des jobs via spark-submit --master k8s://...
+
+Exemple de conf conf :
+
+conf={
+    "spark.kubernetes.container.image": "myacr.azurecr.io/spark:latest",
+    "spark.kubernetes.namespace": "spark-jobs",
+    "spark.executor.instances": "3"
+}
+
+
+
+---
+
+🧠 7. Bonnes pratiques
+
+✅ Toujours isoler les environnements (dev, prod)
+✅ Centraliser les logs (spark.eventLog.enabled=true)
+✅ Utiliser Variable.get("...") d’Airflow pour stocker les chemins
+✅ Versionner les DAGs avec Git
+✅ Ajouter des dépendances (task1 >> task2) pour enchaîner les jobs Spark
+
+
+---
+
+🧪 8. Exemple complet de pipeline (3 tâches Spark)
+
+extract = SparkSubmitOperator(
+    task_id='extract_data',
+    application='/opt/spark/jobs/extract.py',
+    conn_id='spark_default'
+)
+
+transform = SparkSubmitOperator(
+    task_id='transform_data',
+    application='/opt/spark/jobs/transform.py',
+    conn_id='spark_default'
+)
+
+load = SparkSubmitOperator(
+    task_id='load_data',
+    application='/opt/spark/jobs/load.py',
+    conn_id='spark_default'
+)
+
+extract >> transform >> load  # exécution en chaîne
+
+
+---
+
+Souhaites-tu que je te fasse un exemple complet prêt à exécuter dans Airflow sous Docker Compose (avec un container Spark configuré et un DAG de test) ?
+Cela te permettrait de tester ton pipeline Spark localement avant AKS.
+
