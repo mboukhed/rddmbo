@@ -1,0 +1,28 @@
+public static String getParentDirectoryPath(String azurePath) {
+    if (azurePath == null || azurePath.isEmpty()) {
+        return "";
+    }
+
+    // Supprimer un éventuel "/" final
+    String cleanPath = azurePath.endsWith("/") 
+            ? azurePath.substring(0, azurePath.length() - 1)
+            : azurePath;
+
+    int lastSlashIndex = cleanPath.lastIndexOf('/');
+    if (lastSlashIndex == -1) {
+        // pas de slash → pas de parent
+        return "";
+    }
+
+    return cleanPath.substring(0, lastSlashIndex);
+}
+
+public static void main(String[] args) {
+    String path1 = "abfss://data@account.dfs.core.windows.net/input/archive/raw_data_2025";
+    String path2 = "abfss://data@account.dfs.core.windows.net/input/archive/raw_data_2025/";
+    String path3 = "input/archive/raw_data_2025";
+
+    System.out.println(getParentDirectoryPath(path1)); // abfss://data@account.dfs.core.windows.net/input/archive
+    System.out.println(getParentDirectoryPath(path2)); // abfss://data@account.dfs.core.windows.net/input/archive
+    System.out.println(getParentDirectoryPath(path3)); // input/archive
+}
