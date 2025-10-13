@@ -1,0 +1,32 @@
+public class KeywordValidator {
+
+    private static final String[] REQUIRED_KEYWORDS = {"tox", "aa", "de", "eu"};
+
+    /**
+     * Vérifie que la chaîne contient au moins un mot-clé attendu.
+     * @param input Chaîne à vérifier
+     * @throws IllegalArgumentException si aucun mot-clé n'est trouvé
+     */
+    public static void validateContainsKeyword(String input) {
+        if (input == null || input.isEmpty()) {
+            throw new IllegalArgumentException("Le texte fourni est vide ou nul.");
+        }
+
+        String lower = input.toLowerCase();
+
+        for (String keyword : REQUIRED_KEYWORDS) {
+            if (lower.contains(keyword)) {
+                return; // ✅ au moins un mot trouvé → on sort sans erreur
+            }
+        }
+
+        // ❌ aucun mot trouvé → on lève une exception
+        throw new IllegalArgumentException(
+                "La chaîne doit contenir au moins un des mots-clés suivants : " +
+                String.join(", ", REQUIRED_KEYWORDS) +
+                ". Valeur reçue : \"" + input + "\""
+        );
+    }
+
+    // Exemple 
+}
