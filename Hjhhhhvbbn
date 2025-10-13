@@ -1,0 +1,53 @@
+import java.text.Normalizer;
+
+public class ClickHouseStringNormalizer {
+
+    /**
+     * Supprime accents/diacritiques et remplace les lettres spéciales courantes
+     * par leur équivalent ASCII (utile pour clés/joins/indices côté ClickHouse).
+     * Ex: "Crème brûlée – München & cœur/œuf/Æsir/Øresund/straße"
+     *  -> "Creme brulee - Munchen & coeur/oeuf/AEsir/Oresund/strasse"
+     */
+    public static String removeAccentsAndSpecials(String input) {
+        if (input == null) return null;
+        if (input.isEmpty()) return "";
+
+        // 1) Normalisation -> décomposition des diacritiques (é -> e + ´)
+        String s = Normalizer.normalize(input, Normalizer.Form.NFD);
+
+        // 2) Suppression des marques diacritiques combinées
+        s = s.replaceAll("\\p{M}+", ""); // \p{M} = Combining marks
+
+        // 3) Remplacements pour lettres “spéciales” non couvertes par la décomposition
+        //    (ligatures, ß, Ø, etc.)
+        s = s
+                // Ligatures
+                .replace("Æ", "AE").replace("æ", "ae")
+                .replace("Œ", "OE").replace("œ", "oe")
+                // Allemand
+                .replace("ß", "ss")
+                // Nordiques / divers
+                .replace("Ø", "O").replace("ø", "o")
+                .replace("Å", "A").replace("å", "a")
+                .replace("Ł", "L").replace("ł", "l")
+                .replace("Đ", "D").replace("đ", "d")
+                .replace("Þ", "Th").replace("þ", "th")
+                .replace("Ħ", "H").replace("ħ", "h")
+                .replace("Ŀ", "L").replace("ŀ", "l")
+                .replace("ĸ", "k")
+                .replace("Ŋ", "N").replace("ŋ", "n")
+                .replace("Ĳ", "IJ").replace("ĳ", "ij");
+
+        // 4) (Optionnel) On peut s'assurer d'un pur ASCII en retirant tout le reste non-ASCII :
+        // s = s.replaceAll("[^\\p{ASCII}]", "");
+
+        return s;
+    }
+
+    // Demo
+    public static void main(String[] args) {
+        String x = "Crème brûlée – München & cœur/œuf/Æsir/Øresund/straße";
+        System.out.println(removeAccentsAndSpecials(x));
+        // -> "Creme brulee – Munchen & coeur/oeuf/AEsir/Oresund/strasse"
+    }
+}
