@@ -1,0 +1,88 @@
+Bien vu — merci pour la correction 🙏
+Si Dev = DefaultToOAuthAuthentication: False et Prod = True, alors ce paramètre n’explique PAS ton échec d’eventlog.
+
+Pourquoi ?
+
+DefaultToOAuthAuthentication ne concerne que l’accès via le portail Azure (et certains outils graphiques).
+Le driver ABFS (abfss://) que Spark utilise s’authentifie en OAuth via ta Managed Identity indépendamment de ce flag.
+Donc la panne en PROD vient ailleurs.
+
+Ce qui reste (quasi sûr)
+
+1. RBAC sur le conteneur (ou compte) pour la MI de PROD
+
+
+2. ACL POSIX sur ADLS Gen2 (parents + spark-events) pour l’OID de la MI
+
+
+3. Réseau (firewall/Private Endpoint)
+
+
+4. Chemin/URL spark.eventLog.dir (typo, wasb/https au lieu de abfss)
+
+
+
+Checks/Fix express (copier-coller)
+
+1) RBAC – la MI PROD a-t-elle le rôle data ?
+
+# Récupérer les IDs de la MI
+az identity show -g <RG_MI> -n <MI_NAME_PROD> \
+  --query "{clientId:clientId, principalId:principalId, objectId:principalId}"
+
+# Lister ses rôles
+az role assignment list --assignee <principalId> --all --output table
+
+# (Si manquant) Donner "Storage Blob Data Contributor" **au niveau du conteneur**
+az role assignment create \
+  --assignee <principalId> \
+  --role "Storage Blob Data Contributor" \
+  --scope /subscriptions/<SUB_ID>/resourceGroups/<RG_STORAGE>/providers/Microsoft.Storage/storageAccounts/<ACCOUNT>/blobServices/default/containers/<CONTAINER>
+
+2) ACL POSIX – donner accès à l’OID de la MI
+
+# Voir les ACL actuelles
+az storage fs directory get-access-control \
+  --account-name <ACCOUNT> --file-system <CONTAINER> --path "spark-events" --auth-mode login
+
+# Traverser la racine (x) + accès hérités corrects
+az storage fs directory set-access-control \
+  --account-name <ACCOUNT> --file-system <CONTAINER> --path "" \
+  --acl "user::r-x,group::r-x,other::---" --auth-mode login
+
+az storage fs directory set-access-control \
+  --account-name <ACCOUNT> --file-system <CONTAINER> --path "spark-events" \
+  --acl "user::rwx,group::r-x,other::---" \
+  --default-acl "user::rwx,group::r-x,other::---" --auth-mode login
+
+# Ajouter explicitement la MI (UTILISE l'**objectId/principalId**, pas clientId)
+az storage fs directory set-access-control \
+  --account-name <ACCOUNT> --file-system <CONTAINER> --path "spark-events" \
+  --acl "user:<OID_MI>:rwx" --default-acl "user:<OID_MI>:rwx" --auth-mode login
+
+3) Test depuis un pod PROD (isole le problème)
+
+kubectl exec -it <POD_DRIVER> -- bash
+hadoop fs -mkdir -p abfss://<CONTAINER>@<ACCOUNT>.dfs.core.windows.net/spark-events/_probe
+hadoop fs -touchz   abfss://<CONTAINER>@<ACCOUNT>.dfs.core.windows.net/spark-events/_probe/test.ok
+hadoop fs -ls       abfss://<CONTAINER>@<ACCOUNT>.dfs.core.windows.net/spark-events/_probe
+
+mkdir OK mais touchz KO ⇒ write ACL manquante.
+
+Tout KO ⇒ RBAC / réseau / identité.
+
+
+4) Sanity côté Spark
+
+spark.eventLog.enabled=true
+spark.eventLog.dir=abfss://<CONTAINER>@<ACCOUNT>.dfs.core.windows.net/spark-events
+spark.hadoop.fs.azure.account.auth.type.<ACCOUNT>.dfs.core.windows.net=OAuth
+spark.hadoop.fs.azure.account.oauth.provider.type.<ACCOUNT>.dfs.core.windows.net=org.apache.hadoop.fs.azurebfs.oauth2.MsiTokenProvider
+
+(Assure-toi que c’est bien abfss:// et pas wasb/https/blobfuse.)
+
+
+---
+
+Si tu me donnes <ACCOUNT>, <CONTAINER>, <RG_STORAGE> et l’OID de la MI PROD, je te renvoie les 3 commandes exactes à lancer pour débloquer l’écriture.
+
