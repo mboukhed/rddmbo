@@ -1,0 +1,106 @@
+Parfait — uniquement GZIP (.gz), sans toucher au contenu CSV, et en Spark via Hadoop FS (byte-à-byte).
+
+Voici une utilitaire Java prêt à coller :
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.*;
+import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.compress.CompressionOutputStream;
+import org.apache.hadoop.io.compress.GzipCodec;
+import org.apache.spark.sql.SparkSession;
+
+import java.net.URI;
+
+public final class SparkGzipUtil {
+
+    private SparkGzipUtil() {}
+
+    /** 
+     * GZIP "byte-preserving" : source -> source.gz
+     * Ne lit pas en DataFrame, ne modifie pas le CSV (octets bruts).
+     * Tourne côté driver. Compatible abfss://, wasbs://, hdfs:// ...
+     */
+    public static void gzipOne(SparkSession spark, String srcUri, String dstGzUri,
+                               boolean overwrite, boolean deleteSourceAfter) throws Exception {
+        Configuration hconf = spark.sparkContext().hadoopConfiguration();
+        Path src = new Path(srcUri);
+        Path dst = new Path(dstGzUri);
+
+        FileSystem fs = src.getFileSystem(hconf);
+        if (!fs.exists(src)) {
+            throw new IllegalArgumentException("Source introuvable: " + src);
+        }
+        if (fs.exists(dst) && !overwrite) {
+            throw new IllegalStateException("Cible existe déjà: " + dst);
+        }
+
+        // Lecture/écriture en flux
+        try (FSDataInputStream in = fs.open(src);
+             FSDataOutputStream out = fs.create(dst, overwrite,
+                     4 * 1024 * 1024, (short) 1, 64 * 1024 * 1024)) {
+
+            GzipCodec gzip = new GzipCodec();
+            gzip.setConf(hconf);
+
+            try (CompressionOutputStream gz = gzip.createOutputStream(out)) {
+                IOUtils.copyBytes(in, gz, hconf, false); // copie les octets tels quels
+                gz.finish(); // termine proprement le .gz
+            }
+        }
+
+        if (deleteSourceAfter) {
+            fs.delete(src, false);
+        }
+    }
+
+    /**
+     * GZIPlifie tous les .csv d’un répertoire (non récursif).
+     * Crée file.csv.gz pour chaque file.csv (skip si .gz existe et overwrite=false).
+     */
+    public static void gzipFolderCsvs(SparkSession spark, String folderUri,
+                                      boolean overwrite, boolean deleteSourceAfter) throws Exception {
+        Configuration hconf = spark.sparkContext().hadoopConfiguration();
+        FileSystem fs = FileSystem.get(new URI(folderUri), hconf);
+        Path dir = new Path(folderUri);
+
+        FileStatus[] files = fs.listStatus(dir, path -> path.getName().toLowerCase().endsWith(".csv"));
+        if (files == null) return;
+
+        for (FileStatus f : files) {
+            if (f.isDirectory()) continue;
+            Path p = f.getPath();
+            String dst = p.toString() + ".gz";
+            try {
+                gzipOne(spark, p.toString(), dst, overwrite, deleteSourceAfter);
+            } catch (Exception e) {
+                // log minimal et continue
+                System.err.println("Échec GZIP " + p + " -> " + dst + " : " + e.getMessage());
+            }
+        }
+    }
+}
+
+Exemple d’appel
+
+SparkSession spark = SparkSession.builder().appName("csv-to-gz").getOrCreate();
+
+String src  = "abfss://raw@<account>.dfs.core.windows.net/path/data.csv";
+String dest = "abfss://raw@<account>.dfs.core.windows.net/path/data.csv.gz";
+
+// Un fichier
+SparkGzipUtil.gzipOne(spark, src, dest, /*overwrite*/ true, /*deleteSourceAfter*/ false);
+
+// Tous les .csv d’un dossier
+SparkGzipUtil.gzipFolderCsvs(spark, "abfss://raw@<account>.dfs.core.windows.net/path/", true, false);
+
+Notes rapides
+
+Byte-preserving : pas de DataFrame, pas de parsing → le CSV n’est pas altéré, seule la compression s’applique.
+
+Fonctionne avec ADLS Gen2 (abfss://) si ta conf Spark/Hadoop ABFS est en place (MSI, client secret, SAS…).
+
+Hadoop FS ne gère pas Content-Type/Content-Encoding; si tu veux poser ces headers, fais-le ensuite via le SDK Blob/ADLS (optionnel).
+
+
+Tu veux que je l’adapte à ton endpoint exact (filesystem, compte, auth) et que j’ajoute l’option “skip si >0 bytes dans .gz” + logs Spark ?
+
