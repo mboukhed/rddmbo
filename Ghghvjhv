@@ -1,0 +1,90 @@
+Parfait. Voici la version simple qui copie A → B sur Azure en ABFSS, avec DEUX comptes différents (donc deux couples clientId/secret/tenantId). Aucune vérif’ inutile, juste la config et la copie.
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.Path;
+
+import java.net.URI;
+
+public class SimpleAzureCopyTwoSP {
+
+    // Configure OAuth (client secret) pour un compte ADLS Gen2 donné
+    private static void setSpAuth(Configuration conf,
+                                  String accountName,          // ex: "acctsrc" ou "acctdst"
+                                  String clientId,
+                                  String clientSecret,
+                                  String tenantId) {
+
+        String suffix = accountName + ".dfs.core.windows.net";
+
+        conf.set("fs.abfss.impl", "org.apache.hadoop.fs.azurebfs.SecureAzureBlobFileSystem");
+        conf.set("fs.AbstractFileSystem.abfss.impl", "org.apache.hadoop.fs.azurebfs.ABFS");
+
+        conf.set("fs.azure.account.auth.type." + suffix, "OAuth");
+        conf.set("fs.azure.account.oauth.provider.type." + suffix,
+                 "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider");
+        conf.set("fs.azure.account.oauth2.client.id." + suffix, clientId);
+        conf.set("fs.azure.account.oauth2.client.secret." + suffix, clientSecret);
+        conf.set("fs.azure.account.oauth2.client.endpoint." + suffix,
+                 "https://login.microsoftonline.com/" + tenantId + "/oauth2/token");
+    }
+
+    /**
+     * Copie récursive A → B (dossier/fichier) entre deux comptes Azure différents.
+     * @param src abfss://containerA@accountA.dfs.core.windows.net/pathA
+     * @param dst abfss://containerB@accountB.dfs.core.windows.net/pathB
+     */
+    public static void copy(String src,
+                            String dst,
+                            // Creds source
+                            String srcAccountName, String srcClientId, String srcClientSecret, String srcTenantId,
+                            // Creds destination
+                            String dstAccountName, String dstClientId, String dstClientSecret, String dstTenantId
+    ) throws Exception {
+
+        Configuration conf = new Configuration();
+
+        // Auth pour les DEUX comptes (source + destination)
+        setSpAuth(conf, srcAccountName, srcClientId, srcClientSecret, srcTenantId);
+        setSpAuth(conf, dstAccountName, dstClientId, dstClientSecret, dstTenantId);
+
+        FileSystem fsSrc = FileSystem.get(new URI(src), conf);
+        FileSystem fsDst = FileSystem.get(new URI(dst), conf);
+
+        // Copie récursive, pas de contrôles
+        FileUtil.copy(fsSrc, new Path(src), fsDst, new Path(dst),
+                      false, /* deleteSource */ true /* overwrite */, conf);
+
+        fsSrc.close();
+        fsDst.close();
+    }
+
+    public static void main(String[] args) throws Exception {
+        copy(
+           "abfss://contSrc@acctsrc.dfs.core.windows.net/data/srcDir",
+           "abfss://contDst@acctdst.dfs.core.windows.net/data/dstDir",
+
+           // Creds compte source
+           "acctsrc", "<SRC_CLIENT_ID>", "<SRC_CLIENT_SECRET>", "<SRC_TENANT_ID>",
+
+           // Creds compte destination
+           "acctdst", "<DST_CLIENT_ID>", "<DST_CLIENT_SECRET>", "<DST_TENANT_ID>"
+        );
+        System.out.println("Copie OK.");
+    }
+}
+
+Notes ultra-courtes
+
+Les propriétés sont scoping par compte via fs.azure.account.*.<accountName>.dfs.core.windows.net → on peut mettre deux SP différents dans la même Configuration.
+
+La ligne qui fait tout :
+
+FileUtil.copy(fsSrc, new Path(src), fsDst, new Path(dst), false, true, conf);
+
+Ça marche pour répertoires ET fichiers, récursif, cross-containers, cross-comptes.
+
+
+Tu veux aussi une variante Managed Identity côté source ou destination (mix SP ↔ MI) ?
+
