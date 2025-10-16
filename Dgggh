@@ -1,0 +1,135 @@
+Merci pour la photo — on lit bien :
+
+> IOException: Failed with error code: Read timed out … while processing file/directory … (gros fichier)
+
+
+
+Donc ta copie Hadoop FileSystem décroche en lecture réseau sur un gros blob (petits fichiers OK). Classique avec ABFS/WASB derrière un proxy/LB un peu strict.
+
+Voici le correctif en 3 étapes très concrètes.
+
+
+---
+
+1) Augmenter timeouts & retries (Hadoop + JVM)
+
+Ajoute ces propriétés avant de construire les FileSystem (ou via core-site.xml). Elles couvrent WASB (NativeAzureFileSystem) et ABFS. Même si tu n’utilises pas toutes, ça ne casse rien.
+
+Configuration conf = new Configuration();
+
+// ——— Timeouts lecture/écriture ———
+conf.setInt("io.file.buffer.size", 1 * 1024 * 1024);         // 1 Mo (moins d’allers-retours)
+conf.setInt("fs.azure.block.size",   32 * 1024 * 1024);       // WASB: 32 Mo
+conf.setInt("fs.azure.read.request.timeout",   600_000);      // 10 min (WASB)
+conf.setInt("fs.azure.write.request.timeout",  600_000);      // 10 min (WASB)
+
+// ABFS (au cas où tu es en abfs://)
+conf.setInt("fs.azure.io.request.timeout", 600_000);          // 10 min
+conf.setInt("fs.azure.io.retry.max.retries", 60);
+conf.setInt("fs.azure.io.retry.backoff.interval", 2_000);     // 2 s
+
+// ——— Retries génériques ———
+conf.setInt("fs.azure.retry.max.retries", 60);                // WASB
+conf.setInt("fs.azure.retry.backoff.interval", 2_000);
+
+// (si tu passes par HttpURLConnection côté WASB)
+// augmente aussi les timeouts JVM :
+System.setProperty("sun.net.client.defaultReadTimeout",  "600000");
+System.setProperty("sun.net.client.defaultConnectTimeout","60000");
+
+> Garde block.size à 16–64 Mo selon ton réseau. Trop petit → trop de requêtes ; trop grand → gros paquets sensibles aux pertes.
+
+
+
+
+---
+
+2) Copier en flux contrôlé (au lieu de FileUtil.copy)
+
+Sur les très gros fichiers, pilote la copie toi-même pour profiter du buffer 1 Mo et des timeouts ci-dessus :
+
+static boolean copyOneLargeFile(FileSystem srcFs, Path src, FileSystem dstFs, Path dst, Configuration conf) throws Exception {
+    // parents
+    Path parent = dst.getParent();
+    if (!dstFs.exists(parent)) dstFs.mkdirs(parent);
+
+    // skip si présent
+    if (dstFs.exists(dst)) {
+        System.out.println("⏩ Skip (exists): " + dst);
+        return true;
+    }
+
+    // buffer 1 Mo (piloté par io.file.buffer.size)
+    final int buf = conf.getInt("io.file.buffer.size", 1*1024*1024);
+
+    try (FSDataInputStream in  = srcFs.open(src, buf);
+         FSDataOutputStream out = dstFs.create(dst, true, buf)) {
+
+        byte[] b = new byte[buf];
+        long total = 0;
+        for (int r; (r = in.read(b)) >= 0;) {
+            out.write(b, 0, r);
+            total += r;
+        }
+        out.hflush(); // pousse côté serveur
+        System.out.println("✅ Copied large file: " + src + " -> " + dst + " (" + total + " bytes)");
+        return true;
+    }
+}
+
+Intègre cette méthode dans ta boucle de parcours (à la place de FileUtil.copy) uniquement quand la taille (status.getLen()) dépasse, par exemple, 256 Mo.
+
+
+---
+
+3) Deux réglages qui aident souvent derrière proxy/LB
+
+Keep-Alive JVM (évite les coupures mid-stream) :
+
+System.setProperty("http.keepAlive", "true");
+System.setProperty("http.maxConnections", "50");
+
+Si ton proxy/lb coupe les connexions inactives → réduis la taille de bloc à 16 Mo et garde io.file.buffer.size = 1 Mo pour “nourrir” régulièrement le flux.
+
+
+
+---
+
+Mini-exemple d’usage (gros fichiers uniquement)
+
+LocatedFileStatus st = srcFs.getFileStatus(srcPath);
+Path dstPath = new Path(dstBase, relative);
+if (st.getLen() >= 256L * 1024 * 1024) {
+    copyOneLargeFile(srcFs, srcPath, dstFs, dstPath, conf);   // gros fichier
+} else {
+    FileUtil.copy(srcFs, srcPath, dstFs, dstPath, false, conf); // petits fichiers
+}
+
+
+---
+
+Si ça time-out encore
+
+Monte read.request.timeout à 15–20 min le temps de valider.
+
+Essaie block.size = 16 Mo (plus robuste sur réseaux “nerveux”).
+
+Vérifie qu’il n’y a pas de nonProxyHosts qui fait passer certains appels hors proxy (asymétrie = resets).
+
+En dernier recours pour 1–2 énormes blobs : fais une copie server-side uniquement pour ces fichiers (> 1 Go). Tu gardes FileSystem pour le reste.
+
+
+
+---
+
+Tu me donnes :
+
+ton schéma URI exact (abfs:// ou wasbs://),
+
+la taille du fichier qui plante,
+
+et (si possible) la valeur actuelle de fs.azure.block.size,
+
+
+et je te renvoie la config “pile-poil” à coller (trois lignes).
+
