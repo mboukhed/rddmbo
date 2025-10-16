@@ -1,0 +1,126 @@
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.*;
+
+import java.net.URI;
+
+public class AbfsCopyNoOverwrite {
+
+    // --- paramètres à remplir ---
+    // comptes / conteneurs / préfixes
+    static final String SRC_ACCOUNT = "<srcAccount>"; // ex: mystgacctsrc
+    static final String DST_ACCOUNT = "<dstAccount>"; // ex: mystgacctdst
+    static final String SRC_CONTAINER = "<srcContainer>";
+    static final String DST_CONTAINER = "<dstContainer>";
+    static final String SRC_PREFIX = "path/from/";   // répertoire source (peut être "")
+    static final String DST_PREFIX = "path/to/";     // répertoire cible
+
+    // SPN source
+    static final String SRC_TENANT = "<src-tenant-id>";
+    static final String SRC_CLIENT_ID = "<src-client-id>";
+    static final String SRC_CLIENT_SECRET = "<src-client-secret>";
+
+    // SPN destination
+    static final String DST_TENANT = "<dst-tenant-id>";
+    static final String DST_CLIENT_ID = "<dst-client-id>";
+    static final String DST_CLIENT_SECRET = "<dst-client-secret>";
+
+    // tuning IO
+    static final int BUF = 4 * 1024 * 1024;               // 4 MB
+    static final long FLUSH_EVERY = 32L * 1024 * 1024;    // flush toutes ~32 MB
+
+    public static void main(String[] args) throws Exception {
+        // Windows : évite la lib native
+        System.setProperty("hadoop.native.lib", "false");
+        // timeouts JVM bas niveau
+        System.setProperty("sun.net.client.defaultReadTimeout", "300000");
+        System.setProperty("sun.net.client.defaultConnectTimeout", "60000");
+
+        Configuration conf = new Configuration();
+        // Auth ABFS par compte (2 SPN différents possibles)
+        setAbfsOAuth(conf, SRC_ACCOUNT, SRC_TENANT, SRC_CLIENT_ID, SRC_CLIENT_SECRET);
+        setAbfsOAuth(conf, DST_ACCOUNT, DST_TENANT, DST_CLIENT_ID, DST_CLIENT_SECRET);
+
+        // robustesse
+        conf.set("fs.azure.user.agent.prefix", "abfs-copy-nooverwrite");
+        conf.setInt("fs.azure.io.retry.max.retries", 10);
+        conf.setInt("fs.azure.io.retry.min.backoff", 1000);
+        conf.setInt("fs.azure.io.retry.max.backoff", 30000);
+        conf.setInt("fs.azure.io.read.tcp.read.timeout", 300000);
+
+        String srcUri = String.format("abfs://%s@%s.dfs.core.windows.net/%s",
+                SRC_CONTAINER, SRC_ACCOUNT, SRC_PREFIX);
+        String dstUri = String.format("abfs://%s@%s.dfs.core.windows.net/%s",
+                DST_CONTAINER, DST_ACCOUNT, DST_PREFIX);
+
+        FileSystem fsSrc = FileSystem.get(new URI(srcUri), conf);
+        FileSystem fsDst = FileSystem.get(new URI(dstUri), conf);
+
+        Path srcRoot = new Path("/" + trimLeadingSlash(SRC_PREFIX));
+        Path dstRoot = new Path("/" + trimLeadingSlash(DST_PREFIX));
+
+        copyRec(fsSrc, srcRoot, fsDst, dstRoot);
+        System.out.println("DONE");
+    }
+
+    private static void setAbfsOAuth(Configuration conf, String account,
+                                     String tenant, String clientId, String secret) {
+        String host = account + ".dfs.core.windows.net";
+        conf.set("fs.azure.account.auth.type." + host, "OAuth");
+        conf.set("fs.azure.account.oauth.provider.type." + host,
+                "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider");
+        conf.set("fs.azure.account.oauth2.client.id." + host, clientId);
+        conf.set("fs.azure.account.oauth2.client.secret." + host, secret);
+        conf.set("fs.azure.account.oauth2.client.endpoint." + host,
+                "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token");
+    }
+
+    // --- copie récursive ---
+    private static void copyRec(FileSystem fsSrc, Path src, FileSystem fsDst, Path dst) throws Exception {
+        FileStatus st = fsSrc.getFileStatus(src);
+        if (st.isFile()) {
+            copyFile(fsSrc, src, fsDst, dst);
+            return;
+        }
+        // répertoire : créer côté destination puis descendre
+        fsDst.mkdirs(dst);
+        for (FileStatus e : fsSrc.listStatus(src)) {
+            Path childSrc = e.getPath();
+            Path childDst = new Path(dst, childSrc.getName());
+            if (e.isDirectory()) {
+                copyRec(fsSrc, childSrc, fsDst, childDst);
+            } else {
+                copyFile(fsSrc, childSrc, fsDst, childDst);
+            }
+        }
+    }
+
+    // --- copie fichier -> fichier, skip si la cible existe ---
+    private static void copyFile(FileSystem fsSrc, Path src, FileSystem fsDst, Path dst) throws Exception {
+        if (fsDst.exists(dst)) {
+            System.out.println("Skip (exists): " + dst);
+            return;
+        }
+        byte[] buf = new byte[BUF];
+        long sinceFlush = 0;
+        try (FSDataInputStream in = fsSrc.open(src);
+             FSDataOutputStream out = fsDst.create(dst, false)) {
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                sinceFlush += n;
+                if (sinceFlush >= FLUSH_EVERY) {
+                    out.hflush();            // pousse les blocs côté service
+                    sinceFlush = 0;
+                }
+            }
+            out.hflush();
+            out.hsync(); // no-op si non supporté
+        }
+        System.out.println("Copied: " + src + " -> " + dst);
+    }
+
+    private static String trimLeadingSlash(String p) {
+        if (p == null) return "";
+        return p.startsWith("/") ? p.substring(1) : p;
+    }
+}
