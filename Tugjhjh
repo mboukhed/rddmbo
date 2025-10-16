@@ -1,0 +1,83 @@
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.core.util.polling.SyncPoller;
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.storage.blob.*;
+import com.azure.storage.blob.models.BlobCopyInfo;
+import com.azure.storage.blob.models.BlobItem;
+import com.azure.storage.blob.models.ListBlobsOptions;
+import com.azure.storage.blob.options.BlobBeginCopyOptions;
+
+import java.time.Duration;
+
+public class LocalBlobCopyFlat {
+  public static void main(String[] a) {
+    if (a.length != 12) {
+      System.err.println("Usage: SRC_ACC SRC_CONT SRC_PATH  DST_ACC DST_CONT DST_PATH  SRC_TENANT SRC_ID SRC_SEC  DST_TENANT DST_ID DST_SEC");
+      System.exit(1);
+    }
+    String SA=a[0], SC=a[1], SP=a[2];   // source account/container/prefix (dossier)
+    String DA=a[3], DC=a[4], DP=a[5];   // destination account/container/prefix
+    String ST=a[6], SID=a[7], SSC=a[8]; // source tenant/client/secret
+    String DT=a[9], DID=a[10], DSC=a[11];
+
+    // Crédentials SPN
+    ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+        .tenantId(ST).clientId(SID).clientSecret(SSC).build();
+    ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+        .tenantId(DT).clientId(DID).clientSecret(DSC).build();
+
+    // Services Blob (fonctionne aussi sur comptes HNS/Gen2)
+    BlobServiceClient sSvc = new BlobServiceClientBuilder()
+        .endpoint("https://" + SA + ".blob.core.windows.net")
+        .credential(srcCred)
+        .buildClient();
+    BlobServiceClient dSvc = new BlobServiceClientBuilder()
+        .endpoint("https://" + DA + ".blob.core.windows.net")
+        .credential(dstCred)
+        .buildClient();
+
+    BlobContainerClient sCont = sSvc.getBlobContainerClient(SC);
+    BlobContainerClient dCont = dSvc.getBlobContainerClient(DC);
+
+    // Bearer pour autoriser la lecture source (privée)
+    String bearer = "Bearer " + srcCred
+        .getToken(new TokenRequestContext().addScopes("https://storage.azure.com/.default"))
+        .block().getToken();
+
+    // Normalisation des préfixes
+    String srcPrefix = SP.endsWith("/") ? SP : SP + "/";
+    String dstPrefix = DP.endsWith("/") ? DP : DP + "/";
+
+    // Listing NON récursif : délimiteur "/" + prefix
+    ListBlobsOptions opt = new ListBlobsOptions().setPrefix(srcPrefix);
+    for (BlobItem bi : sCont.listBlobsByHierarchy("/", opt, null)) {
+      // Si c’est un “pseudo-dossier”, on ignore
+      if (bi.isPrefix() != null && bi.isPrefix()) {
+        System.out.println("Ignore dir: " + bi.getName());
+        continue;
+      }
+
+      String srcName = bi.getName(); // ex: folder/file.json
+      String fileName = srcName.substring(srcName.lastIndexOf('/') + 1);
+      String dstName = dstPrefix + fileName;
+
+      BlobClient dst = dCont.getBlobClient(dstName);
+      if (dst.exists()) {
+        System.out.println("Skip (exists): " + dstName);
+        continue;
+      }
+
+      String srcUrl = sCont.getBlobClient(srcName).getBlobUrl();
+      BlobBeginCopyOptions copyOpt = new BlobBeginCopyOptions(srcUrl)
+          .setSourceAuthorization(bearer);
+
+      SyncPoller<BlobCopyInfo, Void> poller = dst.beginCopy(copyOpt, Duration.ofSeconds(2));
+      poller.waitForCompletion();
+
+      System.out.println("Copied: " + srcName + " -> " + dstName);
+    }
+
+    System.out.println("✅ Done (flat, non-recursive).");
+  }
+}
