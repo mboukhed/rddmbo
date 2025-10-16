@@ -1,0 +1,87 @@
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.*;
+import java.io.IOException;
+import java.net.URI;
+
+public class AzureCopyNoOverwrite {
+
+    private static void setSpAuth(Configuration conf,
+                                  String accountName,
+                                  String clientId,
+                                  String clientSecret,
+                                  String tenantId) {
+        String suffix = accountName + ".dfs.core.windows.net";
+
+        conf.set("fs.abfss.impl", "org.apache.hadoop.fs.azurebfs.SecureAzureBlobFileSystem");
+        conf.set("fs.AbstractFileSystem.abfss.impl", "org.apache.hadoop.fs.azurebfs.ABFS");
+
+        conf.set("fs.azure.account.auth.type." + suffix, "OAuth");
+        conf.set("fs.azure.account.oauth.provider.type." + suffix,
+                "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider");
+        conf.set("fs.azure.account.oauth2.client.id." + suffix, clientId);
+        conf.set("fs.azure.account.oauth2.client.secret." + suffix, clientSecret);
+        conf.set("fs.azure.account.oauth2.client.endpoint." + suffix,
+                "https://login.microsoftonline.com/" + tenantId + "/oauth2/token");
+    }
+
+    /**
+     * Copie récursive Azure→Azure sans écraser les fichiers déjà existants.
+     */
+    public static void copyNoOverwrite(String srcUri,
+                                       String dstUri,
+                                       String srcAccount, String srcClientId, String srcSecret, String srcTenant,
+                                       String dstAccount, String dstClientId, String dstSecret, String dstTenant)
+            throws IOException {
+
+        Configuration conf = new Configuration();
+        setSpAuth(conf, srcAccount, srcClientId, srcSecret, srcTenant);
+        setSpAuth(conf, dstAccount, dstClientId, dstSecret, dstTenant);
+
+        FileSystem fsSrc = FileSystem.get(URI.create(srcUri), conf);
+        FileSystem fsDst = FileSystem.get(URI.create(dstUri), conf);
+
+        copyRec(fsSrc, new Path(srcUri), fsDst, new Path(dstUri), conf);
+
+        fsSrc.close();
+        fsDst.close();
+    }
+
+    private static void copyRec(FileSystem fsSrc, Path src, FileSystem fsDst, Path dst, Configuration conf) throws IOException {
+        FileStatus[] statuses = fsSrc.listStatus(src);
+        if (statuses == null) return;
+
+        if (!fsDst.exists(dst)) fsDst.mkdirs(dst);
+
+        for (FileStatus status : statuses) {
+            Path srcPath = status.getPath();
+            Path dstPath = new Path(dst, srcPath.getName());
+
+            if (status.isDirectory()) {
+                copyRec(fsSrc, srcPath, fsDst, dstPath, conf);
+            } else {
+                // Si le fichier existe déjà → on skip
+                if (fsDst.exists(dstPath)) {
+                    System.out.println("Skip: " + dstPath);
+                    continue;
+                }
+                System.out.println("Copie: " + srcPath + " -> " + dstPath);
+                FileUtil.copy(fsSrc, srcPath, fsDst, dstPath, false, false, conf);
+            }
+        }
+    }
+
+    public static void main(String[] args) throws IOException {
+        copyNoOverwrite(
+                "abfss://contsrc@acctsrc.dfs.core.windows.net/data/input",
+                "abfss://contdst@acctdst.dfs.core.windows.net/data/output",
+
+                // Compte source
+                "acctsrc", "<SRC_CLIENT_ID>", "<SRC_CLIENT_SECRET>", "<SRC_TENANT_ID>",
+
+                // Compte destination
+                "acctdst", "<DST_CLIENT_ID>", "<DST_CLIENT_SECRET>", "<DST_TENANT_ID>"
+        );
+
+        System.out.println("Copie terminée (sans overwrite).");
+    }
+}
