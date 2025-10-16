@@ -1,0 +1,101 @@
+Merci pour les captures — elles montrent le point clé :
+on voit des lignes AbfsHttpOperation ... request=PUT ... suivies d’un java.net.SocketTimeoutException: Read timed out.
+Donc ce n’est pas un souci de POM maintenant : c’est un timeout réseau côté écriture ABFS (durant le PUT/PATCH append+flush/commit), typiquement dû à throttling ou latence élevée quand tu fermes le flux de sortie.
+
+Voici ce que je te propose, dans l’ordre, sans changer ta logique :
+
+1) Augmenter les timeouts + retries ABFS (écriture)
+
+Ajoute (dans ta Configuration Hadoop ou core-site.xml) :
+
+# Temps d’attente des lectures/écritures TCP (ABFS)
+fs.azure.io.read.tcp.read.timeout=300000      # 5 min
+fs.azure.io.write.tcp.write.timeout=300000    # 5 min   (si non pris en charge, cf. system props ci-dessous)
+
+# Retries/exponential backoff (limiter l’échec brutal sur charge Azure)
+fs.azure.io.retry.max.retries=10
+fs.azure.io.retry.min.backoff=1000
+fs.azure.io.retry.max.backoff=30000
+
+# Optionnel: identifie tes requêtes côté logs Azure
+fs.azure.user.agent.prefix=azure-copy
+
+Et côté JVM (au lancement) — certains environnements ABFS s’appuient sur les timeouts Java bas niveau :
+
+-Dsun.net.client.defaultReadTimeout=300000
+-Dsun.net.client.defaultConnectTimeout=60000
+
+> Tu es sur Windows : garde aussi -Dhadoop.native.lib=false si tu veux éviter la lib native.
+
+
+
+2) Écrire en chunks plus petits
+
+Sur certains réseaux/proxies, de gros append+flush ont plus de risques de timeout.
+Force un buffer raisonnable dans ta boucle de copie (1–4 Mo) et flush régulièrement :
+
+byte[] buf = new byte[4 * 1024 * 1024]; // 4MB
+int n; long written = 0;
+while ((n = in.read(buf)) > 0) {
+    out.write(buf, 0, n);
+    written += n;
+    if ((written % (64L * 1024 * 1024)) < n) { // toutes les ~64 Mo
+        out.hflush(); // pousse côté service, évite un gros flush final
+    }
+}
+out.hflush();
+out.hsync(); // si dispo
+
+3) Réduire la concurrence
+
+Si tu copies plusieurs fichiers en parallèle, limite à 1–2 flux simultanés.
+Les 429/503/throttling se traduisent souvent par des timeouts lecture sur la réponse du PUT.
+
+4) Valider précisément où ça timeoute
+
+Logue autour des appels :
+
+try (FSDataOutputStream out = fsDst.create(dst, false)) {
+    System.out.println("CREATE OK -> " + dst);
+    // ... boucle write ...
+    System.out.println("FLUSH...");
+    out.hflush();
+    System.out.println("CLOSE...");
+}
+// Si le timeout apparaît après "CLOSE...", tu sais que c’est le commit final.
+
+5) Test croisé hors poste local
+
+Teste la même copie depuis une VM Linux dans Azure (même VNet si possible).
+Si là-bas ça passe sans rien changer ⇒ ton timeout vient de la latence/proxy entre ton PC et ADLS (classique en entreprise).
+
+
+---
+
+Si ça persiste sur quelques gros fichiers uniquement
+
+Pour ces cas “lourds”, la voie la plus robuste est de basculer uniquement l’étape copie en server-side copy (SDK Azure beginCopy), même dans le même conteneur : pas de flux réseau client, donc pas de SocketTimeout côté JVM. Tu gardes toute ta logique Hadoop pour la liste/filtrage, et tu remplaces juste le write par un beginCopy quand la taille dépasse un seuil (ex. > 256 Mo).
+
+
+---
+
+Résumé actionnable
+
+1. Ajoute les timeouts + retries ci-dessus (+ -Dsun.net.client.defaultReadTimeout).
+
+
+2. Écris en chunks plus petits avec hflush() périodique.
+
+
+3. Pas de parallélisme agressif.
+
+
+4. Si l’entreprise a un proxy/inspection TLS, teste depuis une VM Azure pour confirmer.
+
+
+5. Pour les très gros blobs, server-side copy évite totalement ce type de timeout.
+
+
+
+Tu me dis ce que donnent (1) et (2) ? Si tu veux, je t’envoie un snippet prêt à coller avec hflush() + options Configuration pour que tu testes tout de suite.
+
