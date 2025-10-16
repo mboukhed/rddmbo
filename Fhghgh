@@ -1,0 +1,5 @@
+conf.set("fs.azure.io.max.connections", "128");           // pool HTTP plus large
+conf.set("fs.azure.io.retry.max.retries", "10");          // tu l’as déjà
+conf.set("fs.azure.io.request.timeout", "120000");        // côté requêtes ABFS
+conf.set("fs.azure.write.max.concurrent.requests", "64"); // uploads parallèles (si version ABFS ok)
+conf.set("fs.azure.allow.truncate", "true");              // évite des re-créations
