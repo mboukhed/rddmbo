@@ -1,0 +1,48 @@
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.core.util.polling.SyncPoller;
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.storage.blob.*;
+import com.azure.storage.blob.models.BlobCopyInfo;
+import com.azure.storage.blob.options.BlobBeginCopyOptions;
+
+import java.time.Duration;
+
+public class LocalBlobCopyFlat {
+  public static void main(String[] a) {
+    if (a.length != 12) { System.err.println("Usage: SRC_ACC SRC_CONT SRC_PATH DST_ACC DST_CONT DST_PATH SRC_TENANT SRC_ID SRC_SEC DST_TENANT DST_ID DST_SEC"); System.exit(1); }
+    String SA=a[0], SC=a[1], SP=a[2], DA=a[3], DC=a[4], DP=a[5], ST=a[6], SID=a[7], SSC=a[8], DT=a[9], DID=a[10], DSC=a[11];
+
+    ClientSecretCredential srcCred = new ClientSecretCredentialBuilder().tenantId(ST).clientId(SID).clientSecret(SSC).build();
+    ClientSecretCredential dstCred = new ClientSecretCredentialBuilder().tenantId(DT).clientId(DID).clientSecret(DSC).build();
+
+    BlobServiceClient sSvc = new BlobServiceClientBuilder().endpoint("https://"+SA+".blob.core.windows.net").credential(srcCred).buildClient();
+    BlobServiceClient dSvc = new BlobServiceClientBuilder().endpoint("https://"+DA+".blob.core.windows.net").credential(dstCred).buildClient();
+
+    BlobContainerClient sCont = sSvc.getBlobContainerClient(SC);
+    BlobContainerClient dCont = dSvc.getBlobContainerClient(DC);
+
+    String bearer = "Bearer " + srcCred.getToken(new TokenRequestContext().addScopes("https://storage.azure.com/.default")).block().getToken();
+
+    for (BlobItem bi : sCont.listBlobsByHierarchy(SP.endsWith("/")?SP:SP+"/")) {
+      if (bi.isPrefix() != null && bi.isPrefix()) { System.out.println("Ignore dir: "+bi.getName()); continue; }
+
+      String name = bi.getName();
+      if (name.endsWith("/")) { System.out.println("Ignore dir: "+name); continue; }
+
+      String fileName = name.substring(name.lastIndexOf('/')+1);
+      String dstName = (DP.endsWith("/")?DP:DP+"/") + fileName;
+
+      BlobClient dst = dCont.getBlobClient(dstName);
+      if (dst.exists()) { System.out.println("Skip (exists): "+dstName); continue; }
+
+      String srcUrl = sCont.getBlobClient(name).getBlobUrl();
+      BlobBeginCopyOptions opt = new BlobBeginCopyOptions(srcUrl).setSourceAuthorization(bearer);
+      SyncPoller<BlobCopyInfo, Void> poller = dst.beginCopy(opt, Duration.ofSeconds(2));
+      poller.waitForCompletion();
+
+      System.out.println("Copied: "+name+" -> "+dstName);
+    }
+    System.out.println("✅ Done (flat, non-recursive).");
+  }
+}
