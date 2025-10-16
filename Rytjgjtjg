@@ -1,0 +1,264 @@
+Parfait. Voici une implémentation complète pour copier tout le contenu d’un répertoire (prefix) Azure → Azure en server-side, multithread, en ignorant les fichiers déjà présents côté destination.
+Aucune lecture locale, zéro trafic client : tout se passe chez Azure.
+
+
+---
+
+Maven (mêmes deps que précédemment)
+
+<dependencies>
+  <dependency>
+    <groupId>com.azure</groupId>
+    <artifactId>azure-storage-blob</artifactId>
+    <version>12.27.0</version>
+  </dependency>
+  <dependency>
+    <groupId>com.azure</groupId>
+    <artifactId>azure-identity</artifactId>
+    <version>1.12.1</version>
+  </dependency>
+</dependencies>
+
+
+---
+
+Java — AzureBlobDirectoryCopy.java (avec main)
+
+import com.azure.core.util.polling.SyncPoller;
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.storage.blob.BlobClient;
+import com.azure.storage.blob.BlobContainerClient;
+import com.azure.storage.blob.BlobServiceClient;
+import com.azure.storage.blob.BlobServiceClientBuilder;
+import com.azure.storage.blob.models.BlobCopyInfo;
+import com.azure.storage.blob.models.BlobItem;
+import com.azure.storage.blob.models.BlobProperties;
+import com.azure.storage.blob.models.ListBlobsOptions;
+import com.azure.storage.blob.sas.BlobSasPermission;
+import com.azure.storage.blob.sas.BlobServiceSasSignatureValues;
+import com.azure.storage.blob.specialized.BlockBlobClient;
+import com.azure.storage.common.implementation.StorageImplUtils;
+
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+public class AzureBlobDirectoryCopy {
+
+    // ---------- MAIN DEMO ----------
+    public static void main(String[] args) throws InterruptedException {
+        // REMPLACE les placeholders par tes valeurs
+        copyDirectoryIfNotExists(
+                // --- Source (SPN A)
+                "srcAccountName", "srcTenantId", "srcClientId", "srcClientSecret",
+                "src-container", "path/in/source/dir/",   // prefix source (doit finir par '/')
+                // --- Destination (SPN B)
+                "dstAccountName", "dstTenantId", "dstClientId", "dstClientSecret",
+                "dst-container", "path/in/target/dir/",   // prefix destination (finir par '/')
+                // --- Options
+                /* threads */ 8,
+                /* sasValidity */ Duration.ofHours(1),
+                /* pollInterval */ Duration.ofSeconds(2),
+                /* dryRun */ false
+        );
+    }
+
+    // ---------- API ----------
+    public static void copyDirectoryIfNotExists(
+            // Auth source
+            String srcAccount, String srcTenant, String srcClientId, String srcClientSecret,
+            String srcContainer, String srcPrefix,
+            // Auth destination
+            String dstAccount, String dstTenant, String dstClientId, String dstClientSecret,
+            String dstContainer, String dstPrefix,
+            // Options
+            int threads, Duration sasValidity, Duration pollInterval, boolean dryRun
+    ) throws InterruptedException {
+
+        Objects.requireNonNull(srcPrefix, "srcPrefix");
+        Objects.requireNonNull(dstPrefix, "dstPrefix");
+
+        // Normalise les préfixes pour qu’ils finissent par '/'
+        srcPrefix = normalizePrefix(srcPrefix);
+        dstPrefix = normalizePrefix(dstPrefix);
+
+        // --- Credentials
+        ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+                .tenantId(srcTenant).clientId(srcClientId).clientSecret(srcClientSecret).build();
+        ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+                .tenantId(dstTenant).clientId(dstClientId).clientSecret(dstClientSecret).build();
+
+        // --- Endpoints (toujours blob.core.windows.net, même avec HNS/ADLS Gen2)
+        BlobServiceClient srcSvc = new BlobServiceClientBuilder()
+                .endpoint("https://" + srcAccount + ".blob.core.windows.net")
+                .credential(srcCred).buildClient();
+        BlobServiceClient dstSvc = new BlobServiceClientBuilder()
+                .endpoint("https://" + dstAccount + ".blob.core.windows.net")
+                .credential(dstCred).buildClient();
+
+        BlobContainerClient srcCC = srcSvc.getBlobContainerClient(srcContainer);
+        BlobContainerClient dstCC = dstSvc.getBlobContainerClient(dstContainer);
+
+        // Vérifs basiques
+        if (!srcCC.exists()) throw new IllegalStateException("Le container source n'existe pas: " + srcContainer);
+        if (!dstCC.exists()) throw new IllegalStateException("Le container destination n'existe pas: " + dstContainer);
+
+        // --- User Delegation Key (UNE SEULE FOIS) pour générer des SAS lecture
+        OffsetDateTime start = OffsetDateTime.now().minusMinutes(5);
+        OffsetDateTime expiry = OffsetDateTime.now().plus(sasValidity);
+        var udk = srcSvc.getUserDelegationKey(start, expiry); // nécessite "Storage Blob Data Reader" côté source
+
+        // --- Listing plat récursif de tout le contenu sous srcPrefix
+        var options = new ListBlobsOptions().setPrefix(srcPrefix);
+        var paged = srcCC.listBlobs(options, null);
+
+        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, threads));
+        final String srcPrefixFinal = srcPrefix;
+        final String dstPrefixFinal = dstPrefix;
+
+        final long[] counters = new long[3]; // [0]=copied, [1]=skipped, [2]=errors
+
+        for (BlobItem item : paged) {
+            // Ignore les "dossiers virtuels"
+            String name = item.getName();
+            if (name.endsWith("/")) continue;
+
+            // relative = portion après le prefix
+            String relative = name.substring(srcPrefixFinal.length());
+            String dstName = joinPath(dstPrefixFinal, relative);
+
+            pool.submit(() -> {
+                try {
+                    BlobClient srcBlob = srcCC.getBlobClient(name);
+                    BlobClient dstBlob = dstCC.getBlobClient(dstName);
+
+                    // Skip si existe déjà (exigence du besoin)
+                    if (dstBlob.exists()) {
+                        inc(counters, 1);
+                        logf("⏩ Skip (existe) : %s", dstName);
+                        return;
+                    }
+
+                    if (dryRun) {
+                        inc(counters, 1);
+                        logf("🔎 Dry-run skip-if-exists => créerait : %s", dstName);
+                        return;
+                    }
+
+                    // Génère un SAS lecture pour CE blob (avec la même UDK réutilisée)
+                    BlobSasPermission perm = new BlobSasPermission().setReadPermission(true);
+                    BlobServiceSasSignatureValues sasValues = new BlobServiceSasSignatureValues(expiry, perm)
+                            .setStartTime(start)
+                            .setContainerName(srcContainer)
+                            .setBlobName(srcBlob.getBlobName());
+
+                    String sas = srcBlob.generateUserDelegationSas(sasValues, udk);
+                    String sourceUrlWithSas = srcBlob.getBlobUrl() + "?" + sas;
+
+                    // Copie server-side
+                    BlockBlobClient dstBlock = dstBlob.getBlockBlobClient();
+                    SyncPoller<BlobCopyInfo, Void> poller =
+                            dstBlock.beginCopy(sourceUrlWithSas, null, null, null, null, null, pollInterval);
+                    poller.waitForCompletion();
+
+                    BlobProperties props = dstBlob.getProperties();
+                    inc(counters, 0);
+                    logf("✅ Copié: %s (%d octets)", dstName, props.getBlobSize());
+                } catch (Exception e) {
+                    inc(counters, 2);
+                    logf("❌ Erreur sur %s -> %s", name, e.getMessage());
+                }
+            });
+        }
+
+        pool.shutdown();
+        pool.awaitTermination(7, TimeUnit.DAYS);
+
+        logf("------ Résumé ------");
+        logf("Copiés : %d", counters[0]);
+        logf("Skips  : %d", counters[1]);
+        logf("Erreurs: %d", counters[2]);
+    }
+
+    // ---------- Utils ----------
+    private static String normalizePrefix(String p) {
+        if (p == null || p.isEmpty()) return "";
+        // Supprime les doubles / et assure le slash final
+        String norm = p.replace("\\", "/");
+        while (norm.startsWith("/")) norm = norm.substring(1);
+        norm = norm.replaceAll("//+", "/");
+        if (!norm.endsWith("/")) norm += "/";
+        return norm;
+    }
+
+    private static String joinPath(String prefix, String relative) {
+        // Evite les doubles slash
+        String a = normalizePrefix(prefix);
+        String b = relative.replace("\\", "/");
+        while (b.startsWith("/")) b = b.substring(1);
+        return a + b;
+    }
+
+    private static synchronized void logf(String fmt, Object... args) {
+        System.out.println(String.format(Locale.ROOT, fmt, args));
+    }
+
+    private static void inc(long[] arr, int idx) {
+        synchronized (arr) { arr[idx]++; }
+    }
+}
+
+
+---
+
+Ce que fait ce code
+
+Liste tous les blobs sous srcPrefix (récursivement).
+
+Pour chaque blob, calcule le chemin relatif et le recrée sous dstPrefix.
+
+Skip si le blob destination existe déjà (exactement ton besoin).
+
+Copie server-side avec beginCopy(sourceUrl+SAS) (aucun download/upload).
+
+Parallélisme configurable (threads).
+
+UDK (User Delegation Key) demandée une seule fois puis réutilisée pour générer des SAS par blob.
+
+Option dryRun pour tester sans écrire.
+
+
+
+---
+
+Permissions minimales
+
+Source (SPN A) : Storage Blob Data Reader (au niveau compte ou container).
+
+Destination (SPN B) : Storage Blob Data Contributor (ou Owner/Editor).
+
+
+
+---
+
+Notes pratiques
+
+ADLS Gen2 : même endpoint blob.core.windows.net. Compatible.
+
+Idempotent : tu peux relancer, les fichiers déjà copiés seront ignorés.
+
+Gros volumes : augmente threads (ex. 16/32) selon ton quota et ton réseau interne.
+
+Chemins : passe des prefixes se terminant par / (le helper normalise).
+
+
+
+---
+
+Si tu veux une variante qui vérifie la taille/ETag avant de skip (ex. “existe mais différent”) ou qui force le If-None-Match: * côté serveur, je te la prépare aussi.
+
