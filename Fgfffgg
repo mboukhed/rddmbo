@@ -1,0 +1,1 @@
+System.setProperty("http.nonProxyHosts", "*.microsoftonline.com|*.azure.com|*.windows.net|localhost");
