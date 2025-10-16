@@ -1,0 +1,96 @@
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.storage.blob.*;
+import com.azure.storage.blob.models.*;
+import com.azure.storage.blob.sas.*;
+import com.azure.core.util.polling.SyncPoller;
+
+import java.time.OffsetDateTime;
+import java.time.Duration;
+
+public class AzureBlobServerSideCopy {
+
+    public static void main(String[] args) {
+        // Exemple d’appel — à adapter avec tes identifiants Azure
+        copyBlobIfNotExistsDefaults(
+                // --- Compte source (SPN A)
+                "sourceaccount", "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", "sourceClientSecret",
+                // --- Compte destination (SPN B)
+                "destaccount", "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy",
+                "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy", "destClientSecret",
+                // --- Containers et blobs
+                "source-container", "path/in/source/file.csv",
+                "target-container", "path/in/target/file.csv"
+        );
+    }
+
+    public static void copyBlobIfNotExistsDefaults(
+            String srcAccountName, String srcTenantId, String srcClientId, String srcClientSecret,
+            String dstAccountName, String dstTenantId, String dstClientId, String dstClientSecret,
+            String srcContainer, String srcBlobPath,
+            String dstContainer, String dstBlobPath
+    ) {
+        copyBlobIfNotExists(
+                srcAccountName, srcTenantId, srcClientId, srcClientSecret,
+                dstAccountName, dstTenantId, dstClientId, dstClientSecret,
+                srcContainer, srcBlobPath,
+                dstContainer, dstBlobPath,
+                Duration.ofSeconds(2), Duration.ofHours(1)
+        );
+    }
+
+    public static void copyBlobIfNotExists(
+            String srcAccountName, String srcTenantId, String srcClientId, String srcClientSecret,
+            String dstAccountName, String dstTenantId, String dstClientId, String dstClientSecret,
+            String srcContainer, String srcBlobPath,
+            String dstContainer, String dstBlobPath,
+            Duration pollInterval, Duration sasValidity
+    ) {
+        // --- Authentifications ---
+        ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+                .tenantId(srcTenantId).clientId(srcClientId).clientSecret(srcClientSecret).build();
+        ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+                .tenantId(dstTenantId).clientId(dstClientId).clientSecret(dstClientSecret).build();
+
+        // --- Clients BlobService ---
+        String srcEndpoint = String.format("https://%s.blob.core.windows.net", srcAccountName);
+        String dstEndpoint = String.format("https://%s.blob.core.windows.net", dstAccountName);
+        BlobServiceClient srcSvc = new BlobServiceClientBuilder().endpoint(srcEndpoint).credential(srcCred).buildClient();
+        BlobServiceClient dstSvc = new BlobServiceClientBuilder().endpoint(dstEndpoint).credential(dstCred).buildClient();
+
+        BlobClient srcBlob = srcSvc.getBlobContainerClient(srcContainer).getBlobClient(srcBlobPath);
+        BlobClient dstBlob = dstSvc.getBlobContainerClient(dstContainer).getBlobClient(dstBlobPath);
+
+        // --- Skip si déjà présent ---
+        if (dstBlob.exists()) {
+            System.out.printf("⏩ Fichier déjà présent : %s/%s%n", dstContainer, dstBlobPath);
+            return;
+        }
+
+        // --- Génération SAS lecture (User Delegation) sur le blob source ---
+        OffsetDateTime start = OffsetDateTime.now().minusMinutes(5);
+        OffsetDateTime expiry = OffsetDateTime.now().plus(sasValidity);
+        UserDelegationKey udk = srcSvc.getUserDelegationKey(start, expiry);
+
+        BlobSasPermission perm = new BlobSasPermission().setReadPermission(true);
+        BlobServiceSasSignatureValues sasValues = new BlobServiceSasSignatureValues(expiry, perm)
+                .setStartTime(start)
+                .setBlobName(srcBlob.getBlobName())
+                .setContainerName(srcContainer);
+
+        String sas = srcBlob.generateUserDelegationSas(sasValues, udk);
+        String sourceUrlWithSas = srcBlob.getBlobUrl() + "?" + sas;
+
+        // --- Copie server-side ---
+        System.out.printf("▶️ Copie de %s/%s vers %s/%s...%n",
+                srcContainer, srcBlobPath, dstContainer, dstBlobPath);
+
+        SyncPoller<BlobCopyInfo, Void> poller =
+                dstBlob.beginCopy(sourceUrlWithSas, null, null, null, null, null, pollInterval);
+        poller.waitForCompletion();
+
+        BlobProperties props = dstBlob.getProperties();
+        System.out.printf("✅ Copié (%d octets, eTag=%s)%n", props.getBlobSize(), props.getETag());
+    }
+}
