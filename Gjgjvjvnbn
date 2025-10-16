@@ -1,0 +1,114 @@
+Voici la solution qui marche en restant 100% ABFS→ABFS, fichier par fichier, skip si existe, 2 SPN différents, et sans bricolage côté service.
+
+1) POM minimal (pas de mix de profils)
+
+Garde uniquement ces deps (versions exactes) :
+
+<dependency> <groupId>org.apache.hadoop</groupId><artifactId>hadoop-azure</artifactId><version>3.3.6</version></dependency>
+<dependency> <groupId>org.apache.hadoop</groupId><artifactId>hadoop-common</artifactId><version>3.3.6</version></dependency>
+<dependency> <groupId>org.apache.hadoop</groupId><artifactId>hadoop-auth</artifactId><version>3.3.6</version></dependency>
+
+<!-- Requis par l’OAuth2 ABFS -->
+<dependency> <groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-core</artifactId><version>2.15.2</version></dependency>
+<dependency> <groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>2.15.2</version></dependency>
+<dependency> <groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-annotations</artifactId><version>2.15.2</version></dependency>
+
+<!-- Logging unique -->
+<dependency> <groupId>org.apache.logging.log4j</groupId><artifactId>log4j-api</artifactId><version>2.22.1</version></dependency>
+<dependency> <groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.22.1</version></dependency>
+<dependency> <groupId>org.apache.logging.log4j</groupId><artifactId>log4j-slf4j2-impl</artifactId><version>2.22.1</version></dependency>
+
+2) Auth ABFS pour chaque compte (les 2 SPN)
+
+Dans ton Configuration (ou core-site.xml) :
+
+# Source
+fs.azure.account.auth.type.<SRC>.dfs.core.windows.net=OAuth
+fs.azure.account.oauth.provider.type.<SRC>.dfs.core.windows.net=org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider
+fs.azure.account.oauth2.client.id.<SRC>.dfs.core.windows.net=<SRC_CLIENT_ID>
+fs.azure.account.oauth2.client.secret.<SRC>.dfs.core.windows.net=<SRC_CLIENT_SECRET>
+fs.azure.account.oauth2.client.endpoint.<SRC>.dfs.core.windows.net=https://login.microsoftonline.com/<SRC_TENANT>/oauth2/v2.0/token
+
+# Destination
+fs.azure.account.auth.type.<DST>.dfs.core.windows.net=OAuth
+fs.azure.account.oauth.provider.type.<DST>.dfs.core.windows.net=org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider
+fs.azure.account.oauth2.client.id.<DST>.dfs.core.windows.net=<DST_CLIENT_ID>
+fs.azure.account.oauth2.client.secret.<DST>.dfs.core.windows.net=<DST_CLIENT_SECRET>
+fs.azure.account.oauth2.client.endpoint.<DST>.dfs.core.windows.net=https://login.microsoftonline.com/<DST_TENANT>/oauth2/v2.0/token
+
+3) Runtime stable (évite les erreurs Windows et les blocages)
+
+Avant de créer les FileSystem :
+
+-Dhadoop.native.lib=false
+-Dsun.net.client.defaultReadTimeout=600000
+-Dsun.net.client.defaultConnectTimeout=60000
+
+Et dans Configuration :
+
+fs.azure.user.agent.prefix=abfs-copy
+fs.azure.io.retry.max.retries=10
+fs.azure.io.retry.min.backoff=1000
+fs.azure.io.retry.max.backoff=30000
+fs.azure.io.read.tcp.read.timeout=600000
+
+4) Code de copie (simple, robuste)
+
+Un seul thread.
+
+Buffer 4 MB, hflush() tous les 16–32 MB.
+
+Skip si existe.
+
+Répertoires → créés au vol.
+
+
+(Tu as déjà le code que je t’ai donné : AbfsCopyNoOverwrite / AbfsToAbfsCopy. Garde exactement ce pattern : open → write par chunks → hflush() périodique → hsync() → close.)
+
+5) Droits POSIX ACL Gen2
+
+Vérifie 1 fois (indispensable en Gen2) :
+
+SPN source : r-x sur les dossiers parents + r-- sur le fichier.
+
+SPN destination : rwx sur le dossier cible (ou rw- + x sur parents).
+
+
+hdfs dfs -getfacl "abfs://<srcContainer>@<SRC>.dfs.core.windows.net/<path>"
+hdfs dfs -getfacl "abfs://<dstContainer>@<DST>.dfs.core.windows.net/<path>"
+
+6) Si ça time-out encore depuis ton PC : exécute depuis Azure
+
+C’est LA parade qui supprime les SocketTimeoutException côté client sans changer ton code :
+
+lance exactement le même JAR sur une VM Linux ou un Pod AKS dans la même région que tes comptes.
+
+ABFS garde tes 2 SPN, ton code reste identique, mais la latence tombe → plus de timeouts.
+
+
+
+---
+
+TL;DR (checklist exécutable)
+
+1. POM = hadoop-azure/common/auth:3.3.6 + jackson 2.15.2 + log4j2 (rien d’autre).
+
+
+2. Propriétés par compte pour OAuth (2 SPN).
+
+
+3. JVM flags : -Dhadoop.native.lib=false + timeouts.
+
+
+4. Copie mono-thread, hflush() toutes 16–32 MB.
+
+
+5. ACL POSIX Gen2 OK sur source & cible.
+
+
+6. Exécuter depuis Azure si réseau/entreprise continue de provoquer des Read timed out.
+
+
+
+Tu appliques ces 6 points à la lettre → ça tourne.
+
