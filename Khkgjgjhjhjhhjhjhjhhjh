@@ -1,0 +1,6 @@
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.config.Configurator;
+
+Configurator.setLevel("org.apache.hadoop.fs.azurebfs", Level.DEBUG);
+Configurator.setLevel("org.apache.hadoop.fs.azurebfs.services.AbfsHttpOperation", Level.DEBUG);
+Configurator.setLevel("org.apache.http.wire", Level.DEBUG); // optionnel, très verbeux
