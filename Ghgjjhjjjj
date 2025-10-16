@@ -1,0 +1,74 @@
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.core.util.polling.SyncPoller;
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.storage.file.datalake.*;
+import com.azure.storage.file.datalake.models.FileCopyInfo;
+import com.azure.storage.file.datalake.models.PathItem;
+import com.azure.storage.file.datalake.options.DataLakeFileBeginCopyOptions;
+
+import java.time.Duration;
+
+public class LocalAzureCopyFlat {
+  public static void main(String[] args) {
+    if (args.length != 12) {
+      System.err.println("Usage: SRC_ACC SRC_CONT SRC_PATH  DST_ACC DST_CONT DST_PATH  SRC_TENANT SRC_ID SRC_SECRET  DST_TENANT DST_ID DST_SECRET");
+      System.exit(1);
+    }
+    String SRC_ACC=args[0], SRC_CONT=args[1], SRC_PATH=args[2];
+    String DST_ACC=args[3], DST_CONT=args[4], DST_PATH=args[5];
+    String SRC_TENANT=args[6], SRC_ID=args[7], SRC_SEC=args[8];
+    String DST_TENANT=args[9], DST_ID=args[10], DST_SEC=args[11];
+
+    // Crédentials
+    ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+        .tenantId(SRC_TENANT).clientId(SRC_ID).clientSecret(SRC_SEC).build();
+    ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+        .tenantId(DST_TENANT).clientId(DST_ID).clientSecret(DST_SEC).build();
+
+    // Clients ADLS
+    DataLakeServiceClient srcSvc = new DataLakeServiceClientBuilder()
+        .credential(srcCred).endpoint("https://" + SRC_ACC + ".dfs.core.windows.net").buildClient();
+    DataLakeServiceClient dstSvc = new DataLakeServiceClientBuilder()
+        .credential(dstCred).endpoint("https://" + DST_ACC + ".dfs.core.windows.net").buildClient();
+
+    DataLakeFileSystemClient srcFs = srcSvc.getFileSystemClient(SRC_CONT);
+    DataLakeFileSystemClient dstFs = dstSvc.getFileSystemClient(DST_CONT);
+
+    // Bearer token pour autoriser la LECTURE de la source
+    String bearer = "Bearer " + srcCred
+        .getToken(new TokenRequestContext().addScopes("https://storage.azure.com/.default"))
+        .block().getToken();
+
+    // Parcours non récursif du dossier source
+    for (PathItem item : srcFs.listPaths(SRC_PATH, false)) {
+      if (item.isDirectory()) {
+        System.out.println("Ignore directory: " + item.getName());
+        continue;
+      }
+
+      String srcFile = item.getName(); // chemin complet côté source
+      String fileName = srcFile.substring(srcFile.lastIndexOf('/') + 1);
+      String dstFile = (DST_PATH.endsWith("/") ? DST_PATH : DST_PATH + "/") + fileName;
+
+      DataLakeFileClient dstClient = dstFs.getFileClient(dstFile);
+      if (dstClient.exists()) {
+        System.out.println("Skip (exists): " + dstFile);
+        continue;
+      }
+
+      String srcUrl = srcFs.getFileClient(srcFile).getFileUrl();
+
+      // Copie côté service avec Authorization de la source
+      DataLakeFileBeginCopyOptions opts = new DataLakeFileBeginCopyOptions(srcUrl)
+          .setSourceAuthorization(bearer);
+
+      SyncPoller<FileCopyInfo, Void> poller = dstClient.beginCopy(opts, Duration.ofSeconds(2));
+      poller.waitForCompletion();
+
+      System.out.println("Copied: " + srcFile + " -> " + dstFile);
+    }
+
+    System.out.println("✅ Copy completed (flat, non-recursive).");
+  }
+}
