@@ -1,0 +1,132 @@
+OK, on débugge vite et efficacement.
+Quand un .gz est copié et l’autre “reste bloqué”, sur ABFS/Hadoop c’est (presque toujours) l’un de ces cas :
+
+Les 8 causes les plus fréquentes
+
+1. Le fichier existe déjà côté destination (même nom) → ton code “skip si existe” saute ce .gz et tu as l’impression que “ça bloque”.
+➜ Vérifie dstFs.exists(dstFile) et la taille (getLen()). S’il existe mais taille ≠ source, supprime-le puis recopie.
+
+
+2. Reste de tentative précédente : un fichier partiellement créé ou un lease encore actif après un échec (écriture interrompue) → ABFS peut paraître “figé” pendant les retries/backoff.
+➜ Supprime le fichier destination et relance. Attends ~1–2 min si tu soupçonnes un lease fantôme.
+
+
+3. Fichier source encore en cours d’écriture (job qui vient de finir : le .tmp → .gz n’a pas encore renvoyé), ou handle non fermé.
+➜ Assure-toi que la prod du .gz est terminée (flush/close côté producteur).
+
+
+4. Nom “spécial” (espace, +, #, %, accents) → parfois un des deux noms est encodé différemment.
+➜ Logge src.getName() et dst.toString() ; essaie un rename simple sur ce nom pour voir si ça coince.
+
+
+5. Casse (maj/min) différente dans le chemin parent (ADLS Gen2 est case-sensitive).
+➜ .../Data/2025/... ≠ .../data/2025/....
+
+
+6. Parent manquant sur la destination** pour le second fichier**.
+➜ Crée dstFs.mkdirs(dstParent) pour chaque fichier avant copie.
+
+
+7. Throttling / timeouts ABFS → tes logs montrent “rien” mais ABFS est en retries exponentiels.
+➜ Ajuste les timeouts/rétries (voir config ci-dessous) et affiche la progression d’octets.
+
+
+8. Filtrage de listing : si tu fais un listStatus mais que ton filtre (glob/regex) ne matche qu’un seul .gz.
+➜ Logge la liste des fichiers trouvés côté source.
+
+
+
+
+---
+
+Ajouts que je te conseille (rapides & concrets)
+
+1) Vérifier ce qui manque (ou diffère en taille)
+
+static void diffGz(FileSystem srcFs, Path srcDir, FileSystem dstFs, Path dstDir) throws IOException {
+    FileStatus[] srcFiles = srcFs.listStatus(srcDir, p -> p.getName().endsWith(".gz"));
+    for (FileStatus s : srcFiles) {
+        Path d = new Path(dstDir, s.getPath().getName());
+        if (!dstFs.exists(d)) {
+            System.out.println("[MISSING] " + d);
+        } else {
+            long sd = dstFs.getFileStatus(d).getLen();
+            if (sd != s.getLen()) {
+                System.out.println("[SIZE_MISMATCH] " + d + " src=" + s.getLen() + " dst=" + sd);
+            } else {
+                System.out.println("[OK] " + d);
+            }
+        }
+    }
+}
+
+2) Copie “sûre” par fichier (avec mkdirs, overwrite optionnel, logs de progression)
+
+static void copyOne(FileSystem srcFs, Path s, FileSystem dstFs, Path d, boolean overwrite) throws IOException {
+    Path parent = d.getParent();
+    if (parent != null && !dstFs.exists(parent)) dstFs.mkdirs(parent);
+
+    if (dstFs.exists(d)) {
+        if (!overwrite) {
+            System.out.println("Skip exists: " + d);
+            return;
+        }
+        dstFs.delete(d, false);
+    }
+
+    try (FSDataInputStream in = srcFs.open(s);
+         FSDataOutputStream out = dstFs.create(d, true)) {
+        byte[] buf = new byte[1024 * 1024];
+        long copied = 0;
+        int r;
+        while ((r = in.read(buf)) >= 0) {
+            out.write(buf, 0, r);
+            copied += r;
+            if ((copied % (64L * 1024 * 1024)) < buf.length) { // log ~chaque 64 Mo
+                System.out.println("... " + d.getName() + " " + (copied / (1024*1024)) + " MiB");
+            }
+        }
+        out.hflush(); // s'assure que tout est poussé côté service
+    }
+    System.out.println("Copied OK: " + s + " -> " + d);
+}
+
+3) Paramètres ABFS pour éviter les “blocages silencieux”
+
+Ajoute côté Configuration (source et destination) :
+
+conf.setInt("fs.azure.io.retry.max.retries", 8);
+conf.set("fs.azure.io.retry.min.backoff.interval", "1000");   // ms
+conf.set("fs.azure.io.retry.max.backoff.interval", "30000");  // ms
+conf.set("fs.azure.read.request.timeout", "60000");           // ms
+conf.set("fs.azure.write.request.timeout", "120000");         // ms
+conf.setBoolean("fs.azure.enable.check.access", true);        // logue mieux certains 403/409
+conf.setBoolean("fs.azure.write.enableoutputstreamflushing", true);
+
+
+---
+
+Check-list express (fais ça maintenant)
+
+1. Logge la liste des .gz vus côté source (noms exacts).
+
+
+2. Pour celui qui “bloque” :
+
+dstFs.exists(d) ?
+
+Si oui, compare getLen() source/dest.
+
+Si tailles ≠, supprime d puis recopie avec copyOne() ci-dessus.
+
+
+
+3. Si ça “bloque” toujours : change le nom (ex: ajoute .tmp) et teste la copie → si ça passe, c’est un problème de nom/lease.
+
+
+4. Ajoute les timeouts/rétries ci-dessus et observe les logs (tu verras les MiB défiler).
+
+
+
+Si tu me colles les deux noms complets de fichiers, leurs tailles source/dest et ce que retourne exists() + getLen(), je te dirai en 2 lignes lequel des 8 cas c’est et le fix exact.
+
