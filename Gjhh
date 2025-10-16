@@ -1,0 +1,117 @@
+Tu as ce symptôme parce que ton autre code passe par la pile HTTP du JDK (qui lit le proxy système), alors que le SDK Azure Storage utilise Netty par défaut, et Netty n’utilise pas les -Dhttps.proxyHost/....
+Résultat : tes autres “main” sortent via le proxy, celui-ci non → UnknownHostException login.microsoftonline.com.
+
+Deux façons propres de régler ça (choisis une) :
+
+
+---
+
+Option A — Forcer le SDK à utiliser le client HTTP du JDK (lit le proxy système)
+
+POM (ajoute le client JDK) :
+
+<dependency>
+  <groupId>com.azure</groupId>
+  <artifactId>azure-core-http-jdk-httpclient</artifactId>
+  <version>1.14.0</version> <!-- une version récente -->
+</dependency>
+
+Code (en haut du main, avant de créer les clients) :
+
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.jdk.httpclient.JdkHttpClientBuilder;
+
+// si ton proxy est déjà configuré au niveau OS, ça suffit :
+System.setProperty("java.net.useSystemProxies", "true");
+
+HttpClient httpClient = new JdkHttpClientBuilder().build();
+
+BlobServiceClient sSvc = new BlobServiceClientBuilder()
+    .endpoint("https://" + SRC_ACC + ".blob.core.windows.net")
+    .credential(srcCred)
+    .httpClient(httpClient)       // << utilise le client JDK
+    .buildClient();
+
+BlobServiceClient dSvc = new BlobServiceClientBuilder()
+    .endpoint("https://" + DST_ACC + ".blob.core.windows.net")
+    .credential(dstCred)
+    .httpClient(httpClient)       // << idem
+    .buildClient();
+
+> Si tu dois imposer le proxy en code, fais :
+System.setProperty("https.proxyHost","monproxy"); System.setProperty("https.proxyPort","8080");
+
+
+
+
+---
+
+Option B — Garder Netty, mais déclarer explicitement le proxy
+
+POM (client Netty explicite) :
+
+<dependency>
+  <groupId>com.azure</groupId>
+  <artifactId>azure-core-http-netty</artifactId>
+  <version>1.15.0</version>
+</dependency>
+
+Code :
+
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.core.http.ProxyOptions;
+
+HttpClient httpClient = new NettyAsyncHttpClientBuilder()
+    .proxy(new ProxyOptions(ProxyOptions.Type.HTTP,
+            new java.net.InetSocketAddress("monproxy", 8080))
+            .setCredentials("LOGIN_PROXY", "MOTDEPASSE".toCharArray())) // si auth requise
+    .build();
+
+BlobServiceClient sSvc = new BlobServiceClientBuilder()
+    .endpoint("https://" + SRC_ACC + ".blob.core.windows.net")
+    .credential(srcCred)
+    .httpClient(httpClient)   // << Netty + proxy
+    .buildClient();
+
+BlobServiceClient dSvc = new BlobServiceClientBuilder()
+    .endpoint("https://" + DST_ACC + ".blob.core.windows.net")
+    .credential(dstCred)
+    .httpClient(httpClient)
+    .buildClient();
+
+
+---
+
+Petit rappel SAS (deux SPN)
+
+Si tu utilises deux SPN et que tu génères un SAS côté source avec AAD, utilise User Delegation SAS :
+
+import com.azure.storage.blob.models.UserDelegationKey;
+import com.azure.storage.common.sas.*;
+
+OffsetDateTime start = OffsetDateTime.now();
+OffsetDateTime expiry = start.plusHours(1);
+UserDelegationKey udk = sSvc.getUserDelegationKey(start, expiry);
+
+BlobSasPermission perms = new BlobSasPermission().setReadPermission(true);
+BlobServiceSasSignatureValues vals =
+    new BlobServiceSasSignatureValues(expiry, perms).setStartTime(start);
+
+String sas = sCont.getBlobClient(srcName).generateUserDelegationSas(vals, udk);
+String srcUrl = sCont.getBlobClient(srcName).getBlobUrl() + "?" + sas;
+
+Ensuite, garde ton dst.beginCopy(srcUrl, null, null, null, null, null, Duration.ofSeconds(2));.
+
+
+---
+
+TL;DR
+
+Pourquoi ça marche ailleurs ? Ils utilisent le client HTTP du JDK qui lit le proxy.
+
+Pourquoi ici ça casse ? Le SDK Azure utilise Netty par défaut et ignore les props proxy JDK.
+
+Fix : Option A (JDK client) ou Option B (Netty + ProxyOptions).
+
+
