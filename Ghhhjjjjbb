@@ -1,0 +1,174 @@
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.ProxyOptions;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.core.util.polling.SyncPoller;
+
+import com.azure.storage.blob.*;
+import com.azure.storage.blob.models.*;
+import com.azure.storage.common.StorageSharedKeyCredential;
+import com.azure.storage.common.sas.*;
+
+import java.net.InetSocketAddress;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.Map;
+
+public class LocalBlobCopyFlat {
+
+    // ===== Proxy (laisse PROXY_HOST vide si tu ne veux pas de proxy) =====
+    private static final String PROXY_HOST = "";      // ex "proxy-mkt-p2.int.world.socgen"
+    private static final int    PROXY_PORT = 8080;
+    private static final String PROXY_USER = "";      // ex "DOMAINE\\login" si auth requise
+    private static final char[] PROXY_PASS = new char[0];
+
+    public static void main(String[] args) {
+        if (args.length != 12) {
+            System.err.println("""
+                Usage:
+                  SRC_ACC SRC_CONT SRC_PATH
+                  DST_ACC DST_CONT DST_PATH
+                  SRC_TENANT SRC_CLIENT_ID SRC_SECRET
+                  DST_TENANT DST_CLIENT_ID DST_SECRET
+                """);
+            System.exit(1);
+        }
+
+        // --------- Args (on NE change PAS ta signature) ---------
+        String SRC_ACC = args[0], SRC_CONT = args[1], SRC_PATH = args[2];
+        String DST_ACC = args[3], DST_CONT = args[4], DST_PATH = args[5];
+        String SRC_TENANT = args[6], SRC_ID = args[7], SRC_SEC = args[8];
+        String DST_TENANT = args[9], DST_ID = args[10], DST_SEC = args[11];
+
+        // --------- Credentials SPN (AAD) ---------
+        ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+                .tenantId(SRC_TENANT).clientId(SRC_ID).clientSecret(SRC_SEC).build();
+        ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+                .tenantId(DST_TENANT).clientId(DST_ID).clientSecret(DST_SEC).build();
+
+        // --------- HttpClient (Netty) avec proxy optionnel ---------
+        HttpClient httpClient = buildHttpClientWithOptionalProxy();
+
+        // --------- Services Blob ---------
+        BlobServiceClient sSvcAAD = new BlobServiceClientBuilder()
+                .endpoint("https://" + SRC_ACC + ".blob.core.windows.net")
+                .credential(srcCred)
+                .httpClient(httpClient)
+                .buildClient();
+
+        BlobServiceClient dSvcAAD = new BlobServiceClientBuilder()
+                .endpoint("https://" + DST_ACC + ".blob.core.windows.net")
+                .credential(dstCred)
+                .httpClient(httpClient)
+                .buildClient();
+
+        BlobContainerClient sCont = sSvcAAD.getBlobContainerClient(SRC_CONT);
+        BlobContainerClient dCont = dSvcAAD.getBlobContainerClient(DST_CONT);
+
+        // --------- Normalisation des chemins ---------
+        String srcPrefix = SRC_PATH.endsWith("/") ? SRC_PATH : SRC_PATH + "/";
+        String dstPrefix = DST_PATH.endsWith("/") ? DST_PATH : DST_PATH + "/";
+
+        // --------- Fenêtre de validité SAS ---------
+        OffsetDateTime start  = OffsetDateTime.now();
+        OffsetDateTime expiry = start.plusHours(2);
+
+        // --------- User Delegation Key (AAD) pour 1er essai ---------
+        UserDelegationKey udk = null;
+        try { udk = sSvcAAD.getUserDelegationKey(start, expiry); }
+        catch (Exception e) { /* pas bloquant : on pourra tomber sur la clé de compte */ }
+
+        // --------- Listing NON récursif ---------
+        ListBlobsOptions listOpt = new ListBlobsOptions().setPrefix(srcPrefix);
+        for (BlobHierarchyItem bhi : sCont.listBlobsByHierarchy("/", listOpt, null)) {
+            if (bhi.isPrefix()) { // dossier -> ignore
+                System.out.println("Ignore dir: " + bhi.getPrefix());
+                continue;
+            }
+
+            BlobItem bi = bhi.getBlobItem();
+            String srcName  = bi.getName();                          // ex: folder/file.csv
+            String fileName = srcName.substring(srcName.lastIndexOf('/') + 1);
+            String dstName  = dstPrefix + fileName;
+
+            BlobClient dst = dCont.getBlobClient(dstName);
+            if (dst.exists()) {
+                System.out.println("Skip (exists): " + dstName);
+                continue;
+            }
+
+            // URL source avec SAS (stratégie 1 = User Delegation si possible)
+            BlobClient srcBlob = sCont.getBlobClient(srcName);
+            String srcUrlWithSas = null;
+
+            if (udk != null) {
+                try {
+                    BlobSasPermission perms = new BlobSasPermission().setReadPermission(true);
+                    BlobServiceSasSignatureValues sasVals =
+                            new BlobServiceSasSignatureValues(expiry, perms).setStartTime(start);
+                    String sas = srcBlob.generateUserDelegationSas(sasVals, udk);
+                    srcUrlWithSas = srcBlob.getBlobUrl() + "?" + sas;
+                } catch (Exception ignore) {
+                    srcUrlWithSas = null;
+                }
+            }
+
+            // Si pas de SAS AAD possible → on tente SAS avec clé de compte (env: SRC_ACCOUNT_KEY)
+            if (srcUrlWithSas == null) {
+                String srcKey = System.getenv("SRC_ACCOUNT_KEY");
+                if (srcKey == null || srcKey.isEmpty()) {
+                    System.err.println("WARN: pas de UserDelegation possible et SRC_ACCOUNT_KEY absent → copie impossible pour " + srcName);
+                    continue;
+                }
+                StorageSharedKeyCredential sk = new StorageSharedKeyCredential(SRC_ACC, srcKey);
+                BlobServiceClient sSvcKey = new BlobServiceClientBuilder()
+                        .endpoint("https://" + SRC_ACC + ".blob.core.windows.net")
+                        .credential(sk)
+                        .httpClient(httpClient)
+                        .buildClient();
+                BlobContainerClient sContKey = sSvcKey.getBlobContainerClient(SRC_CONT);
+                BlobClient srcBlobKey = sContKey.getBlobClient(srcName);
+
+                BlobSasPermission perms = new BlobSasPermission().setReadPermission(true);
+                BlobServiceSasSignatureValues sasVals = new BlobServiceSasSignatureValues(expiry, perms);
+                String sas = srcBlobKey.generateSas(sasVals);
+                srcUrlWithSas = srcBlobKey.getBlobUrl() + "?" + sas;
+            }
+
+            // --------- Copie côté service ---------
+            try {
+                SyncPoller<BlobCopyInfo, Void> poller = dst.beginCopy(
+                        srcUrlWithSas,
+                        (Map<String, String>) null, // metadata
+                        null, // tier
+                        null, // rehydrate priority
+                        null, // source conditions
+                        null, // dest conditions
+                        Duration.ofSeconds(2)
+                );
+                poller.waitForCompletion();
+                System.out.println("Copied: " + srcName + " -> " + dstName);
+            } catch (BlobStorageException ex) {
+                System.err.println("FAIL copy " + srcName + " -> " + dstName +
+                        " | status=" + ex.getStatusCode() + " | code=" + ex.getErrorCode());
+            }
+        }
+
+        System.out.println("✅ Done (flat, non-recursive).");
+    }
+
+    private static HttpClient buildHttpClientWithOptionalProxy() {
+        NettyAsyncHttpClientBuilder b = new NettyAsyncHttpClientBuilder();
+        if (PROXY_HOST != null && !PROXY_HOST.isEmpty()) {
+            ProxyOptions proxy = new ProxyOptions(ProxyOptions.Type.HTTP,
+                    new InetSocketAddress(PROXY_HOST, PROXY_PORT));
+            if (PROXY_USER != null && !PROXY_USER.isEmpty()) {
+                proxy.setCredentials(PROXY_USER, PROXY_PASS);
+            }
+            b.proxy(proxy);
+        }
+        return b.build();
+    }
+}
