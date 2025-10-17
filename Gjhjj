@@ -1,0 +1,121 @@
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.ProxyOptions;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+
+import com.azure.core.credential.TokenRequestContext;
+
+import com.azure.storage.blob.*;
+import com.azure.storage.blob.models.*;
+import com.azure.storage.blob.options.BlobCopyFromUrlOptions;
+
+import java.net.InetSocketAddress;
+import java.time.Duration;
+
+public class LocalBlobCopyFlat {
+
+    // Proxy (laisse vide si pas de proxy)
+    private static final String PROXY_HOST = "";      // ex "proxy.company.local"
+    private static final int    PROXY_PORT = 8080;
+    private static final String PROXY_USER = "";      // ex "DOMAINE\\login" si auth requise
+    private static final char[] PROXY_PASS = new char[0];
+
+    public static void main(String[] args) {
+        if (args.length != 12) {
+            System.err.println("""
+                Usage:
+                  SRC_ACC SRC_CONT SRC_PATH
+                  DST_ACC DST_CONT DST_PATH
+                  SRC_TENANT SRC_CLIENT_ID SRC_SECRET
+                  DST_TENANT DST_CLIENT_ID DST_SECRET
+                """);
+            System.exit(1);
+        }
+
+        String SRC_ACC = args[0], SRC_CONT = args[1], SRC_PATH = args[2];
+        String DST_ACC = args[3], DST_CONT = args[4], DST_PATH = args[5];
+        String SRC_TENANT = args[6], SRC_ID = args[7], SRC_SEC = args[8];
+        String DST_TENANT = args[9], DST_ID = args[10], DST_SEC = args[11];
+
+        // SPN source et destination
+        ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+                .tenantId(SRC_TENANT).clientId(SRC_ID).clientSecret(SRC_SEC).build();
+        ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+                .tenantId(DST_TENANT).clientId(DST_ID).clientSecret(DST_SEC).build();
+
+        // HttpClient Netty + proxy si besoin
+        HttpClient httpClient = buildHttpClientWithOptionalProxy();
+
+        // Services Blob
+        BlobServiceClient sSvc = new BlobServiceClientBuilder()
+                .endpoint("https://" + SRC_ACC + ".blob.core.windows.net")
+                .credential(srcCred)
+                .httpClient(httpClient)
+                .buildClient();
+
+        BlobServiceClient dSvc = new BlobServiceClientBuilder()
+                .endpoint("https://" + DST_ACC + ".blob.core.windows.net")
+                .credential(dstCred)
+                .httpClient(httpClient)
+                .buildClient();
+
+        BlobContainerClient sCont = sSvc.getBlobContainerClient(SRC_CONT);
+        BlobContainerClient dCont = dSvc.getBlobContainerClient(DST_CONT);
+
+        String srcPrefix = SRC_PATH.endsWith("/") ? SRC_PATH : SRC_PATH + "/";
+        String dstPrefix = DST_PATH.endsWith("/") ? DST_PATH : DST_PATH + "/";
+
+        // Token AAD pour la LECTURE de la source (header x-ms-copy-source-authorization)
+        String bearer = "Bearer " + srcCred
+                .getToken(new TokenRequestContext().addScopes("https://storage.azure.com/.default"))
+                .block().getToken();
+
+        // Listing NON récursif
+        ListBlobsOptions listOpt = new ListBlobsOptions().setPrefix(srcPrefix);
+        for (BlobHierarchyItem bhi : sCont.listBlobsByHierarchy("/", listOpt, null)) {
+            if (bhi.isPrefix()) {
+                System.out.println("Ignore dir: " + bhi.getPrefix());
+                continue;
+            }
+
+            BlobItem bi = bhi.getBlobItem();
+            String srcName  = bi.getName();
+            String fileName = srcName.substring(srcName.lastIndexOf('/') + 1);
+            String dstName  = dstPrefix + fileName;
+
+            BlobClient dst = dCont.getBlobClient(dstName);
+            if (dst.exists()) {
+                System.out.println("Skip (exists): " + dstName);
+                continue;
+            }
+
+            // URL source (sans SAS) + header d’autorisation AAD
+            String srcUrl = sCont.getBlobClient(srcName).getBlobUrl();
+            BlobCopyFromUrlOptions opt = new BlobCopyFromUrlOptions(srcUrl)
+                    .setSourceAuthorization(bearer);
+
+            // Copie côté service (synchrone) – pas de flux local
+            // Si ton proxy est lent, augmente le timeout
+            dst.copyFromUrlWithResponse(opt, Duration.ofMinutes(10), null);
+
+            System.out.println("Copied: " + srcName + " -> " + dstName);
+        }
+
+        System.out.println("✅ Done (flat, non-recursive).");
+    }
+
+    private static HttpClient buildHttpClientWithOptionalProxy() {
+        NettyAsyncHttpClientBuilder b = new NettyAsyncHttpClientBuilder();
+        if (PROXY_HOST != null && !PROXY_HOST.isEmpty()) {
+            ProxyOptions proxy = new ProxyOptions(ProxyOptions.Type.HTTP,
+                    new InetSocketAddress(PROXY_HOST, PROXY_PORT));
+            if (PROXY_USER != null && !PROXY_USER.isEmpty()) {
+                proxy.setCredentials(PROXY_USER, PROXY_PASS);
+            }
+            b.proxy(proxy);
+        }
+        return b.build();
+    }
+}
