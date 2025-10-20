@@ -1,0 +1,72 @@
+Voici la version “affinée” qui tient compte de spark.executor.memoryOverhead, spark.memory.fraction et spark.memory.storageFraction (et du nb de cœurs/tâches concurrentes) pour calibrer spark.sql.files.maxPartitionBytes.
+
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.SparkConf;
+
+public final class OutputSizeTunerV2 {
+  private static final long MB = 1024L * 1024;
+  private static final long MIN_BYTES = 64L * MB;     // borne basse
+  private static final long SWEET_SPOT = 256L * MB;   // cible idéale
+  private static final long MAX_BYTES = 512L * MB;    // borne haute
+
+  private static long parseSizeToBytes(String s) {
+    String v = s.trim().toLowerCase();
+    long mul = 1;
+    if (v.endsWith("g") || v.endsWith("gb")) { mul = 1024L * 1024 * 1024; v = v.replaceAll("gb?$",""); }
+    else if (v.endsWith("m") || v.endsWith("mb")) { mul = 1024L * 1024; v = v.replaceAll("mb?$",""); }
+    else if (v.endsWith("k") || v.endsWith("kb")) { mul = 1024L; v = v.replaceAll("kb?$",""); }
+    return (long) Math.max(0, Double.parseDouble(v) * mul);
+  }
+
+  public static void apply(SparkSession spark) {
+    SparkConf c = spark.sparkContext().getConf();
+
+    long execMem = parseSizeToBytes(c.get("spark.executor.memory", "8g"));
+    long overheadExplicit = c.contains("spark.executor.memoryOverhead")
+        ? parseSizeToBytes(c.get("spark.executor.memoryOverhead"))
+        : -1;
+
+    // Overhead par défaut (Spark: max(384M, 0.1 * executorMemory))
+    long overheadDefault = Math.max(384L * MB, (long) (0.10 * execMem));
+    long execOverhead = overheadExplicit > 0 ? overheadExplicit : overheadDefault;
+
+    double memFrac = Double.parseDouble(c.get("spark.memory.fraction", "0.6"));         // part "Unified Memory"
+    double storageFrac = Double.parseDouble(c.get("spark.memory.storageFraction", "0.5")); // part réservée au cache
+    double execMemForTasks = execMem * memFrac * (1.0 - storageFrac); // mémoire "Execution" par exécuteur
+
+    int execCores = Integer.parseInt(c.get("spark.executor.cores", "4"));
+    double taskCpu = Double.parseDouble(c.get("spark.task.resource.cpu.amount", "1.0"));
+    int concurrentTasks = Math.max(1, (int) Math.floor(execCores / Math.max(1.0, taskCpu)));
+
+    // Budget "safe" par tâche : on laisse une marge et on n'inclut PAS l'overhead dans le calcul utilisable
+    long perTaskBudget = (long) (execMemForTasks / concurrentTasks);
+
+    // Marge de sécurité (GC, sérialisation, shuffle spill…)
+    long perTaskSafe = (long) (perTaskBudget * 0.75);
+
+    // Taille cible = min(sweet spot, perTaskSafe), bornée [64M, 512M]
+    long maxPartitionBytes = Math.max(MIN_BYTES, Math.min(MAX_BYTES, Math.min(SWEET_SPOT, perTaskSafe)));
+
+    // Row group Parquet : garder 128M ou inférieur à la cible
+    long parquetBlock = Math.min(128L * MB, maxPartitionBytes);
+
+    spark.conf().set("spark.sql.files.maxPartitionBytes", maxPartitionBytes);
+    spark.conf().set("spark.sql.files.maxRecordsPerFile", 0);
+    spark.conf().set("parquet.block.size", parquetBlock);
+    spark.conf().set("spark.sql.parquet.compression.codec", "snappy");
+  }
+}
+
+Usage minimal :
+
+SparkSession spark = SparkSession.builder().appName("Writer").getOrCreate();
+OutputSizeTunerV2.apply(spark);
+// write partitioned...
+
+Calcule un budget par tâche à partir de la mémoire d’exécuteur réellement exploitable pour l’Execution Memory (sans compter l’overhead).
+
+Borne intelligemment la taille des fichiers : 64–512 Mo, cible 256 Mo quand c’est possible.
+
+Ajuste aussi parquet.block.size (≤128 Mo) pour des row groups propres.
+
+
