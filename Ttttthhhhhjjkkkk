@@ -1,0 +1,81 @@
+Parfait. Voilà une heuristique dynamique côté Java qui calcule une taille “sûre” pour spark.sql.files.maxPartitionBytes en fonction de la mémoire et des cœurs par exécuteur, avec des garde-fous. Objectif : éviter qu’une tâche de sortie sature la mémoire tout en restant proche de ~128–256 Mo par fichier.
+
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.SparkConf;
+
+public final class OutputSizeTuner {
+
+  // Bornes “safe”
+  private static final long MIN_BYTES  = 64L  * 1024 * 1024;   // 64 MB
+  private static final long TARGET_BYTES = 256L * 1024 * 1024; // 256 MB (sweet spot)
+  private static final long MAX_BYTES  = 512L * 1024 * 1024;   // 512 MB
+
+  /** Parse "8g", "1024m", "512mb" -> bytes */
+  private static long parseSizeToBytes(String s) {
+    String v = s.trim().toLowerCase();
+    long mul = 1;
+    if (v.endsWith("g") || v.endsWith("gb")) { mul = 1024L * 1024 * 1024; v = v.replaceAll("gb?$",""); }
+    else if (v.endsWith("m") || v.endsWith("mb")) { mul = 1024L * 1024; v = v.replaceAll("mb?$",""); }
+    else if (v.endsWith("k") || v.endsWith("kb")) { mul = 1024L; v = v.replaceAll("kb?$",""); }
+    return (long) Double.parseDouble(v) * mul;
+  }
+
+  /** Calcule une taille maxPartitionBytes adaptée au cluster courant. */
+  public static long computeMaxPartitionBytes(SparkSession spark) {
+    SparkConf conf = spark.sparkContext().getConf();
+
+    // Récupère mémoire & cœurs par exécuteur (avec défauts prudents)
+    long execMemBytes = parseSizeToBytes(conf.get("spark.executor.memory", "8g"));
+    int execCores = Integer.parseInt(conf.get("spark.executor.cores", "4"));
+
+    // Heuristique:
+    //  - on suppose ~2 tâches de sortie en concurrence par exécuteur
+    //  - on réserve ~50% de la mémoire pour la JVM/overheads
+    //  => marge par tâche ≈ execMem * 0.5 / (2 tâches)
+    long perTaskSafeBytes = (long) (execMemBytes * 0.5 / Math.max(2, execCores / 2));
+
+    // Cible = min(sweet spot 256 Mo, marge par tâche), bornée [64 Mo, 512 Mo]
+    long candidate = Math.min(TARGET_BYTES, perTaskSafeBytes);
+    return Math.max(MIN_BYTES, Math.min(MAX_BYTES, candidate));
+  }
+
+  /** Applique la config Spark recommandée pour limiter la taille des fichiers Parquet. */
+  public static void apply(SparkSession spark) {
+    long maxPartitionBytes = computeMaxPartitionBytes(spark);
+
+    spark.conf().set("spark.sql.files.maxPartitionBytes", maxPartitionBytes);
+    // Garder des row groups raisonnables
+    long parquetBlock = Math.min(maxPartitionBytes, 128L * 1024 * 1024); // 128 MB
+    spark.conf().set("parquet.block.size", parquetBlock);
+    // Laisser Spark piloter par taille (pas par lignes)
+    spark.conf().set("spark.sql.files.maxRecordsPerFile", 0);
+
+    // Compression Parquet par défaut
+    spark.conf().set("spark.sql.parquet.compression.codec", "snappy");
+  }
+}
+
+Usage
+
+SparkSession spark = SparkSession.builder().appName("Writer").getOrCreate();
+OutputSizeTuner.apply(spark);
+
+// ... votre code ...
+dataset
+  .repartition(col("year"), col("month"))
+  .write()
+  .partitionBy("year","month")
+  .mode(SaveMode.Overwrite)
+  .parquet(outputPath);
+
+Idée clé
+
+On garde un sweet spot de 256 Mo si la mémoire le permet.
+
+Sinon on réduit automatiquement pour ne pas dépasser la marge par tâche (évite les OOM/GC lourds).
+
+On borne toujours entre 64 Mo et 512 Mo pour rester performant (ADLS/HDFS).
+
+
+Si tu veux, je te fais une version qui lit aussi spark.executor.memoryOverhead et spark.memory.fraction pour affiner encore la marge par tâche.
+
