@@ -1,0 +1,156 @@
+Parfait — pour Spark 3.3.1 (Scala 2.12), voici le setup prêt-à-coller + snippets Java et un DDL ClickHouse bien réglé (timezone Europe/Paris).
+
+Dépendances Maven (connecteur natif recommandé)
+
+<dependencies>
+  <!-- Spark (tes versions existantes) -->
+  <dependency>
+    <groupId>org.apache.spark</groupId>
+    <artifactId>spark-sql_2.12</artifactId>
+    <version>3.3.1</version>
+    <scope>provided</scope>
+  </dependency>
+
+  <!-- ClickHouse Spark connector pour Spark 3.3 + Scala 2.12 -->
+  <dependency>
+    <groupId>com.clickhouse.spark</groupId>
+    <artifactId>clickhouse-spark-runtime-3.3_2.12</artifactId>
+    <version>0.8.1</version>
+  </dependency>
+
+  <!-- (Optionnel) JDBC fallback -->
+  <dependency>
+    <groupId>com.clickhouse</groupId>
+    <artifactId>clickhouse-jdbc</artifactId>
+    <version>0.9.2</version>
+  </dependency>
+</dependencies>
+
+Le connecteur DataSourceV2 « clickhouse » est la voie recommandée pour Spark↔CH (Spark 3.3 supporté ; artefact 3.3_2.12 dispo jusqu’en 0.8.1). 
+
+
+---
+
+Écriture / Lecture (Java) avec le connecteur natif
+
+// init Spark
+SparkSession spark = SparkSession.builder()
+    .appName("spark-to-clickhouse")
+    .getOrCreate();
+
+// Exemple DF
+Dataset<Row> df = spark.read().json("/data/events.json");
+
+// ÉCRITURE
+df.write()
+  .format("clickhouse")
+  .option("host", "ck1.example.com")      // ou "hosts": "ck1,ck2,ck3"
+  .option("port", "8123")                 // 8443 si TLS
+  .option("database", "analytics")
+  .option("table", "events_local")        // cible locale en cluster
+  .option("user", System.getenv("CK_USER"))
+  .option("password", System.getenv("CK_PWD"))
+  // tuning utiles
+  .option("spark.clickhouse.write.batchSize", "20000")
+  .option("spark.clickhouse.write.compression.codec", "lz4")
+  .option("spark.clickhouse.write.distributed.convertLocal", "true")
+  .mode(SaveMode.Append)
+  .save();
+
+// LECTURE
+Dataset<Row> ch = spark.read()
+  .format("clickhouse")
+  .option("host", "ck1.example.com")
+  .option("port", "8123")
+  .option("database", "analytics")
+  .option("table", "events_local")
+  .option("user", System.getenv("CK_USER"))
+  .option("password", System.getenv("CK_PWD"))
+  .load();
+
+Options clés (connecteur) à connaître :
+
+spark.clickhouse.write.batchSize (défaut ~10k)
+
+spark.clickhouse.write.compression.codec=lz4
+
+spark.clickhouse.write.distributed.convertLocal=true (écrire la locale au lieu de la Distributed)
+
+spark.clickhouse.write.distributed.useClusterNodes=true (broadcast des inserts sur les nœuds du cluster si tu écris sur une Distributed)
+Doc et matrice complète d’options : voir la page officielle. 
+
+
+
+---
+
+Fallback JDBC (simple & universel)
+
+// Lecture parallèle
+Dataset<Row> in = spark.read()
+  .format("jdbc")
+  .option("url", "jdbc:clickhouse://ck1.example.com:8123/analytics")
+  .option("user", System.getenv("CK_USER"))
+  .option("password", System.getenv("CK_PWD"))
+  .option("dbtable", "events")
+  // parallélisme
+  .option("partitionColumn", "id")
+  .option("lowerBound", "1")
+  .option("upperBound", "100000000")
+  .option("numPartitions", "16")
+  .load();
+
+// Écriture
+df.write()
+  .format("jdbc")
+  .option("url", "jdbc:clickhouse://ck1.example.com:8123/analytics")
+  .option("dbtable", "events")
+  .option("user", System.getenv("CK_USER"))
+  .option("password", System.getenv("CK_PWD"))
+  .option("batchsize", "20000")
+  .mode(SaveMode.Append)
+  .save();
+
+Le JDBC fonctionne, mais le connecteur natif reste recommandé pour les perfs et le pushdown. Utilise de préférence les versions récentes du driver JDBC (0.9.x). 
+
+
+---
+
+Modèle ClickHouse (DDL) — cluster + timezone alignée
+
+CREATE TABLE analytics.events_local
+(
+  id           UInt64,
+  user_id      UInt64,
+  event_time   DateTime64(3, 'Europe/Paris'),
+  event_type   LowCardinality(String),
+  payload      String
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_time)
+ORDER BY (event_time, id);
+
+CREATE TABLE analytics.events AS analytics.events_local
+ENGINE = Distributed('cluster_name', 'analytics', 'events_local', rand());
+
+DateTime64 + TZ explicite évite les surprises UTC/heure d’été ; écris côté Spark en UTC si tu préfères la neutralité. Écrire sur la table locale et lire via la Distributed est un pattern courant. 
+
+
+---
+
+Tips rapides (AKS / réseau / prod)
+
+Ouvre egress 8123 (ou 8443 TLS) depuis tes workers vers ClickHouse.
+
+Stocke CK_USER/CK_PWD en Secret (env/Jenkins/KV), pas en clair.
+
+Si TLS : JDBC jdbc:clickhouse:https://...:8443 ou port 8443 pour le connecteur.
+
+
+Tu veux que je te génère un mini projet Maven (Java 17, Spark 3.3.1) avec :
+
+App.java lecture→écriture ClickHouse (connecteur natif)
+
+un profil local + un profil aks (conf via env)
+
+un script d’exemple spark-submit
+?
