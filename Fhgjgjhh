@@ -1,0 +1,63 @@
+// Normalisation des préfixes
+String srcPrefix = SRC_PATH == null ? "" : SRC_PATH.replace("\\", "/");
+if (!srcPrefix.isEmpty() && !srcPrefix.endsWith("/")) srcPrefix += "/";
+
+String dstPrefix = DST_PATH == null ? "" : DST_PATH.replace("\\", "/");
+if (dstPrefix.startsWith("/")) dstPrefix = dstPrefix.substring(1);
+if (dstPrefix.endsWith("/"))  dstPrefix = dstPrefix.substring(0, dstPrefix.length()-1);
+
+// Jeton AAD pour autoriser la LECTURE de la source (si comptes/tenants différents)
+String bearer = srcCred.getToken(new TokenRequestContext()
+        .addScopes("https://storage.azure.com/.default")).block().getToken();
+
+// ---- COPIE RÉCURSIVE ----
+Deque<String> stack = new ArrayDeque<>();
+stack.push(srcPrefix);  // "" ou "dir/"
+
+while (!stack.isEmpty()) {
+    String current = stack.pop();
+
+    // listing hiérarchique (toujours "/" en délimiteur)
+    ListBlobsOptions listOpt = new ListBlobsOptions().setPrefix(current);
+    for (BlobItem bi : sCont.listBlobsByHierarchy("/", listOpt, null, null)) {
+
+        // Sous-dossier virtuel -> on descend
+        if (Boolean.TRUE.equals(bi.isPrefix())) {
+            stack.push(bi.getName());         // ex: "in/eqd/subdir/"
+            continue;
+        }
+
+        // Fichier
+        String srcName  = bi.getName();       // ex: "in/eqd/a/b/file.csv"
+        String relative = srcName.substring(srcPrefix.length());          // ex: "a/b/file.csv"
+        String dstName  = dstPrefix.isEmpty() ? relative : dstPrefix + "/" + relative;
+
+        BlobClient dst = dCont.getBlobClient(dstName);
+        if (dst.exists()) {                   // skip si déjà présent (garde ton comportement actuel)
+            System.out.println("Skip (exists): " + dstName);
+            continue;
+        }
+
+        // URL source + autorisation AAD (pas de SAS)
+        String srcUrl = sCont.getBlobClient(srcName).getBlobUrl();
+        BlobBeginCopyOptions opt = new BlobBeginCopyOptions(srcUrl);
+        if (bearer != null && !bearer.isEmpty()) {
+            opt.setSourceAuthorization(new HttpAuthorization("Bearer", bearer));
+        }
+
+        // Copie serveur→serveur + attente
+        SyncPoller<BlobCopyInfo, Void> poller = dst.getBlockBlobClient().beginCopy(opt, null);
+        poller.waitForCompletion(Duration.ofMinutes(10));
+
+        // Vérif statut final (sécurise les échecs silencieux)
+        BlobProperties props = dst.getProperties();
+        if (props.getCopyStatus() == CopyStatusType.FAILED || props.getCopyStatus() == CopyStatusType.ABORTED) {
+            throw new IllegalStateException("Copy failed: " + srcName + " -> " + dstName
+                    + " : " + props.getCopyStatusDescription());
+        }
+
+        System.out.println("Copied: " + srcName + " -> " + dstName);
+    }
+}
+
+System.out.println("✅ Done (recursive).");
