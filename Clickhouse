@@ -1,0 +1,106 @@
+Très bonne remarque 👌 — et oui, tu peux tout à fait mettre la dépendance du connecteur en scope compile dans ton projet Maven, à condition que ton job Spark tourne dans un environnement où ton JAR applicatif contient déjà tout (donc : pas de --packages externe à runtime).
+
+Mais il faut bien comprendre ce que cela implique 👇
+
+
+---
+
+🧩 1️⃣ — Si tu veux embarquer le connecteur ClickHouse dans ton JAR
+
+Tu peux déclarer dans ton pom.xml :
+
+<dependency>
+  <groupId>com.clickhouse.spark</groupId>
+  <artifactId>clickhouse-spark-connector_2.12</artifactId>
+  <version>0.7.2</version>
+  <scope>compile</scope>
+</dependency>
+
+✅ Cela fonctionne très bien si :
+
+Tu packages ton projet en fat-jar / shaded JAR (via maven-shade-plugin ou assembly:single),
+
+Et tu exécutes ton job Spark depuis une image Docker ou un cluster AKS où ton JAR complet est déjà présent.
+
+
+⚠️ Si tu n’inclus pas le connecteur dans ton JAR, Spark cherchera à le télécharger dynamiquement (via --packages), ce qui ne marche pas derrière proxy ou en environnement fermé (Azure interne).
+
+
+---
+
+🧩 2️⃣ — Exemple d’usage du connecteur natif Spark ClickHouse
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+public class ClickHouseWriter {
+
+    public static void write(Dataset<Row> df) {
+        df.write()
+            .format("clickhouse")
+            .option("host", "https://<hostname>.privatelink.database.windows.net")
+            .option("port", "8443")
+            .option("user", "<USER>")
+            .option("password", "<PASSWORD>")
+            .option("database", "analytics")
+            .option("table", "events")
+            .option("ssl", "true")
+            .option("create_table", "true")  // auto-create table if absent
+            .mode("append")
+            .save();
+    }
+
+    public static void main(String[] args) {
+        SparkSession spark = SparkSession.builder()
+                .appName("WriteToClickHouse")
+                .getOrCreate();
+
+        Dataset<Row> df = spark.read().json("/mnt/data/input.json");
+        write(df);
+    }
+}
+
+
+---
+
+🧩 3️⃣ — Exemple de maven-shade-plugin pour embarquer tout
+
+<plugin>
+  <groupId>org.apache.maven.plugins</groupId>
+  <artifactId>maven-shade-plugin</artifactId>
+  <version>3.3.0</version>
+  <executions>
+    <execution>
+      <phase>package</phase>
+      <goals><goal>shade</goal></goals>
+      <configuration>
+        <createDependencyReducedPom>false</createDependencyReducedPom>
+        <transformers>
+          <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+            <mainClass>com.yourcompany.ClickHouseWriter</mainClass>
+          </transformer>
+        </transformers>
+      </configuration>
+    </execution>
+  </executions>
+</plugin>
+
+Ce JAR contiendra Spark + ClickHouse Connector → aucun --packages à runtime.
+
+
+---
+
+🧠 En résumé
+
+Mode	Déclaration	Utilisation	Recommandé quand
+
+Compile (Shade)	<scope>compile</scope>	Tout embarqué dans ton JAR	✅ AKS / environnements fermés
+Runtime (--packages)	rien dans POM	Ajout via spark-submit	Pour tests ou jobs temporaires
+Provided	<scope>provided</scope>	Connecteur déjà dans l’image Docker	Si Spark runtime customisé
+
+
+
+---
+
+Souhaites-tu que je te montre la version exacte du pom.xml complet (avec Spark, ClickHouse, Shade plugin et exclusions propres à Spark 3.3.4) prête à compiler ton JAR AKS ?
