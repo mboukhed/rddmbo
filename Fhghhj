@@ -1,0 +1,171 @@
+Parfait. Voici une implémentation 100% BlobServiceClient qui copie récursivement un “répertoire” (préfixe) d’un conteneur Azure vers un autre (même compte ou compte différent), en server-side copy, avec :
+
+listBlobsByHierarchy("/") pour la récursivité,
+
+création implicite des “dossiers” (dans Blob, ce sont des préfixes virtuels → rien à créer),
+
+autorisation source par Bearer (si comptes/tenants différents),
+
+option overwrite (ou skip si existe).
+
+
+Classe utilitaire
+
+import com.azure.identity.ClientSecretCredential;
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.storage.blob.*;
+import com.azure.storage.blob.models.*;
+import com.azure.storage.blob.options.BlobBeginCopyOptions;
+
+import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
+
+public final class BlobToBlobRecursiveCopier {
+
+    private BlobToBlobRecursiveCopier() {}
+
+    /**
+     * Copie récursivement tous les blobs sous srcPrefix vers dstPrefix.
+     *
+     * @param srcCont   conteneur source (BlobContainerClient)
+     * @param srcPrefix préfixe source (ex: "in/eqd/") ; peut être "" pour tout le conteneur
+     * @param dstCont   conteneur destination
+     * @param dstPrefix préfixe destination (ex: "landing/eqd")
+     * @param bearerForSource  jeton Bearer (scope https://storage.azure.com/.default) pour autoriser la LECTURE de la source.
+     *                          Si source et destination sont dans le même compte et que l’ID utilisé a accès aux deux, vous pouvez passer null.
+     * @param overwrite si true, écrase les blobs existants ; sinon, skip.
+     */
+    public static void copyDirectoryRecursive(
+            BlobContainerClient srcCont,
+            String srcPrefix,
+            BlobContainerClient dstCont,
+            String dstPrefix,
+            String bearerForSource,
+            boolean overwrite
+    ) {
+        srcPrefix = normalizePrefix(srcPrefix);      // "a/b/" ou "" (vide)
+        dstPrefix = trimSlashes(dstPrefix);          // "landing/eqd" (pas de / final)
+
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push(srcPrefix);
+
+        while (!stack.isEmpty()) {
+            String current = stack.pop();
+
+            for (BlobItem item : srcCont.listBlobsByHierarchy(current, "/")) {
+                if (Boolean.TRUE.equals(item.isPrefix())) {
+                    // Dossier virtuel -> descente récursive
+                    stack.push(item.getName());
+                    continue;
+                }
+
+                // Fichier
+                String srcName = item.getName();               // ex: "in/eqd/a/b/file.csv"
+                String relative = srcName.substring(srcPrefix.length());  // ex: "a/b/file.csv"
+
+                String dstName = dstPrefix.isEmpty() ? relative : dstPrefix + "/" + relative;
+                BlobClient srcBlob = srcCont.getBlobClient(srcName);
+                BlockBlobClient dstBlob = dstCont.getBlobClient(dstName).getBlockBlobClient();
+
+                if (!overwrite && dstBlob.exists()) {
+                    continue; // skip si déjà présent
+                }
+
+                // Lance la copie server->server
+                String sourceUrl = srcBlob.getBlobUrl(); // URL complète de la source
+                BlobBeginCopyOptions options = new BlobBeginCopyOptions(sourceUrl);
+
+                if (bearerForSource != null && !bearerForSource.isEmpty()) {
+                    options.setSourceAuthorization(new HttpAuthorization("Bearer", bearerForSource));
+                }
+
+                // beginCopy + attente de fin
+                SyncPoller<BlobCopyInfo, Void> poller = dstBlob.beginCopy(options, null);
+                poller.waitForCompletion(Duration.ofMinutes(10));
+
+                BlobProperties props = dstBlob.getProperties();
+                if (props.getCopyStatus() == CopyStatusType.FAILED || props.getCopyStatus() == CopyStatusType.ABORTED) {
+                    throw new IllegalStateException("Copy failed: " + srcName + " -> " + dstName
+                            + " : " + props.getCopyStatusDescription());
+                }
+            }
+        }
+    }
+
+    // ---------- helpers chemins ----------
+    private static String normalizePrefix(String p) {
+        if (p == null || p.isEmpty()) return "";
+        p = p.replace("\\", "/");
+        if (p.startsWith("/")) p = p.substring(1);
+        if (!p.endsWith("/")) p = p + "/";
+        return p;
+    }
+    private static String trimSlashes(String p) {
+        if (p == null || p.isEmpty()) return "";
+        p = p.replace("\\", "/");
+        if (p.startsWith("/")) p = p.substring(1);
+        if (p.endsWith("/")) p = p.substring(0, p.length()-1);
+        return p;
+    }
+
+    /** Récupère un Bearer pour la source à partir d’un ClientSecretCredential */
+    public static String getBearer(ClientSecretCredential cred) {
+        var ctx = new TokenRequestContext().addScopes("https://storage.azure.com/.default");
+        var tok = cred.getToken(ctx).block();
+        return tok == null ? null : tok.getToken();
+    }
+}
+
+Exemple d’utilisation (dans ton main, tel que ta capture)
+
+// Credentials (éventuellement différents entre source et destination)
+ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+        .tenantId(SRC_TENANT).clientId(SRC_ID).clientSecret(SRC_SEC).build();
+
+ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+        .tenantId(DST_TENANT).clientId(DST_ID).clientSecret(DST_SEC).build();
+
+// Services/containers
+BlobServiceClient sSvc = new BlobServiceClientBuilder()
+        .endpoint("https://" + SRC_ACC + ".blob.core.windows.net")
+        .credential(srcCred)
+        .buildClient();
+
+BlobServiceClient dSvc = new BlobServiceClientBuilder()
+        .endpoint("https://" + DST_ACC + ".blob.core.windows.net")
+        .credential(dstCred)
+        .buildClient();
+
+BlobContainerClient sCont = sSvc.getBlobContainerClient(SRC_CONT);
+BlobContainerClient dCont = dSvc.getBlobContainerClient(DST_CONT);
+
+// Jeton Bearer pour autoriser la lecture de la source (si comptes/tenants différents)
+// Si la même identité a lecture sur la source, vous pouvez passer null.
+String bearer = BlobToBlobRecursiveCopier.getBearer(srcCred);
+
+// Lancer la copie récursive
+BlobToBlobRecursiveCopier.copyDirectoryRecursive(
+        sCont,
+        "mon/prefixe/source/",   // ex: "in/eqd/" ; "" pour tout le conteneur
+        dCont,
+        "mon/prefixe/dest",      // ex: "landing/eqd"
+        bearer,
+        /* overwrite = */ false  // true pour écraser, false pour skip si existe
+);
+
+Remarques
+
+Dans Blob (namespace non hiérarchique), les “dossiers” sont virtuels : il suffit de copier les blobs avec leur chemin (a/b/file.csv). Rien à “créer” côté répertoire.
+
+Si la source est dans un autre compte/tenant, le bearer (scope https://storage.azure.com/.default) est requis via setSourceAuthorization(...).
+
+Vérifie que l’identité utilisée a :
+
+Lecture sur la source,
+
+Écriture sur la destination (RBAC côté compte + éventuels verrous de conteneur).
+
+
+
+Si tu veux la version parallèle (multi-threads) pour accélérer la copie, je te la sors aussi, mais celle-ci est prête à l’emploi et robuste.
