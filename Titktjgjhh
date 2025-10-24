@@ -1,0 +1,168 @@
+Voici la classe complète (Java 17) qui copie récursivement un répertoire (préfixe) d’un conteneur Azure vers un autre en BlobServiceClient, server-side, avec skip si existe (toggle OVERWRITE). Aucune création locale.
+
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.core.util.polling.SyncPoller;
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.storage.blob.*;
+import com.azure.storage.blob.models.*;
+import com.azure.storage.blob.options.BlobBeginCopyOptions;
+
+import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
+
+public class LocalBlobCopyFlat3ProdToDev {
+
+    // ---------- CONFIG ----------
+    // Source
+    private static final String SRC_TENANT = "<src-tenant-id>";
+    private static final String SRC_ID     = "<src-client-id>";
+    private static final String SRC_SEC    = "<src-client-secret>";
+    private static final String SRC_ACC    = "<src-account-name>";
+    private static final String SRC_CONT   = "<src-container>";
+    private static final String SRC_PATH   = "in/eqd/";     // "" pour tout le conteneur, sinon préfixe finissant par "/"
+
+    // Destination
+    private static final String DST_TENANT = "<dst-tenant-id>";
+    private static final String DST_ID     = "<dst-client-id>";
+    private static final String DST_SEC    = "<dst-client-secret>";
+    private static final String DST_ACC    = "<dst-account-name>";
+    private static final String DST_CONT   = "<dst-container>";
+    private static final String DST_PATH   = "landing/eqd"; // pas de "/" final
+
+    // Comportement
+    private static final boolean OVERWRITE = false;         // true = écrase, false = skip si existe
+    private static final Duration COPY_TIMEOUT = Duration.ofMinutes(10);
+
+    public static void main(String[] args) {
+        // ---- Credentials ----
+        ClientSecretCredential srcCred = new ClientSecretCredentialBuilder()
+                .tenantId(SRC_TENANT).clientId(SRC_ID).clientSecret(SRC_SEC).build();
+
+        ClientSecretCredential dstCred = new ClientSecretCredentialBuilder()
+                .tenantId(DST_TENANT).clientId(DST_ID).clientSecret(DST_SEC).build();
+
+        // ---- (optionnel) HTTP client / proxy ----
+        HttpClient httpClient = new NettyAsyncHttpClientBuilder().build();
+
+        // ---- Services / Containers ----
+        BlobServiceClient sSvc = new BlobServiceClientBuilder()
+                .endpoint("https://" + SRC_ACC + ".blob.core.windows.net")
+                .credential(srcCred)
+                .httpClient(httpClient)
+                .buildClient();
+        BlobServiceClient dSvc = new BlobServiceClientBuilder()
+                .endpoint("https://" + DST_ACC + ".blob.core.windows.net")
+                .credential(dstCred)
+                .httpClient(httpClient)
+                .buildClient();
+
+        BlobContainerClient sCont = sSvc.getBlobContainerClient(SRC_CONT);
+        BlobContainerClient dCont = dSvc.getBlobContainerClient(DST_CONT);
+
+        // ---- Préfixes normalisés ----
+        String srcPrefix = normalizeSrcPrefix(SRC_PATH);   // "" ou "a/b/"
+        String dstPrefix = normalizeDstPrefix(DST_PATH);   // "" ou "x/y"
+
+        // ---- Bearer pour autoriser la LECTURE de la source (si comptes/tenants différents) ----
+        String bearer = getBearer(srcCred); // peut être null si inutile
+
+        // ---- Copie récursive ----
+        copyDirectoryRecursive(sCont, srcPrefix, dCont, dstPrefix, bearer, OVERWRITE);
+
+        System.out.println("✅ Done (recursive).");
+    }
+
+    // ======================================================================
+    //                            LOGIQUE COPIE
+    // ======================================================================
+
+    private static void copyDirectoryRecursive(BlobContainerClient srcCont,
+                                               String srcPrefix,
+                                               BlobContainerClient dstCont,
+                                               String dstPrefix,
+                                               String bearerForSource,
+                                               boolean overwrite) {
+
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push(srcPrefix); // "" ou "dir/"
+
+        while (!stack.isEmpty()) {
+            String current = stack.pop();
+
+            ListBlobsOptions listOpt = new ListBlobsOptions().setPrefix(current);
+            for (BlobItem bi : srcCont.listBlobsByHierarchy("/", listOpt, null, null)) {
+
+                if (Boolean.TRUE.equals(bi.isPrefix())) {
+                    // dossier virtuel -> descente récursive
+                    stack.push(bi.getName());          // ex: "in/eqd/subdir/"
+                    continue;
+                }
+
+                // Fichier
+                String srcName  = bi.getName();                       // ex: "in/eqd/a/b/file.csv"
+                String relative = srcName.substring(srcPrefix.length()); // ex: "a/b/file.csv"
+                String dstName  = dstPrefix.isEmpty() ? relative : dstPrefix + "/" + relative;
+
+                BlobClient dst = dstCont.getBlobClient(dstName);
+                if (!overwrite && dst.exists()) {
+                    System.out.println("Skip (exists): " + dstName);
+                    continue;
+                }
+
+                String srcUrl = srcCont.getBlobClient(srcName).getBlobUrl();
+                BlobBeginCopyOptions opt = new BlobBeginCopyOptions(srcUrl);
+                if (bearerForSource != null && !bearerForSource.isEmpty()) {
+                    opt.setSourceAuthorization(new HttpAuthorization("Bearer", bearerForSource));
+                }
+
+                SyncPoller<BlobCopyInfo, Void> poller = dst.getBlockBlobClient().beginCopy(opt, null);
+                poller.waitForCompletion(COPY_TIMEOUT);
+
+                BlobProperties props = dst.getProperties();
+                if (props.getCopyStatus() == CopyStatusType.FAILED || props.getCopyStatus() == CopyStatusType.ABORTED) {
+                    throw new IllegalStateException("Copy failed: " + srcName + " -> " + dstName
+                            + " : " + props.getCopyStatusDescription());
+                }
+                System.out.println("Copied: " + srcName + " -> " + dstName);
+            }
+        }
+    }
+
+    // ======================================================================
+    //                                HELPERS
+    // ======================================================================
+
+    private static String normalizeSrcPrefix(String p) {
+        if (p == null || p.isEmpty()) return "";
+        p = p.replace("\\", "/");
+        if (p.startsWith("/")) p = p.substring(1);
+        if (!p.endsWith("/")) p = p + "/";
+        return p;
+    }
+
+    private static String normalizeDstPrefix(String p) {
+        if (p == null || p.isEmpty()) return "";
+        p = p.replace("\\", "/");
+        if (p.startsWith("/")) p = p.substring(1);
+        if (p.endsWith("/")) p = p.substring(0, p.length() - 1);
+        return p;
+    }
+
+    private static String getBearer(ClientSecretCredential cred) {
+        var tok = cred.getToken(new TokenRequestContext()
+                .addScopes("https://storage.azure.com/.default")).block();
+        return tok == null ? null : tok.getToken();
+    }
+}
+
+Usage rapide :
+
+Renseigne les constantes SRC_*, DST_*.
+
+Mets OVERWRITE = true si tu veux écraser les fichiers existants.
+
+Assure-toi que ton SPN a lecture sur la source et écriture sur la destination (RBAC) ; si comptes/tenants différents, le bearer ajouté autorise la source.
