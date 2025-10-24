@@ -1,0 +1,53 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+public class ClickHouseAndParquetExample {
+    public static void main(String[] args) {
+        // 1️⃣ Lancer Spark
+        SparkSession spark = SparkSession.builder()
+                .appName("ClickHouseAndParquet")
+                .master("local[*]")
+                .getOrCreate();
+
+        // 2️⃣ Configurer le catalogue ClickHouse (v0.8.1)
+        spark.conf().set("spark.sql.catalog.clickhouse", "com.clickhouse.spark.ClickHouseCatalog");
+        spark.conf().set("spark.sql.catalog.clickhouse.host", "localhost");  // ou "clickhouse" si AKS
+        spark.conf().set("spark.sql.catalog.clickhouse.protocol", "http");
+        spark.conf().set("spark.sql.catalog.clickhouse.http_port", "8123");  // 80 en AKS
+        spark.conf().set("spark.sql.catalog.clickhouse.user", "default");
+        spark.conf().set("spark.sql.catalog.clickhouse.password", "");
+        spark.conf().set("spark.sql.catalog.clickhouse.database", "analytics");
+        spark.conf().set("spark.sql.catalog.clickhouse.ssl", "false");
+
+        // 3️⃣ Lecture Parquet depuis ADLS ou local
+        Dataset<Row> parquetDf = spark.read()
+                .parquet("/mnt/adls/data/eqd/2025-10-24/");
+
+        // Créer une vue temporaire pour la jointure
+        parquetDf.createOrReplaceTempView("eqd_data");
+
+        // 4️⃣ Lecture ClickHouse via Spark Catalog
+        Dataset<Row> clickDf = spark.sql("SELECT * FROM clickhouse.analytics.events");
+        clickDf.createOrReplaceTempView("events_ch");
+
+        // 5️⃣ Jointure SQL entre Parquet et ClickHouse
+        Dataset<Row> joined = spark.sql("""
+            SELECT e.user_id, e.event_date, p.trade_id, p.amount
+            FROM events_ch e
+            JOIN eqd_data p
+              ON e.user_id = p.user_id
+            WHERE e.event_date >= '2025-10-01'
+        """);
+
+        // 6️⃣ Afficher et sauvegarder le résultat
+        joined.show(20, false);
+
+        joined.write()
+              .mode("overwrite")
+              .parquet("/mnt/adls/output/joined_eqd_clickhouse/");
+
+        System.out.println("✅ Jointure ClickHouse + Parquet terminée !");
+        spark.stop();
+    }
+}
