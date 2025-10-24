@@ -1,0 +1,47 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+import java.util.Properties;
+
+public class TestClickHouseSparkJdbc {
+    public static void main(String[] args) {
+
+        // ✅ Création de la session Spark locale
+        SparkSession spark = SparkSession.builder()
+                .appName("TestClickHouseSparkJdbc")
+                .master("local[*]") // mode local pour test
+                .getOrCreate();
+
+        // ✅ URL JDBC générique (HTTPS)
+        // Remplace <host> et <port> par ton endpoint ClickHouse sécurisé
+        String url = "jdbc:clickhouse://<host>:<port>/<database>"
+                   + "?ssl=true"
+                   + "&sslMode=NONE"            // STRICT si certificat public
+                   + "&socket_timeout=30000"
+                   + "&compress=1";
+
+        // ✅ Propriétés de connexion
+        Properties props = new Properties();
+        props.put("user", "<USER>");
+        props.put("password", "<PASSWORD>");
+
+        // ✅ Lecture depuis une table ClickHouse existante
+        Dataset<Row> df = spark.read()
+                .jdbc(url, "system.build_options", props);
+
+        System.out.println("✅ Lecture réussie depuis ClickHouse :");
+        df.show(5, false);
+
+        // ✅ Exemple : lecture Parquet + écriture ClickHouse
+        Dataset<Row> parquetDf = spark.read().parquet("/mnt/adls/data/example-date/");
+
+        parquetDf.write()
+                .mode("append")
+                .jdbc(url, "default.test_write_spark", props);
+
+        System.out.println("✅ Données parquet écrites dans ClickHouse avec succès.");
+
+        spark.stop();
+    }
+}
