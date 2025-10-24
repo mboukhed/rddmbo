@@ -1,0 +1,3 @@
+TokenRequestContext ctx = new TokenRequestContext().addScopes("https://storage.azure.com/.default");
+AccessToken token = csc.getToken(ctx).block();
+log.info("Token expires at: {}", token.getExpiresAt());
