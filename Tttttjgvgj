@@ -1,0 +1,49 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+public class ClickHouseSparkLocal {
+    public static void main(String[] args) {
+        // 1️⃣ Lancer Spark en mode local
+        SparkSession spark = SparkSession.builder()
+                .appName("ClickHouseSparkLocalTest")
+                .master("local[*]") // exécution locale
+                .getOrCreate();
+
+        // 2️⃣ Paramètres ClickHouse (interne AKS ou distant)
+        String host = "clickhouse";   // si tu testes depuis un pod AKS
+        // ou en local sur ton poste : "localhost"
+        int port = 80;                // 80 interne AKS, ou 8123 local HTTP
+        String database = "analytics";
+        String table = "events";
+        String user = "default";
+        String password = "";
+
+        // 3️⃣ Lecture avec le connecteur natif ClickHouse-Spark
+        Dataset<Row> df = spark.read()
+                .format("clickhouse")
+                .option("host", host)
+                .option("port", String.valueOf(port))
+                .option("database", database)
+                .option("table", table)
+                .option("user", user)
+                .option("password", password)
+                .option("ssl", "false") // true si HTTPS
+                .load();
+
+        // 4️⃣ Afficher 10 lignes
+        df.show(10, false);
+
+        // 5️⃣ Exemple SQL
+        df.createOrReplaceTempView("events_ch");
+        spark.sql("""
+            SELECT user_id, COUNT(*) AS nb, SUM(amount) AS total
+            FROM events_ch
+            GROUP BY user_id
+            ORDER BY total DESC
+            LIMIT 10
+        """).show(false);
+
+        spark.stop();
+    }
+}
