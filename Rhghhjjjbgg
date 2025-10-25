@@ -1,0 +1,70 @@
+Parce que df.show() est une action : il déclenche une exécution réelle de la source JDBC.
+Dans ton cas, tu lis avec :
+
+.option("query", "select * from srv.TARJAVSRV")
+
+→ Avec le driver ClickHouse JDBC v2, le LIMIT de show(5) n’est pas poussé (pushdown) quand on utilise query.
+Résultat : ClickHouse exécute le scan complet de la requête, puis renvoie des blocs → show(5) “bloque” le temps que le serveur prépare/renvoie le premier gros bloc (voire tout le résultat).
+
+Comment le vérifier vite
+
+Regarde dans les logs ClickHouse / CloudBeaver : tu verras la requête sans LIMIT venant de Spark quand tu utilises .option("query", ...).
+
+
+---
+
+Solutions immédiates
+
+1) Mettre le LIMIT dans la requête (le plus simple)
+
+Dataset<Row> df = spark.read()
+  .format("jdbc")
+  .options(configs)
+  .option("dbtable", "(SELECT * FROM srv.TARJAVSRV LIMIT 5) AS t")  // pushdown garanti
+  .load();
+df.show(false);
+
+> Avec dbtable + sous-requête, le LIMIT est poussé côté ClickHouse.
+
+
+
+2) Garder query mais limiter côté source
+
+.option("query", "SELECT * FROM srv.TARJAVSRV LIMIT 5")
+
+> Moins souple que la sous-requête, mais ça marche.
+
+
+
+3) Accélérer les scans quand tu veux lire “vraiment” beaucoup
+
+Ajoute du parallélisme + tailles de blocs :
+
+.option("partitionColumn", "id")      // ou une date
+.option("lowerBound", "1")
+.option("upperBound", "10000000")
+.option("numPartitions", "16")        // 8–32 selon ton cluster/réseau
+.option("fetchsize", "20000")         // plus gros blocs réseau
+
+4) (Optionnel) Écriture plus rapide
+
+df.repartition(24)
+  .write()
+  .format("jdbc")
+  .options(configs)
+  .option("dbtable", "srv.TARJAVSRV_OUT")
+  .option("batchsize", "50000")
+  .option("isolationLevel", "NONE")
+  .mode("append")
+  .save();
+
+
+---
+
+En bref
+
+show(5) = df.limit(5).collect() → ne suffit pas avec option("query", …) sur JDBC v2 : pas de pushdown → scan complet.
+
+Utilise dbtable avec une sous-requête SELECT … LIMIT … pour forcer le pushdown, ou mets LIMIT directement dans la query.
+
+Pour les vraies lectures volumétriques, partitionne + fetchsize.
