@@ -1,0 +1,39 @@
+package com.sgciib.datalab.equity.runner;
+
+import com.clickhouse.client.*;
+
+public class ClickHouseDirectTest {
+    public static void main(String[] args) throws Exception {
+
+        // ⚙️ paramètres à adapter
+        String host = "<ton_host_dns>";
+        int port = 8443; // port HTTPS sur ton ingress
+        String user = "<user>";
+        String password = "<password>";
+        String database = "<database>";
+
+        // 🔒 désactive la vérification SSL si certificat interne
+        System.setProperty("clickhouse.tls.verify", "false");
+        System.setProperty("clickhouse.ssl", "true");
+        System.setProperty("clickhouse.protocol", "https");
+        System.setProperty("clickhouse.secure", "true");
+
+        // 🧠 crée le noeud ClickHouse
+        ClickHouseNode node = ClickHouseNode.of(String.format("https://%s:%d", host, port));
+
+        // 🧩 construit la requête
+        ClickHouseRequest<?> request = ClickHouseClient.newInstance()
+                .read(node)
+                .option(ClickHouseClientOption.DATABASE, database)
+                .option(ClickHouseClientOption.USER, user)
+                .option(ClickHouseClientOption.PASSWORD, password)
+                .query("SELECT 1");
+
+        System.out.println("Connecting to: " + node.getBaseUri());
+
+        // 🚀 exécution
+        try (ClickHouseResponse response = request.executeAndWait()) {
+            response.stream().forEach(System.out::println);
+        }
+    }
+}
