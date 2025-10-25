@@ -1,0 +1,13 @@
+import com.clickhouse.client.*;
+
+public class ClickHouseDirectTest {
+    public static void main(String[] args) throws Exception {
+        ClickHouseNode node = ClickHouseNode.of("https://<host>:8443");
+        ClickHouseClient.newInstance(node)
+            .read(node)
+            .query("SELECT 1")
+            .executeAndWait()
+            .stream()
+            .forEach(System.out::println);
+    }
+}
