@@ -1,0 +1,32 @@
+import com.clickhouse.client.*;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
+public class ClickHouseDirectTest {
+  public static void main(String[] args) throws Exception {
+    String host = "<HOST>";
+    int    port = 8443;                // HTTPS de ton ingress
+    String user = "<USER>";
+    String pass = "<PASSWORD>";
+    String db   = "<DB>";
+
+    // (si cert interne)
+    System.setProperty("clickhouse.tls.verify", "false");
+
+    String u = URLEncoder.encode(user, StandardCharsets.UTF_8.toString());
+    String p = URLEncoder.encode(pass, StandardCharsets.UTF_8.toString());
+    String uri = String.format("https://%s:%s@%s:%d?database=%s", u, p, host, port, db);
+
+    ClickHouseNode node = ClickHouseNode.of(uri);
+
+    System.out.println("Connecting to: " + node.getBaseUri());
+    try (ClickHouseResponse resp = ClickHouseClient.newInstance()
+        .read(node)
+        .query("SELECT 1")
+        .executeAndWait()) {
+
+      resp.stream().forEach(System.out::println);
+    }
+  }
+}
