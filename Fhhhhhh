@@ -1,0 +1,32 @@
+public class TestClickHouse {
+    public static void main(String[] args) {
+
+        // ⚙️ Forcer HTTPS au niveau JVM avant toute initialisation
+        System.setProperty("CLICKHOUSE_PROTOCOL", "https");
+        System.setProperty("clickhouse.protocol", "https");
+        System.setProperty("clickhouse.secure", "true");
+        System.setProperty("clickhouse.securePort", "8443");
+        System.setProperty("clickhouse.ssl", "true");
+        System.setProperty("clickhouse.protocol.secure", "true");
+
+        SparkConf conf = new SparkConf()
+            .setAppName("ClickHouseSparkHTTPS")
+            .setMaster("local[*]")
+            .set("spark.sql.catalog.clickhouse", "com.clickhouse.spark.ClickHouseCatalog")
+            .set("spark.sql.catalog.clickhouse.host", "<FQDN>")
+            .set("spark.sql.catalog.clickhouse.http_port", "8443")
+            .set("spark.sql.catalog.clickhouse.user", "<USER>")
+            .set("spark.sql.catalog.clickhouse.password", "<PASSWORD>")
+            .set("spark.sql.catalog.clickhouse.database", "<DB>")
+            .set("spark.sql.catalog.clickhouse.ssl", "true");
+
+        SparkSession spark = SparkSession.builder()
+            .config(conf)
+            .getOrCreate();
+
+        Dataset<Row> df = spark.sql("SELECT * FROM clickhouse.<DB>.<TABLE> LIMIT 10");
+        df.show(false);
+
+        spark.stop();
+    }
+}
