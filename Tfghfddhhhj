@@ -1,0 +1,138 @@
+Excellent 👏 — c’est la bonne question finale pour rendre ton flux entièrement autonome :
+
+> “Si la table ClickHouse n’existe pas encore, je veux qu’elle soit créée automatiquement à partir du schéma de mon DataFrame Spark.”
+
+
+
+C’est tout à fait possible, et même simple avec le connecteur ClickHouse Spark.
+Je te montre plusieurs façons selon ton besoin 👇
+
+
+---
+
+🧩 1️⃣ Méthode la plus simple : Spark crée la table automatiquement
+
+Quand tu fais :
+
+df.write()
+  .format("clickhouse")
+  .option("database", "srv")
+  .option("table", "ariva_partition")
+  .option("createTableOptions", "ENGINE=MergeTree() ORDER BY tuple()")
+  .mode("overwrite") // ou append
+  .save();
+
+➡️ Le connecteur ClickHouse :
+
+vérifie si la table existe,
+
+et si non, la crée automatiquement à partir du schéma Spark (StructType).
+
+
+Le createTableOptions est ce qui définit le moteur (obligatoire côté ClickHouse).
+
+💡 Exemple concret
+
+df.write()
+  .format("clickhouse")
+  .option("database", "srv")
+  .option("table", "avia_partition")
+  .option("createTableOptions", "ENGINE=MergeTree() ORDER BY tuple()") // clé vide, OK
+  .mode("append")
+  .save();
+
+👉 Spark va générer :
+
+CREATE TABLE srv.avia_partition (
+    integration_date Date,
+    classification_level_1 String,
+    ...
+) ENGINE = MergeTree() ORDER BY tuple()
+
+
+---
+
+🧩 2️⃣ Variante plus robuste : ReplacingMergeTree pour gérer les “overwrites”
+
+Si tu veux dès le départ que cette table supporte les écrasements de lignes (comme dans nos échanges précédents),
+alors choisis un moteur ReplacingMergeTree(last_update) :
+
+df.write()
+  .format("clickhouse")
+  .option("database", "srv")
+  .option("table", "ariva_partition")
+  .option("createTableOptions", "ENGINE=ReplacingMergeTree(last_update) ORDER BY tuple()")
+  .mode("append")
+  .save();
+
+Tu peux aussi ajouter une colonne technique :
+
+df = df.withColumn("last_update", functions.current_timestamp());
+
+
+---
+
+🧩 3️⃣  Créer explicitement la table avant l’écriture (via Spark SQL)
+
+Tu peux aussi demander à Spark d’exécuter le CREATE TABLE ClickHouse avant l’écriture,
+en te basant sur le schéma du DF.
+
+String cols = Arrays.stream(df.schema().fields())
+    .map(f -> f.name() + " " + sparkToClickHouseType(f.dataType()))
+    .collect(Collectors.joining(", "));
+
+String createSQL = "CREATE TABLE IF NOT EXISTS clickhouse.srv.avia_partition (" +
+                   cols +
+                   ") ENGINE = MergeTree() ORDER BY tuple()";
+
+spark.sql(createSQL);
+
+👉 Puis écrire :
+
+df.writeTo("clickhouse.srv.avia_partition").append();
+
+Il faut juste une petite fonction utilitaire pour mapper les types Spark vers ClickHouse :
+
+private static String sparkToClickHouseType(DataType dt) {
+    if (dt instanceof StringType) return "String";
+    if (dt instanceof IntegerType) return "Int32";
+    if (dt instanceof LongType) return "Int64";
+    if (dt instanceof DoubleType) return "Float64";
+    if (dt instanceof FloatType) return "Float32";
+    if (dt instanceof DateType) return "Date";
+    if (dt instanceof TimestampType) return "DateTime";
+    if (dt instanceof BooleanType) return "UInt8";
+    return "String"; // fallback
+}
+
+
+---
+
+🧩 4️⃣  En résumé
+
+Besoin	Méthode
+
+Créer automatiquement à la première écriture	.option("createTableOptions", "ENGINE=MergeTree() ORDER BY tuple()")
+Créer avec moteur ReplacingMergeTree pour écrasement ligne	.option("createTableOptions", "ENGINE=ReplacingMergeTree(last_update) ORDER BY tuple()")
+Créer explicitement avant écriture	spark.sql("CREATE TABLE ...") en construisant la DDL depuis le schéma du DF
+Si la table existe déjà	Spark la réutilise sans la recréer
+
+
+
+---
+
+🧠 Bonnes pratiques
+
+Toujours définir un ORDER BY (au minimum tuple() pour clé vide).
+
+Si tu veux gérer des “overwrites ligne par ligne”, choisis ReplacingMergeTree(last_update).
+
+Si tu veux gérer des partitions (par date, mois, etc.), ajoute PARTITION BY toYYYYMM(integration_date) dans le createTableOptions.
+
+
+
+---
+
+Souhaites-tu que je te génère le code complet Java qui : 1️⃣ détecte si la table existe,
+2️⃣ la crée automatiquement à partir du schéma du DF (avec ReplacingMergeTree(last_update)),
+3️⃣ et lance l’écriture Spark ?
