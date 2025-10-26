@@ -1,0 +1,95 @@
+Voici une façon simple et propre de vérifier si une table ClickHouse existe depuis Spark (connecteur ClickHouse), puis la créer automatiquement à partir du schéma du DataFrame si elle n’existe pas — sans JDBC et sans spark.sql("CREATE TABLE ... ENGINE=...") (que Spark ne comprend pas).
+
+Utilitaire Java
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+public final class ClickHouseTableEnsure {
+
+    /**
+     * Vérifie l'existence de la table ClickHouse: SELECT sur system.tables via le catalog ClickHouse.
+     */
+    public static boolean tableExists(SparkSession spark, String database, String table) {
+        long n = spark.sql(
+            "SELECT count() FROM clickhouse.system.tables " +
+            "WHERE database = '" + database + "' AND name = '" + table + "'"
+        ).collectAsList().get(0).getLong(0);
+        return n > 0;
+    }
+
+    /**
+     * Crée la table ClickHouse à partir du schéma du DF si elle n'existe pas.
+     * La création est déléguée au connecteur via createTableOptions (=> pas de SQL natif côté Spark).
+     *
+     * @param df                DataFrame dont on prend le schéma
+     * @param database          BDD ClickHouse
+     * @param table             Table cible
+     * @param createTableEngine Options du moteur, ex :
+     *                          "ENGINE=MergeTree() ORDER BY tuple()"
+     *                          ou "ENGINE=ReplacingMergeTree(last_update) ORDER BY tuple()"
+     */
+    public static void ensureCreatedFromDf(Dataset<Row> df,
+                                           String database,
+                                           String table,
+                                           String createTableEngine) {
+
+        // On écrit 0 ligne mais on force le connecteur à créer la table avec le schéma du DF
+        df.limit(0)
+          .write()
+          .format("clickhouse")
+          .option("database", database)
+          .option("table", table)
+          .option("createTableOptions", createTableEngine)
+          .mode("append")   // append suffit : la table est créée si absente
+          .save();
+    }
+
+    /**
+     * Vérifie puis crée si besoin (en un appel).
+     */
+    public static void ensureExistsFromDf(SparkSession spark,
+                                          Dataset<Row> df,
+                                          String database,
+                                          String table,
+                                          String createTableEngine) {
+        if (!tableExists(spark, database, table)) {
+            ensureCreatedFromDf(df, database, table, createTableEngine);
+        }
+    }
+}
+
+Exemple d’usage
+
+// ton DF (schéma issu d’un Parquet par ex.)
+Dataset<Row> df = spark.read().parquet("/path/to/data");
+
+// 1) S’assure que la table existe (sinon elle est créée à partir du schéma du DF)
+ClickHouseTableEnsure.ensureExistsFromDf(
+    spark,
+    df,
+    "srv",
+    "avia_partition",
+    "ENGINE=MergeTree() ORDER BY tuple()"    // ou ReplacingMergeTree(last_update) ORDER BY row_key
+);
+
+// 2) Écriture normale (append / overwrite+truncate si full refresh)
+df.write()
+  .format("clickhouse")
+  .option("database", "srv")
+  .option("table", "avia_partition")
+  .mode("append")
+  .save();
+
+Notes importantes
+
+Pas de SQL natif “CREATE TABLE … ENGINE …” via spark.sql : Spark le parserait et lèverait une erreur. On laisse le connecteur créer la table avec createTableOptions.
+
+Les types Decimal(p,s), Date, Timestamp, etc., sont déduits du schéma du DF. Assure-toi que tes DecimalType ont bien precision/scale définis.
+
+Si tu veux un vrai comportement overwrite ligne par ligne plus tard, crée dès le départ avec
+ENGINE=ReplacingMergeTree(last_update) ORDER BY row_key et ajoute ces colonnes dans ton DF (ou via ALTER TABLE côté CH).
+
+
+Tu peux coller ces méthodes telles quelles et les appeler juste avant ta première écriture.
