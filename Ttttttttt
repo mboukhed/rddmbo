@@ -1,0 +1,31 @@
+// 1️⃣ Crée une vue Spark
+df.createOrReplaceTempView("to_delete");
+
+// 2️⃣ Supprime directement dans ClickHouse via Spark SQL
+spark.sql("""
+    ALTER TABLE clickhouse.srv.ariva_partition
+    DELETE WHERE cityHash64(
+        integration_date,
+        classification_level_1,
+        classification_level_2,
+        classification_level_3,
+        nb_passagers,
+        revenue
+    ) IN (
+        SELECT cityHash64(
+            integration_date,
+            classification_level_1,
+            classification_level_2,
+            classification_level_3,
+            nb_passagers,
+            revenue
+        ) FROM to_delete
+    )
+""");
+
+// 3️⃣ Attendre la fin des mutations
+spark.sql("SYSTEM FLUSH LOGS"); // optionnel
+Thread.sleep(5000);
+
+// 4️⃣ Puis insérer les nouvelles lignes
+df.writeTo("clickhouse.srv.ariva_partition").append();
