@@ -1,0 +1,222 @@
+Voici une implémentation Java Spark prête à l’emploi pour insérer un Dataset dans ClickHouse en “overwrite par partitions” (une ou plusieurs colonnes).
+Elle supprime d’abord les partitions ciblées côté ClickHouse, puis append les nouvelles données via le connecteur natif ClickHouse-Spark (beaucoup plus rapide que JDBC brut). Le mode d’effacement est paramétrable : DROP PARTITION (si votre clé de partition ClickHouse correspond aux colonnes fournies) ou DELETE WHERE (passe partout).
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+import java.sql.*;
+import java.time.Duration;
+import java.util.*;
+import java.util.stream.Collectors;
+
+public final class ClickHousePartitionOverwrite {
+
+    public enum OverwriteMode {
+        DROP_PARTITION,   // nécessite que la clé de partition CH == colonnes fournies
+        DELETE_WHERE      // plus universel (mutation), un peu plus lent
+    }
+
+    /**
+     * Overwrite partitionné : supprime les partitions existantes (par combinaisons de colonnes)
+     * puis insère df dans ClickHouse.
+     *
+     * @param spark           SparkSession (avec le catalog ClickHouse configuré si vous utilisez writeTo)
+     * @param df              Dataset à écrire
+     * @param database        BDD ClickHouse
+     * @param table           Table ClickHouse (engine MergeTree/ReplicatedMergeTree, etc.)
+     * @param partitionCols   Colonnes de partition à surcharger (1..n)
+     * @param chJdbcUrl       URL JDBC ClickHouse (ex: jdbc:clickhouse:http://host:8123/database)
+     * @param user            Utilisateur ClickHouse
+     * @param password        Mot de passe ClickHouse
+     * @param mode            DROP_PARTITION ou DELETE_WHERE
+     * @param waitAfterDelete Attendre la fin des mutations (DELETE) avant insert (true conseillé en DELETE_WHERE)
+     */
+    public static void insertOverwritePartitions(
+            SparkSession spark,
+            Dataset<Row> df,
+            String database,
+            String table,
+            List<String> partitionCols,
+            String chJdbcUrl,
+            String user,
+            String password,
+            OverwriteMode mode,
+            boolean waitAfterDelete
+    ) {
+        Objects.requireNonNull(df, "df");
+        if (partitionCols == null || partitionCols.isEmpty()) {
+            throw new IllegalArgumentException("partitionCols doit contenir au moins une colonne");
+        }
+
+        // Sécurité : vérifier que le DF contient bien les colonnes de partition
+        for (String c : partitionCols) {
+            if (!Arrays.asList(df.columns()).contains(c)) {
+                throw new IllegalArgumentException("Colonne de partition manquante dans le DF: " + c);
+            }
+        }
+
+        // 1) Récupérer les combinaisons DISTINCT de partitions présentes dans le DF
+        List<Row> partitions = df.selectExpr(partitionCols.toArray(new String[0]))
+                                 .distinct()
+                                 .collectAsList();
+
+        // 2) Supprimer les partitions existantes côté CH
+        try (Connection conn = DriverManager.getConnection(chJdbcUrl, user, password)) {
+            conn.setAutoCommit(true);
+
+            if (mode == OverwriteMode.DROP_PARTITION) {
+                // On suppose que l’expression de partition ClickHouse est exactement (col1[, col2, ...])
+                for (Row p : partitions) {
+                    String partExpr = buildPartitionTupleLiteral(p, partitionCols);
+                    String sql = "ALTER TABLE " + quote(database) + "." + quote(table) +
+                                 " DROP PARTITION " + partExpr;
+                    try (Statement st = conn.createStatement()) {
+                        st.execute(sql);
+                    }
+                }
+                // pas besoin d’attendre : DROP PARTITION retire la partition entière
+            } else {
+                // DELETE WHERE (mutation asynchrone)
+                String whereTpl = partitionCols.stream()
+                        .map(c -> c + " = ?")
+                        .collect(Collectors.joining(" AND "));
+                String sql = "ALTER TABLE " + quote(database) + "." + quote(table) +
+                             " DELETE WHERE " + whereTpl;
+
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    for (Row p : partitions) {
+                        for (int i = 0; i < partitionCols.size(); i++) {
+                            ps.setObject(i + 1, p.isNullAt(i) ? null : p.get(i));
+                        }
+                        ps.execute();
+                    }
+                }
+
+                if (waitAfterDelete) {
+                    waitForMutationsToFinish(conn, database, table, Duration.ofMinutes(15));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Échec suppression partitions ClickHouse", e);
+        }
+
+        // 3) Insérer le DF via le connecteur natif ClickHouse-Spark (recommandé)
+        //    Option A (catalog V2 configuré) :
+        //    df.writeTo("clickhouse." + database + "." + table).append();
+        //
+        //    Option B (sans catalog) :
+        //    df.write().format("clickhouse")
+        //      .option("database", database)
+        //      .option("table", table)
+        //      .mode("append")
+        //      .save();
+
+        // Ajustez la stratégie selon votre intégration :
+        boolean catalogConfigured =
+                "com.clickhouse.spark.ClickHouseCatalog".equals(
+                        spark.conf().get("spark.sql.catalog.clickhouse", ""));
+
+        // Petits réglages utiles pour la perf/robustesse :
+        spark.conf().set("spark.clickhouse.write.batchSize", "100000");
+        spark.conf().set("spark.clickhouse.write.repartitionByPartition", "true");
+        spark.conf().set("spark.clickhouse.write.repartitionStrictly", "false"); // si Spark 3.4+, voir doc
+        // format "arrow" par défaut côté doc récente ; laissez tel quel ou explicitez :
+        // spark.conf().set("spark.clickhouse.write.format", "arrow");
+
+        if (catalogConfigured) {
+            df.writeTo("clickhouse." + database + "." + table).append();
+        } else {
+            df.write()
+              .format("clickhouse")
+              .option("database", database)
+              .option("table", table)
+              .mode("append")
+              .save();
+        }
+    }
+
+    // Construit "(val1, val2, ...)" avec quoting pour String/DateTime si besoin.
+    private static String buildPartitionTupleLiteral(Row r, List<String> colsOrder) {
+        List<String> vals = new ArrayList<>(colsOrder.size());
+        for (int i = 0; i < colsOrder.size(); i++) {
+            Object v = r.get(i);
+            if (v == null) {
+                vals.add("NULL");
+            } else if (v instanceof Number || v instanceof Boolean) {
+                vals.add(v.toString());
+            } else {
+                // String/Date/DateTime: quote simple + escape
+                String s = v.toString().replace("'", "\\'");
+                vals.add("'" + s + "'");
+            }
+        }
+        return "(" + String.join(", ", vals) + ")";
+    }
+
+    private static String quote(String ident) {
+        // ClickHouse supporte les backticks ou double quotes selon settings.
+        // On reste simple : backticks (par défaut autorisé).
+        return "`" + ident.replace("`", "``") + "`";
+    }
+
+    // Attend la fin des mutations (DELETE WHERE) pour la table cible
+    private static void waitForMutationsToFinish(Connection conn, String db, String tbl, Duration timeout) throws SQLException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        String sql = "SELECT count() FROM system.mutations " +
+                     "WHERE database = ? AND table = ? AND is_done = 0";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            while (System.nanoTime() < deadline) {
+                ps.setString(1, db);
+                ps.setString(2, tbl);
+                try (ResultSet rs = ps.executeQuery()) {
+                    rs.next();
+                    long pending = rs.getLong(1);
+                    if (pending == 0) return;
+                }
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+            }
+            throw new RuntimeException("Timeout en attente de la fin des mutations ClickHouse");
+        }
+    }
+}
+
+Utilisation (exemple)
+
+// Préparez Spark avec le catalog (optionnel mais recommandé)
+SparkSession spark = SparkSession.builder()
+    .appName("df->clickhouse overwrite partitions")
+    // .master(...)
+//  .config("spark.sql.catalog.clickhouse","com.clickhouse.spark.ClickHouseCatalog")
+//  .config("spark.sql.catalog.clickhouse.host","<host>")
+//  .config("spark.sql.catalog.clickhouse.protocol","http")
+//  .config("spark.sql.catalog.clickhouse.http_port","8123")
+//  .config("spark.sql.catalog.clickhouse.user","<user>")
+//  .config("spark.sql.catalog.clickhouse.password","<pwd>")
+//  .config("spark.sql.catalog.clickhouse.database","<db>")
+    .getOrCreate();
+
+// df contient les colonnes de partition, ex: List.of("dt","country")
+ClickHousePartitionOverwrite.insertOverwritePartitions(
+    spark,
+    df,
+    "<db>",
+    "<table>",
+    List.of("dt","country"),
+    "jdbc:clickhouse:http://<host>:8123/<db>",
+    "<user>",
+    "<password>",
+    ClickHousePartitionOverwrite.OverwriteMode.DELETE_WHERE, // ou DROP_PARTITION si clé identique
+    true // attendre la fin des mutations avant insert
+);
+
+Notes importantes
+
+Connecteur Spark natif ClickHouse (DataSource V2) recommandé pour l’écriture performante et les options de repartition/batch ; voir la doc officielle et les clés spark.clickhouse.write.* (batchSize, repartitionByPartition, etc.). 
+
+Pour supprimer une partition entière très vite : ALTER TABLE ... DROP PARTITION ( ... ). À utiliser lorsque la clé de partition ClickHouse correspond bien à vos colonnes (sinon préférez DELETE WHERE). 
+
+Bonnes pratiques d’insert massif (rythme, parts/merges) côté ClickHouse : ne pas bombarder trop de requêtes par seconde. 
+
+
+Si tu veux, je te fais une variante stricte JDBC ou une version streaming (micro-batch) avec upsert logique par clés métiers.
