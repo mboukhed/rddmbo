@@ -1,0 +1,68 @@
+OK, les noms de colonnes qui composent la clé de partition (ClickHouse / MergeTree) :
+
+SQL direct
+
+-- 1) Les colonnes (noms) qui participent à la clé de partition
+SELECT name
+FROM system.columns
+WHERE database = 'ma_base'
+  AND table    = 'ma_table'
+  AND is_in_partition_key
+ORDER BY position;
+
+-- 2) L’expression exacte de la clé de partition (utile pour vérifier)
+SELECT partition_key
+FROM system.tables
+WHERE database='ma_base' AND name='ma_table';
+
+> Si partition_key = 'tuple()' ⇒ pas de clé de partition déclarée.
+
+
+
+Spark SQL (catalog V2)
+
+val db = "ma_base"
+val tb = "ma_table"
+
+val partColsDf = spark.sql(
+  s"""
+     |SELECT name
+     |FROM system.columns
+     |WHERE database = '$db' AND table = '$tb' AND is_in_partition_key
+     |ORDER BY position
+   """.stripMargin)
+
+partColsDf.show(false)
+
+En Scala → List[String]
+
+val partitionColumns: List[String] =
+  partColsDf.collect().map(_.getString(0)).toList
+
+En Java → List<String>
+
+import org.apache.spark.sql.*;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public static List<String> getPartitionColumnNames(SparkSession spark, String db, String table) {
+    Dataset<Row> df = spark.sql(
+        String.format(
+          "SELECT name FROM system.columns " +
+          "WHERE database = '%s' AND table = '%s' AND is_in_partition_key " +
+          "ORDER BY position", db, table
+        )
+    );
+    return df.collectAsList().stream()
+             .map(r -> r.getString(0))
+             .collect(Collectors.toList());
+}
+
+Notes rapides
+
+Pour des clés calculées (PARTITION BY toYYYYMM(event_date)), is_in_partition_key renvoie la/les colonnes sources (ici event_date).
+
+Si tu veux voir l’expression exacte, utilise la requête system.tables ci-dessus.
+
+
+Donne-moi db.table si tu veux que je te renvoie la liste exacte pour ta table.
