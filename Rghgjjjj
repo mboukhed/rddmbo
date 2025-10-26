@@ -1,0 +1,139 @@
+Excellente question 👍
+
+👉 ClickHouse met à disposition plusieurs tables système pour surveiller en temps réel les requêtes en cours, terminées ou en erreur.
+Voici ce que tu dois connaître 👇
+
+
+---
+
+🧩 1. Voir les requêtes en cours d’exécution
+
+SELECT
+    query_id,
+    user,
+    query,
+    elapsed,
+    read_rows,
+    read_bytes,
+    written_rows,
+    written_bytes,
+    memory_usage,
+    query_kind
+FROM system.processes
+ORDER BY elapsed DESC;
+
+🧠 Explications :
+
+system.processes = liste des requêtes actuellement en cours d’exécution
+
+elapsed = temps écoulé (secondes)
+
+memory_usage = mémoire consommée par la requête
+
+query_kind = type (Select, Insert, etc.)
+
+
+
+---
+
+🧩 2. Tuer une requête en cours (si bloquée)
+
+Identifie le query_id via la requête ci-dessus, puis :
+
+KILL QUERY WHERE query_id = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' SYNC;
+
+ou pour toutes les requêtes d’un utilisateur :
+
+KILL QUERY WHERE user = 'mon_user' SYNC;
+
+
+---
+
+🧩 3. Voir les dernières requêtes exécutées (y compris terminées)
+
+SELECT
+    event_time,
+    query_id,
+    user,
+    query,
+    type,
+    read_rows,
+    read_bytes,
+    written_rows,
+    written_bytes,
+    exception_code,
+    exception
+FROM system.query_log
+ORDER BY event_time DESC
+LIMIT 50;
+
+💡 type peut être :
+
+'QueryStart' – début d’exécution
+
+'QueryFinish' – terminée avec succès
+
+'ExceptionBeforeStart' ou 'ExceptionWhileProcessing' – erreur
+
+
+
+---
+
+🧩 4. Voir la charge du serveur (utile pour SERVER_OVERLOADED)
+
+SELECT * FROM system.metrics
+WHERE metric LIKE 'OSCPU%' OR metric LIKE 'Query%' OR metric LIKE 'Memory%';
+
+Tu peux aussi voir :
+
+SELECT * FROM system.asynchronous_metrics
+WHERE metric LIKE '%CPU%' OR metric LIKE '%Memory%';
+
+
+---
+
+🧩 5. Suivre l’activité réseau
+
+SELECT * FROM system.events
+WHERE event LIKE '%Network%';
+
+ou les insertions :
+
+SELECT * FROM system.events
+WHERE event LIKE '%Insert%';
+
+
+---
+
+🧩 6. Pour surveiller en continu (mode "top")
+
+watch -n1 "clickhouse-client --query='SELECT user, elapsed, query FROM system.processes FORMAT Pretty'"
+
+> Cela rafraîchit chaque seconde la liste des requêtes actives (comme un htop pour ClickHouse).
+
+
+
+
+---
+
+🚀 Bonus : pour les requêtes Spark/Java
+
+Quand tu exécutes via Spark, tu verras souvent :
+
+user = default (ou ton spark.sql.catalog.clickhouse.user)
+
+query = INSERT INTO ... VALUES (par batch)
+
+
+Donc tu peux filtrer spécifiquement les requêtes Spark :
+
+SELECT query_id, query, elapsed, memory_usage
+FROM system.processes
+WHERE query LIKE '%INSERT%' OR query LIKE '%spark%'
+ORDER BY elapsed DESC;
+
+
+---
+
+Souhaites-tu que je te donne une requête “dashboard” unique qui combine CPU, requêtes actives, métriques mémoire, et top queries dans un seul résultat ?
+(Pratique pour surveiller ton cluster ClickHouse sur AKS.)
