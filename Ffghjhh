@@ -1,0 +1,112 @@
+Voici deux patterns 100% Spark V2 (sans V1) pour insérer et remplacer des lignes dans ClickHouse.
+
+
+---
+
+Option A — « 1 seule écriture » avec ReplacingMergeTree (recommandé)
+
+> Remplace une ligne si sa clé technique est identique (upsert logique).
+
+
+
+1) Configurer le catalog V2 et le moteur par défaut
+
+// au démarrage
+spark.conf().set("spark.sql.catalog.clickhouse", "com.clickhouse.spark.ClickHouseCatalog");
+spark.conf().set("spark.sql.catalog.clickhouse.host", "<host>");
+spark.conf().set("spark.sql.catalog.clickhouse.protocol", "https"); // ou http
+spark.conf().set("spark.sql.catalog.clickhouse.http_port", "443");  // 8123 si http
+spark.conf().set("spark.sql.catalog.clickhouse.user", "<user>");
+spark.conf().set("spark.sql.catalog.clickhouse.password", "<pwd>");
+
+// moteur de création pour V2 (clé technique + version)
+spark.conf().set(
+  "spark.sql.catalog.clickhouse.create_table_engine",
+  "ENGINE=ReplacingMergeTree(last_update) ORDER BY row_key SETTINGS index_granularity=8192"
+);
+
+2) Préparer le DF (ajouter colonnes techniques)
+
+import static org.apache.spark.sql.functions.*;
+
+Dataset<Row> out = df
+  .withColumn("last_update", current_timestamp())                  // version
+  // clé technique (toutes les colonnes métier) ; adapte si tu as une vraie clé
+  .withColumn("row_key", expr("xxhash64(concat_ws('|', *))"));
+
+3) Écrire (créera la table si absente) — une seule écriture
+
+out.writeTo("clickhouse.<db>.<table>").append();
+
+> ClickHouse gardera la ligne la plus récente par row_key.
+(Tu peux accélérer la déduplication avec spark.sql("OPTIMIZE TABLE clickhouse.<db>.<table> FINAL").)
+
+
+
+
+---
+
+Option B — « DELETE + APPEND » (sans collect, toujours V2)
+
+> Tu supprimes les lignes à remplacer puis tu insères. Aucune donnée rapatriée en driver.
+
+
+
+1) Vue/données à upserter
+
+df.createOrReplaceTempView("to_upsert");
+
+2) DELETE côté ClickHouse sur toutes les colonnes (ou ta clé)
+
+> Construis dynamiquement la liste de colonnes depuis le DF :
+
+
+
+String[] cols = df.columns(); // exclure éventuelles cols techniques
+String colList = Arrays.stream(cols).map(c -> "`" + c + "`")
+                       .collect(java.util.stream.Collectors.joining(", "));
+String hashExpr = "cityHash64(" + colList + ")";
+
+// suppression des lignes à remplacer
+spark.sql("""
+  ALTER TABLE clickhouse.<db>.<table>
+  DELETE WHERE """ + hashExpr + """
+  IN (SELECT """ + hashExpr + """ FROM to_upsert)
+""");
+
+// (optionnel mais propre) attendre la fin des mutations :
+spark.sql("""
+  SELECT count() FROM clickhouse.system.mutations
+  WHERE database='<db>' AND table='<table>' AND is_done=0
+""").collect(); // recheck en boucle si besoin
+
+3) Écriture finale (auto-create si besoin via conf du catalog)
+
+df.writeTo("clickhouse.<db>.<table>").append();
+
+
+---
+
+Quand choisir quoi ?
+
+Besoin	Choix
+
+Simplicité, 1 seule écriture, upsert naturel	Option A (ReplacingMergeTree)
+Table existante sans ReplacingMergeTree, contrôle fin des remplacements	Option B (DELETE + APPEND)
+
+
+
+---
+
+Mini checklist (V2)
+
+Utilise writeTo("clickhouse.db.table") (pas .format(...) V1).
+
+Mets le moteur de création dans spark.sql.catalog.clickhouse.create_table_engine.
+
+Pour un upsert « ligne à ligne » sans clé métier → ajoute row_key et last_update dans le DF (Option A).
+
+Pour un upsert « par valeurs exactes » → DELETE + APPEND avec cityHash64 des colonnes (Option B).
+
+
+Si tu me donnes <db> et <table> (et ta vraie clé métier si tu en as une), je te renvoie les lignes prêtes à coller adaptées exactement à ton cas.
