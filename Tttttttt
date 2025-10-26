@@ -1,0 +1,152 @@
+Excellent 🔥 — on va automatiser ça :
+lire un Parquet → récupérer le schéma Spark → générer un CREATE TABLE ClickHouse complet,
+avec gestion des Decimal(p,s), Date, Timestamp, String, etc.
+
+
+---
+
+✅ 1️⃣ Étape : lire le schéma Parquet
+
+Dataset<Row> df = spark.read()
+    .option("mergeSchema", "true") // utile si répertoire multi-fichiers
+    .parquet("/chemin/vers/ton/fichier_ou_répertoire.parquet");
+
+StructType schema = df.schema();
+
+
+---
+
+✅ 2️⃣ Étape : convertir le schéma Spark → DDL ClickHouse
+
+Voici une classe Java réutilisable 👇
+Elle transforme le StructType en CREATE TABLE … ENGINE=ReplacingMergeTree(last_update)
+et ajoute last_update + row_key automatiques (tu peux désactiver si tu veux).
+
+import org.apache.spark.sql.types.*;
+import java.util.*;
+import java.util.stream.Collectors;
+
+public class ParquetToClickHouseDDL {
+
+    public static String toClickHouseDDL(StructType schema,
+                                         String database,
+                                         String table,
+                                         boolean addLastUpdate,
+                                         boolean addRowKey) {
+
+        List<String> cols = new ArrayList<>();
+
+        for (StructField f : schema.fields()) {
+            String colName = f.name();
+            String chType = sparkToClickHouseType(f.dataType());
+            cols.add("    `" + colName + "` " + chType);
+        }
+
+        if (addLastUpdate) {
+            cols.add("    `last_update` DateTime DEFAULT now()");
+        }
+
+        if (addRowKey) {
+            String allCols = Arrays.stream(schema.fieldNames())
+                    .map(c -> "`" + c + "`")
+                    .collect(Collectors.joining(", "));
+            cols.add("    `row_key` UInt64 DEFAULT cityHash64(" + allCols + ")");
+        }
+
+        String colsBlock = String.join(",\n", cols);
+
+        return String.format("""
+            CREATE TABLE IF NOT EXISTS %s.%s (
+            %s
+            )
+            ENGINE = ReplacingMergeTree(%s)
+            ORDER BY %s;
+            """,
+            database,
+            table,
+            colsBlock,
+            addLastUpdate ? "last_update" : "tuple()",
+            addRowKey ? "row_key" : "tuple()");
+    }
+
+    private static String sparkToClickHouseType(DataType dt) {
+        if (dt instanceof StringType) return "String";
+        if (dt instanceof BooleanType) return "UInt8";
+        if (dt instanceof ByteType) return "Int8";
+        if (dt instanceof ShortType) return "Int16";
+        if (dt instanceof IntegerType) return "Int32";
+        if (dt instanceof LongType) return "Int64";
+        if (dt instanceof FloatType) return "Float32";
+        if (dt instanceof DoubleType) return "Float64";
+        if (dt instanceof DateType) return "Date";
+        if (dt instanceof TimestampType) return "DateTime";
+        if (dt instanceof DecimalType d) {
+            return "Decimal(" + d.precision() + "," + d.scale() + ")";
+        }
+        if (dt instanceof ArrayType arr) {
+            return "Array(" + sparkToClickHouseType(arr.elementType()) + ")";
+        }
+        if (dt instanceof MapType map) {
+            return "Map(" + sparkToClickHouseType(map.keyType()) + "," +
+                   sparkToClickHouseType(map.valueType()) + ")";
+        }
+        return "String"; // fallback
+    }
+}
+
+
+---
+
+✅ 3️⃣ Étape : génération et affichage
+
+String ddl = ParquetToClickHouseDDL.toClickHouseDDL(
+    schema,
+    "srv",                // base
+    "avia_partition",     // nom de la table
+    true,                 // ajouter last_update
+    true                  // ajouter row_key (hash de toutes les colonnes)
+);
+
+System.out.println(ddl);
+
+🟢 Exemple de sortie :
+
+CREATE TABLE IF NOT EXISTS srv.avia_partition (
+    `integration_date` Date,
+    `classification_level_1` String,
+    `classification_level_2` String,
+    `nb_passagers` Int32,
+    `revenue` Decimal(18,4),
+    `last_update` DateTime DEFAULT now(),
+    `row_key` UInt64 DEFAULT cityHash64(integration_date, classification_level_1, classification_level_2, nb_passagers, revenue)
+)
+ENGINE = ReplacingMergeTree(last_update)
+ORDER BY row_key;
+
+
+---
+
+✅ 4️⃣ Étape : exécuter directement dans Spark (ClickHouse Catalog)
+
+spark.sql(ddl);
+
+→ ta table ClickHouse est créée automatiquement à partir du schéma Parquet.
+
+
+---
+
+🧠 5️⃣ Résumé rapide
+
+Besoin	Méthode
+
+Récupérer schéma Parquet	spark.read().parquet(path).schema()
+Convertir vers DDL ClickHouse	ParquetToClickHouseDDL.toClickHouseDDL(schema, db, table, ...)
+Gérer Decimal(p,s)	mappé vers Decimal(p,s) automatiquement
+Créer la table dans ClickHouse	spark.sql(ddl)
+Recommandé	ENGINE = ReplacingMergeTree(last_update) + row_key
+
+
+
+---
+
+Souhaites-tu que je te génère la même classe en Scala (plus concise, idiomatique) pour ton cluster Spark côté job ?
