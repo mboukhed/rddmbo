@@ -1,0 +1,130 @@
+Excellent réflexe 👌 — la correspondance du type Decimal Spark → ClickHouse est un point crucial,
+car ClickHouse a besoin de connaître précision et scale dès la création de la table.
+
+
+---
+
+🎯 Objectif
+
+> Quand ton DataFrame contient des colonnes DecimalType(precision, scale),
+la table ClickHouse doit utiliser le type exact Decimal(precision, scale).
+
+
+
+
+---
+
+🧩 1️⃣  Mapping complet Spark → ClickHouse
+
+Voici la table des correspondances correctes :
+
+Type Spark (DataType)	Type ClickHouse	Remarques
+
+StringType	String	—
+BooleanType	UInt8	Pas de type booléen natif CH
+ByteType	Int8	—
+ShortType	Int16	—
+IntegerType	Int32	—
+LongType	Int64	—
+FloatType	Float32	—
+DoubleType	Float64	—
+DateType	Date	—
+TimestampType	DateTime	—
+DecimalType(p,s)	Decimal(p,s)	doit inclure précision et scale
+
+
+
+---
+
+🧩 2️⃣  Exemple concret de conversion Java
+
+Voici une méthode Java complète qui convertit un schéma Spark en DDL ClickHouse,
+avec gestion correcte du DecimalType :
+
+import org.apache.spark.sql.types.*;
+
+public class SparkToClickHouseTypeMapper {
+
+    public static String sparkToClickHouseType(DataType dt) {
+        if (dt instanceof StringType) return "String";
+        if (dt instanceof BooleanType) return "UInt8";
+        if (dt instanceof ByteType) return "Int8";
+        if (dt instanceof ShortType) return "Int16";
+        if (dt instanceof IntegerType) return "Int32";
+        if (dt instanceof LongType) return "Int64";
+        if (dt instanceof FloatType) return "Float32";
+        if (dt instanceof DoubleType) return "Float64";
+        if (dt instanceof DateType) return "Date";
+        if (dt instanceof TimestampType) return "DateTime";
+        if (dt instanceof DecimalType dec) {
+            return "Decimal(" + dec.precision() + "," + dec.scale() + ")";
+        }
+        // fallback pour Array, Struct, etc.
+        return "String";
+    }
+}
+
+
+---
+
+🧩 3️⃣  Génération automatique de la table avec Decimal inclus
+
+Exemple :
+
+StructType schema = df.schema();
+
+String cols = Arrays.stream(schema.fields())
+    .map(f -> f.name() + " " + SparkToClickHouseTypeMapper.sparkToClickHouseType(f.dataType()))
+    .collect(Collectors.joining(", "));
+
+String ddl = "CREATE TABLE IF NOT EXISTS clickhouse.srv.avia_partition (" +
+             cols + ", last_update DateTime DEFAULT now()" +
+             ") ENGINE = ReplacingMergeTree(last_update) ORDER BY tuple()";
+
+spark.sql(ddl);
+
+👉 Si ton DataFrame contient une colonne Spark DecimalType(18,4),
+tu obtiendras :
+
+CREATE TABLE srv.avia_partition (
+  amount Decimal(18,4),
+  ...
+) ENGINE = ReplacingMergeTree(last_update)
+ORDER BY tuple()
+
+
+---
+
+🧩 4️⃣  Variante avec createTableOptions
+
+Tu peux aussi laisser Spark créer la table automatiquement,
+et juste ajouter le moteur :
+
+df.write()
+  .format("clickhouse")
+  .option("database", "srv")
+  .option("table", "avia_partition")
+  .option("createTableOptions", "ENGINE=ReplacingMergeTree(last_update) ORDER BY tuple()")
+  .mode("append")
+  .save();
+
+⚠️ Dans ce cas, le connecteur ClickHouse utilise le mapping par défaut (DecimalType → Decimal(p,s)),
+donc ton DF doit avoir une DecimalType correctement définie dans son schéma (pas DecimalType.Unlimited).
+
+
+---
+
+✅ 5️⃣  Récapitulatif
+
+Cas	Solution
+
+Spark connaît précision/scale	DecimalType(p,s) → Decimal(p,s) auto
+Tu génères la DDL toi-même	Utilise la fonction sparkToClickHouseType() ci-dessus
+Tu laisses Spark créer	.option("createTableOptions", "ENGINE=... ORDER BY tuple()")
+Table existante	Doit déjà définir Decimal(p,s) correct, sinon conversion échouera
+
+
+
+---
+
+Souhaites-tu que je te génère un petit utilitaire Java complet qui crée automatiquement la table ClickHouse à partir d’un Dataset<Row> (en détectant aussi les DecimalType) ?
