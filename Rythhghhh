@@ -1,0 +1,10 @@
+public static String buildWhereClause(Dataset<Row> df, List<String> cols) {
+    return df.select(cols.stream().map(functions::col).toArray(Column[]::new))
+             .distinct()
+             .collectAsList()
+             .stream()
+             .map(r -> cols.stream()
+                     .map(c -> c + "='" + r.getAs(c) + "'")
+                     .collect(Collectors.joining(" and ", "(", ")")))
+             .collect(Collectors.joining(" OR "));
+}
