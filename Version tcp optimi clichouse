@@ -1,0 +1,134 @@
+Parfait — tu viens de pointer la combinaison clé :
+👉 ClickHouse 0.8.1 Spark connector + port 9000 (TCP natif)
+et effectivement, le paramètre uri n’est pas encore supporté dans la 0.8.1.
+
+Donc la bonne configuration V2 avec TCP (0.8.1) se fait en séparant les options host, port, database, user, password, et sans uri.
+
+
+---
+
+✅ Configuration Spark V2 (TCP natif – ClickHouse 0.8.1)
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+public class SparkClickHouseV2_TCP {
+    public static void main(String[] args) {
+        SparkSession spark = SparkSession.builder()
+                .appName("CHSparkV2_TCP_081")
+                .master("local[*]")
+                .getOrCreate();
+
+        // =============================
+        // ⚙️  Catalog V2 ClickHouse (v0.8.1)
+        // =============================
+        spark.conf().set("spark.sql.catalog.clickhouse", "com.clickhouse.spark.ClickHouseCatalog");
+        spark.conf().set("spark.sql.catalog.clickhouse.protocol", "tcp"); // obligatoire
+        spark.conf().set("spark.sql.catalog.clickhouse.host", "<HOST>");  // ex: clickhouse.default.svc.cluster.local
+        spark.conf().set("spark.sql.catalog.clickhouse.port", "9000");
+        spark.conf().set("spark.sql.catalog.clickhouse.user", "<USER>");
+        spark.conf().set("spark.sql.catalog.clickhouse.password", "<PWD>");
+        spark.conf().set("spark.sql.catalog.clickhouse.database", "<DB>");
+        spark.conf().set("spark.sql.catalog.clickhouse.ssl", "false"); // true si 9440
+
+        // =============================
+        // 📂 Lecture Parquet Azure/Local
+        // =============================
+        Dataset<Row> df = spark.read()
+                .parquet("/mnt/adls/path/to/parquet/dt=2025-10-24/");
+
+        Dataset<Row> out = df.repartition(32); // parallélisme Spark
+
+        // =============================
+        // ✍️ Ecriture V2 en mode append
+        // =============================
+        out.writeTo("clickhouse.<DB>.<TABLE>").append();
+
+        // =============================
+        // 🔁 Lecture de vérification
+        // =============================
+        spark.table("clickhouse.<DB>.<TABLE>")
+                .show(5, false);
+
+        spark.stop();
+    }
+}
+
+
+---
+
+🧠 Détails importants
+
+Option	Description
+
+protocol=tcp	obligatoire si tu veux forcer le connecteur à utiliser le port 9000 (sinon HTTP par défaut).
+host / port	séparés (pas de uri dans 0.8.1).
+ssl=false	désactive TLS, car port 9000 est non-TLS (si tu es en 9440, mets true).
+database / user / password	configurent le catalog par défaut.
+writeTo("clickhouse.<db>.<table>").append()	méthode DataSource V2 standard.
+overwritePartitions() / replace()	❌ non disponibles en 0.8.1 — uniquement append().
+
+
+
+---
+
+🧱 Bonus : mode overwrite manuel en V2 (TCP)
+
+Même logique que précédemment : tu fais un TRUNCATE avant l’écriture.
+
+spark.read()
+    .format("clickhouse")
+    .option("host", "<HOST>")
+    .option("port", "9000")
+    .option("protocol", "tcp")
+    .option("database", "<DB>")
+    .option("user", "<USER>")
+    .option("password", "<PWD>")
+    .option("query", "TRUNCATE TABLE <DB>.<TABLE>")
+    .load();
+
+df.writeTo("clickhouse.<DB>.<TABLE>").append();
+
+
+---
+
+🚀 Pourquoi TCP (9000) = meilleur choix
+
+Zéro overhead HTTP : ~30–40% plus rapide en écriture.
+
+Réduction des timeouts (210 Connection reset, read timed out).
+
+Compression native du flux ClickHouse (LZ4).
+
+Parfait en AKS privé (sans Ingress).
+
+
+
+---
+
+⚠️ À savoir
+
+En 0.8.1, certaines options comme uri, tls_verify, ssl_key_path ne sont pas reconnues.
+
+Le port 9000 ne supporte pas SASL ni AAD : uniquement user/password ClickHouse natif.
+
+Si tu montes un Service AKS LoadBalancer sur le port 9000, expose bien le protocole TCP :
+
+kind: Service
+metadata:
+  name: clickhouse-tcp
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 9000
+      targetPort: 9000
+      protocol: TCP
+  selector:
+    app: clickhouse
+
+
+
+---
+
+Souhaites-tu que je te montre la version écriture partitionnée (avec détection dynamique de dt → append automatique dans les bonnes partitions ClickHouse, en V2 TCP 0.8.1) ?
