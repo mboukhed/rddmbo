@@ -1,0 +1,126 @@
+
+
+
+---
+
+🔍 1. Pourquoi cette erreur apparaît
+
+Elle arrive typiquement dans ces cas :
+
+Le proxy Ingress (souvent NGINX ou Azure App Gateway) ferme la connexion avant la fin (timeout trop court).
+
+ClickHouse prend trop de temps pour envoyer les données.
+
+Le flux HTTP est chunké (envoyé par morceaux), mais la dernière partie n’est jamais reçue.
+
+Spark ou HttpClient attend encore des données → ConnectionClosedException.
+
+
+
+---
+
+✅ 2. Étapes pour corriger
+
+Étape 1 — Vérifie si le problème vient du proxy
+
+Fais un port-forward direct vers ClickHouse, sans passer par l’ingress :
+
+kubectl -n <ton-namespace> port-forward svc/<nom-du-service-clickhouse> 8123:8123
+
+Puis, dans ton code Java :
+
+.option("url", "http://127.0.0.1:8123")
+
+➡️ Si ça fonctionne sans erreur → c’est bien l’ingress ou le proxy AKS qui coupe la connexion.
+
+
+---
+
+Étape 2 — Allonge les timeouts du proxy (Ingress NGINX)
+
+Ajoute ou modifie les annotations suivantes dans le YAML de ton ingress :
+
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-buffering: "on"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/keepalive: "64"
+
+➡️ Si tu utilises Azure Application Gateway Ingress Controller (AGIC), augmente aussi le paramètre :
+
+backend-request-timeout = 600
+
+
+---
+
+Étape 3 — Ajuste les timeouts côté ClickHouse
+
+Sur le serveur ClickHouse, exécute :
+
+SET send_timeout = 300;
+SET receive_timeout = 300;
+SET keep_alive_timeout = 300;
+SET max_execution_time = 0;
+
+ou modifie ces paramètres dans config.xml.
+
+
+---
+
+Étape 4 — Ajuste les options Spark/ClickHouse côté client
+
+Continue à définir tes options Spark, mais ajoute ces lignes :
+
+spark.conf().set("spark.sql.catalog.clickhouse.option.compress", "0"); // désactive la compression
+spark.conf().set("spark.sql.catalog.clickhouse.option.custom_http_params",
+                 "wait_end_of_query=1&send_progress_in_http_headers=1");
+spark.conf().set("spark.sql.catalog.clickhouse.option.socket_timeout",  "300000");
+spark.conf().set("spark.sql.catalog.clickhouse.option.connect_timeout", "120000");
+spark.conf().set("spark.sql.catalog.clickhouse.option.http_receive_timeout", "300000");
+spark.conf().set("spark.sql.catalog.clickhouse.option.http_send_timeout", "300000");
+
+➡️ Pourquoi ?
+
+La compression (compress=1) crée parfois des chunks corrompus via proxy.
+
+Le paramètre wait_end_of_query s’assure que Spark attend la fin complète de la réponse.
+
+Les timeouts plus longs évitent les coupures pendant les requêtes volumineuses.
+
+
+
+---
+
+Étape 5 — Réduis le volume pour les tests
+
+Pendant tes essais :
+
+SELECT * FROM ma_table LIMIT 10;
+
+ou dans Spark :
+
+df.limit(10).show(false);
+
+Cela permet de vérifier le flux sans transfert massif de données.
+
+
+---
+
+🧩 En résumé
+
+Côté	Action
+
+Ingress AKS (NGINX/App GW)	Augmente proxy-read-timeout, proxy-send-timeout, backend-request-timeout
+ClickHouse serveur	Augmente send_timeout, receive_timeout, keep_alive_timeout
+Client Spark	Désactive compress, ajoute wait_end_of_query, augmente les timeouts
+Test	Essaie un LIMIT 10 pour valider le flux HTTP
+
+
+
+---
+
+👉 Si tu veux, je peux te montrer exactement les lignes à ajouter dans ton YAML d’ingress AKS et ton script Spark Java complet (avec tous les spark.conf().set(...)) pour corriger définitivement cette erreur.
+Souhaites-tu que je te le prépare ?
