@@ -1,0 +1,388 @@
+Parfait 👌 — voici la version finale complète de ton système résilient de gestion de secrets, 100 % Java, intégrable à Spring Core (non Boot obligatoire), avec :
+
+✅ Authentification Managed Identity ou Client Secret/Tenant ID
+✅ Fallback hiérarchique : Vault → env → args → props → fichier
+✅ Cache mémoire TTL
+✅ Health Check du Vault
+✅ Arguments du main (java -jar app.jar KEY=value)
+✅ Injectable dans Spring
+
+
+---
+
+📁 ResilientSecretProvider.java
+
+package com.example.vault;
+
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class ResilientSecretProvider {
+
+    private final String vaultUrl;
+    private final String tenantId;
+    private final String clientId;
+    private final String clientSecret;
+    private final String propertiesPath;
+    private final String secretFilePath;
+    private final long ttlMillis;
+
+    private final Map<String, CachedSecret> cache = new ConcurrentHashMap<>();
+    private static final Map<String, String> mainArgs = new ConcurrentHashMap<>();
+
+    private volatile boolean vaultHealthy = true;
+    private volatile long lastHealthCheck = 0;
+    private final long healthCheckInterval = 5 * 60 * 1000L; // 5 min
+
+    // --- Initialisation des arguments du main ---
+    public static void initMainArgs(String[] args) {
+        for (String arg : args) {
+            if (arg.contains("=")) {
+                String[] parts = arg.split("=", 2);
+                mainArgs.put(parts[0].trim(), parts[1].trim());
+            }
+        }
+    }
+
+    public ResilientSecretProvider(
+            String vaultUrl,
+            String tenantId,
+            String clientId,
+            String clientSecret,
+            String propertiesPath,
+            String secretFilePath,
+            long ttlMillis) {
+        this.vaultUrl = vaultUrl;
+        this.tenantId = tenantId;
+        this.clientId = clientId;
+        this.clientSecret = clientSecret;
+        this.propertiesPath = propertiesPath;
+        this.secretFilePath = secretFilePath;
+        this.ttlMillis = ttlMillis;
+
+        this.vaultHealthy = checkVaultHealth();
+        this.lastHealthCheck = Instant.now().toEpochMilli();
+        System.out.println("[INFO] Azure Vault initialisé - état : " + (vaultHealthy ? "OK" : "OFFLINE"));
+    }
+
+    // =============================================================
+    // 🔑 Récupération du secret avec cache et fallback
+    // =============================================================
+    public String getSecret(String key) {
+        CachedSecret cached = cache.get(key);
+        if (cached != null && !cached.isExpired(ttlMillis)) return cached.value;
+
+        String value = null;
+
+        // 1️⃣ Vault
+        if (vaultHealthy && shouldRecheckHealth()) {
+            vaultHealthy = checkVaultHealth();
+            lastHealthCheck = Instant.now().toEpochMilli();
+        }
+
+        if (vaultHealthy) {
+            try {
+                String token = getAccessToken();
+                AzureVaultClient vault = new AzureVaultClient(vaultUrl, token);
+                value = vault.getSecret(key);
+                if (isValid(value)) return cacheAndReturn(key, value);
+            } catch (Exception e) {
+                vaultHealthy = false;
+                System.err.println("[WARN] Vault non accessible, mode offline : " + e.getMessage());
+            }
+        }
+
+        // 2️⃣ Fallbacks locaux
+        value = tryLocalFallbacks(key);
+        if (isValid(value)) return cacheAndReturn(key, value);
+
+        throw new IllegalStateException("Impossible de récupérer le secret : " + key);
+    }
+
+    // =============================================================
+    // ⚙️ HealthCheck Vault
+    // =============================================================
+    private boolean checkVaultHealth() {
+        try {
+            URL url = new URL(vaultUrl + "?api-version=7.3");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(1500);
+            conn.setReadTimeout(1500);
+            conn.setRequestMethod("GET");
+            int code = conn.getResponseCode();
+            return code == 200 || code == 401 || code == 403;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean shouldRecheckHealth() {
+        return (Instant.now().toEpochMilli() - lastHealthCheck) > healthCheckInterval;
+    }
+
+    // =============================================================
+    // ⚙️ Authentification (Managed Identity → Client Secret)
+    // =============================================================
+    private String getAccessToken() {
+        try {
+            String url = "http://169.254.169.254/metadata/identity/oauth2/token"
+                    + "?api-version=2018-02-01"
+                    + "&resource=https://vault.azure.net";
+            HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Metadata", "true");
+            conn.setConnectTimeout(2000);
+            conn.setReadTimeout(3000);
+
+            if (conn.getResponseCode() == 200) {
+                try (BufferedReader br = new BufferedReader(
+                        new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                    StringBuilder resp = new StringBuilder();
+                    String line;
+                    while ((line = br.readLine()) != null) resp.append(line);
+                    return extractToken(resp.toString());
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // Fallback Client Secret
+        if (isValid(tenantId) && isValid(clientId) && isValid(clientSecret)) {
+            return getAccessTokenWithClientSecret(tenantId, clientId, clientSecret);
+        }
+
+        throw new IllegalStateException("Aucune méthode d’authentification disponible.");
+    }
+
+    private String getAccessTokenWithClientSecret(String tenantId, String clientId, String clientSecret) {
+        try {
+            String url = "https://login.microsoftonline.com/" + tenantId + "/oauth2/v2.0/token";
+            String body = "grant_type=client_credentials" +
+                    "&client_id=" + URLEncoder.encode(clientId, StandardCharsets.UTF_8) +
+                    "&client_secret=" + URLEncoder.encode(clientSecret, StandardCharsets.UTF_8) +
+                    "&scope=" + URLEncoder.encode("https://vault.azure.net/.default", StandardCharsets.UTF_8);
+
+            HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body.getBytes(StandardCharsets.UTF_8));
+            }
+
+            if (conn.getResponseCode() != 200) {
+                throw new IOException("Erreur OAuth : " + conn.getResponseCode() + " - " + conn.getResponseMessage());
+            }
+
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                StringBuilder resp = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) resp.append(line);
+                return extractToken(resp.toString());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Erreur OAuth2 Client Secret : " + e.getMessage(), e);
+        }
+    }
+
+    private static String extractToken(String json) {
+        int start = json.indexOf("\"access_token\":\"") + 16;
+        int end = json.indexOf("\"", start);
+        return (start > 15 && end > start) ? json.substring(start, end) : null;
+    }
+
+    // =============================================================
+    // 📁 Fallback locaux
+    // =============================================================
+    private String tryLocalFallbacks(String key) {
+        String value;
+
+        // ENV
+        value = System.getenv(key);
+        if (isValid(value)) return value;
+
+        // MAIN ARGS
+        value = mainArgs.get(key);
+        if (isValid(value)) return value;
+
+        // SYSTEM PROPERTIES
+        value = System.getProperty(key);
+        if (isValid(value)) return value;
+
+        // PROPERTIES FILE
+        try (InputStream in = new FileInputStream(propertiesPath)) {
+            Properties props = new Properties();
+            props.load(in);
+            value = props.getProperty(key);
+            if (isValid(value)) return value;
+        } catch (Exception ignored) {}
+
+        // K8S SECRET FILE
+        try {
+            File f = new File(secretFilePath);
+            if (f.exists()) {
+                try (BufferedReader br = new BufferedReader(new FileReader(f))) {
+                    value = br.readLine();
+                    if (isValid(value)) return value;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        return null;
+    }
+
+    // =============================================================
+    // ⚙️ Cache utilitaire
+    // =============================================================
+    private String cacheAndReturn(String key, String value) {
+        cache.put(key, new CachedSecret(value));
+        return value;
+    }
+
+    private boolean isValid(String s) {
+        return s != null && !s.isBlank();
+    }
+
+    private static class CachedSecret {
+        private final String value;
+        private final long timestamp;
+
+        CachedSecret(String value) {
+            this.value = value;
+            this.timestamp = Instant.now().toEpochMilli();
+        }
+
+        boolean isExpired(long ttlMillis) {
+            return (Instant.now().toEpochMilli() - timestamp) > ttlMillis;
+        }
+    }
+}
+
+
+---
+
+📁 AzureVaultClient.java
+
+package com.example.vault;
+
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+
+public class AzureVaultClient {
+
+    private final String vaultUrl;
+    private final String accessToken;
+
+    public AzureVaultClient(String vaultUrl, String accessToken) {
+        this.vaultUrl = vaultUrl.endsWith("/") ? vaultUrl : vaultUrl + "/";
+        this.accessToken = accessToken;
+    }
+
+    public String getSecret(String secretName) throws IOException {
+        String url = vaultUrl + "secrets/" + secretName + "?api-version=7.3";
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+        conn.setConnectTimeout(5000);
+        conn.setReadTimeout(5000);
+
+        if (conn.getResponseCode() != 200) {
+            throw new IOException("Erreur Key Vault : " + conn.getResponseCode() + " - " + conn.getResponseMessage());
+        }
+
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+            StringBuilder resp = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) resp.append(line);
+            return extractValue(resp.toString());
+        }
+    }
+
+    private static String extractValue(String json) {
+        int start = json.indexOf("\"value\":\"") + 9;
+        int end = json.indexOf("\"", start);
+        return (start > 8 && end > start) ? json.substring(start, end) : null;
+    }
+}
+
+
+---
+
+📁 VaultService.java
+
+package com.example.vault;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Service;
+
+@Service
+@Profile("managed")
+public class VaultService {
+
+    private final ResilientSecretProvider provider;
+
+    public VaultService(
+        @Value("${vault.url}") String vaultUrl,
+        @Value("${azure.tenant-id:}") String tenantId,
+        @Value("${azure.client-id:}") String clientId,
+        @Value("${azure.client-secret:}") String clientSecret,
+        @Value("${vault.properties-path:/app/application.properties}") String propsPath,
+        @Value("${vault.secret-file-path:/var/run/secrets/app-secret.txt}") String secretFilePath,
+        @Value("${vault.cache.ttl-ms:600000}") long ttlMillis
+    ) {
+        this.provider = new ResilientSecretProvider(
+            vaultUrl, tenantId, clientId, clientSecret,
+            propsPath, secretFilePath, ttlMillis
+        );
+    }
+
+    public String get(String key) {
+        return provider.getSecret(key);
+    }
+}
+
+
+---
+
+📁 Exemple Application.java
+
+package com.example.vault;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class Application {
+    public static void main(String[] args) {
+        ResilientSecretProvider.initMainArgs(args);
+        SpringApplication.run(Application.class, args);
+    }
+}
+
+
+---
+
+✅ Résumé global
+
+Fonction	Description
+
+Authentification	Managed Identity → Client Secret
+Cache mémoire	TTL configurable
+Health-check	automatique (5 min)
+Fallback	Vault → env → args → props → fichier
+Arguments main	KEY=value supporté
+Spring ready	@Service injectable
+
+
+
+---
+
+💡 Tu peux copier-coller ces trois classes dans ton module core (par ex. com.example.vault) et les utiliser immédiatement dans ton projet Spring ou Spark.
