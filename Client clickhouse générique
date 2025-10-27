@@ -1,0 +1,181 @@
+T’as raison. On ne doit rien supposer sur les noms de partitions (dt, symbol, etc.).
+Voici une version vraiment générique : tu peux ne rien préciser (il copiera juste les colonnes Parquet), ou fournir une map de clés → regex pour créer les colonnes de partition à partir de _path. Aucune colonne n’est hard-codée.
+
+Utilitaire réutilisable (sans colonnes imposées)
+
+import java.sql.*;
+import java.time.LocalDate;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/** Parquet Azure -> ClickHouse via azureBlobStorage (sans SAS), générique (pas de noms de partitions imposés). */
+public class CHParquetIngestor {
+  private final String jdbcUrl, user, password, targetTable, namedCollection;
+
+  public CHParquetIngestor(String jdbcUrl, String user, String password,
+                           String targetTable, String namedCollection) {
+    this.jdbcUrl = jdbcUrl; this.user = user; this.password = password;
+    this.targetTable = targetTable; this.namedCollection = namedCollection;
+  }
+
+  /** Aperçu N lignes, avec colonnes Parquet uniquement (aucune partition rajoutée). */
+  public void preview(String azureGlob, int limit, Map<String,String> extraSettings) throws SQLException {
+    String sql = "SELECT * FROM azureBlobStorage('" + azureGlob + "') " +
+      "SETTINGS " + settings(limit, extraSettings);
+    try (Connection c = DriverManager.getConnection(jdbcUrl, user, password);
+         Statement st = c.createStatement();
+         ResultSet rs = st.executeQuery(sql)) {
+      int cols = rs.getMetaData().getColumnCount(), row = 0;
+      while (rs.next() && row++ < limit) {
+        StringBuilder b = new StringBuilder();
+        for (int i=1;i<=cols;i++) { if(i>1) b.append(" | "); b.append(rs.getMetaData().getColumnLabel(i)).append('=').append(rs.getString(i)); }
+        System.out.println(b);
+      }
+    }
+  }
+
+  /**
+   * Ingestion générique, sans connaître les partitions :
+   * - dataColumns : liste de colonnes Parquet à sélectionner (null ou vide -> "*")
+   * - partitionExtractors : Map<nomColonne, regexCapture1> (ex: "dt" -> "/dt=([^/]+)/")
+   *   -> Si vide, aucune colonne extra n’est ajoutée (pur copy des colonnes Parquet).
+   */
+  public void ingestGlob(String azureGlob,
+                         List<String> dataColumns,
+                         Map<String,String> partitionExtractors,
+                         Map<String,String> extraSettings,
+                         int retries) throws Exception {
+    String proj = buildProjection(dataColumns, partitionExtractors);
+    String select = "SELECT " + proj + " FROM azureBlobStorage('" + azureGlob + "') " +
+        "SETTINGS " + settings(null, extraSettings);
+    execWithRetry("INSERT INTO " + targetTable + " " + select, retries);
+  }
+
+  /**
+   * Ingestion par date (ou autre variable) via template de chemin.
+   * pathTemplate: ex "https://.../year=%s/month=%s/day=%s/*.parquet"
+   * templateValues: valeurs pour les %s (ex: List.of("2025","10","24"))
+   * partitionExtractors: idem ci-dessus (peuvent être vides).
+   */
+  public void ingestByPathTemplate(String pathTemplate,
+                                   List<String> templateValues,
+                                   List<String> dataColumns,
+                                   Map<String,String> partitionExtractors,
+                                   Map<String,String> extraSettings,
+                                   int retries) throws Exception {
+    String path = String.format(pathTemplate, templateValues.toArray());
+    String proj = buildProjection(dataColumns, partitionExtractors);
+    String select = "SELECT " + proj + " FROM azureBlobStorage('" + path + "') " +
+        "SETTINGS " + settings(null, extraSettings);
+    execWithRetry("INSERT INTO " + targetTable + " " + select, retries);
+  }
+
+  // ---------- helpers ----------
+  private String buildProjection(List<String> dataCols, Map<String,String> partExtractors) {
+    String left = (dataCols == null || dataCols.isEmpty())
+        ? "*"
+        : String.join(", ", dataCols);
+    if (partExtractors == null || partExtractors.isEmpty()) return left;
+
+    String right = partExtractors.entrySet().stream()
+        .map(e -> "extract(_path, '" + e.getValue().replace("'", "\\'") + "') AS " + e.getKey())
+        .collect(Collectors.joining(", "));
+    return left + ", " + right;
+  }
+
+  private String settings(Integer limit, Map<String,String> extra) {
+    List<String> s = new ArrayList<>();
+    s.add("azure_named_collection = '" + namedCollection + "'");
+    s.add("format = 'Parquet'");
+    s.add("input_format_parquet_allow_missing_columns = 1");
+    s.add("input_format_parquet_case_insensitive = 1");
+    s.add("max_threads = 16");
+    s.add("max_block_size = 8192");
+    if (limit != null) { s.add("max_result_rows = " + limit); s.add("result_overflow_mode = 'break'"); }
+    if (extra != null) extra.forEach((k,v) -> s.add(k + " = " + v));
+    return String.join(", ", s);
+  }
+
+  private void execWithRetry(String sql, int retries) throws Exception {
+    try (Connection c = DriverManager.getConnection(jdbcUrl, user, password);
+         Statement st = c.createStatement()) {
+      long backoff = 2000;
+      for (int i=1;i<=Math.max(1,retries);i++) {
+        try { System.out.println("▶️ " + sql); st.execute(sql); return; }
+        catch (SQLException ex) {
+          if (i==retries) throw ex;
+          System.err.println("⚠️ Try " + i + " failed: " + ex.getMessage() + " — retry in " + backoff + "ms");
+          Thread.sleep(backoff); backoff = Math.min(backoff*2, 30000);
+        }
+      }
+    }
+  }
+}
+
+Exemples d’usage
+
+1) Copier “as-is” (aucune colonne de partition ajoutée)
+
+var ing = new CHParquetIngestor(
+  "jdbc:clickhouse://<host>:443/<db>?ssl=true&compress=1&socket_timeout=600000",
+  "<USER>", "<PWD>",
+  "srv.t_parquet_ingest",
+  "azure_spn" // named collection ClickHouse (SPN/MI)
+);
+
+// preview (rapide)
+ing.preview("https://<acct>.blob.core.windows.net/<cont>/prefix/**/part-*.parquet", 5, Map.of());
+
+// ingestion brute (col. Parquet uniquement)
+ing.ingestGlob(
+  "https://<acct>.blob.core.windows.net/<cont>/prefix/**/part-*.parquet",
+  /* dataColumns */ List.of(),           // -> "*"
+  /* partitionExtractors */ Map.of(),    // -> aucune colonne ajoutée
+  Map.of("max_threads","16"), 3
+);
+
+2) Extraire des partitions (sans présumer les noms)
+
+Tu donnes ce que tu veux extraire, pas de noms imposés par la lib.
+
+// ex: layout hive: .../dt=YYYY-MM-DD/symbol=XXX/...
+Map<String,String> parts = Map.of(
+  "dt", "/dt=([^/]+)/",             // un seul groupe capturé → valeur
+  "symbol", "/symbol=([^/]+)/"
+);
+
+ing.ingestGlob(
+  "https://<acct>.blob.core.windows.net/<cont>/prefix/dt=*/symbol=*/*.parquet",
+  List.of("*"),                      // ou colonnes listées si tu veux filtrer
+  parts,
+  Map.of("max_threads","16"), 3
+);
+
+3) Par template (aucun nom requis, juste des %s)
+
+String pathTpl = "https://<acct>.blob.core.windows.net/<cont>/prefix/year=%s/month=%s/day=%s/*.parquet";
+ing.ingestByPathTemplate(
+  pathTpl,
+  List.of("2025","10","24"),
+  /* dataColumns */ List.of("*"),
+  /* partitionExtractors */ Map.of(          // tu peux n’en mettre aucun
+    "year", "/year=(\\d{4})/",
+    "month", "/month=(\\d{2})/",
+    "day", "/day=(\\d{2})/"
+  ),
+  Map.of("max_threads","16"), 3
+);
+
+
+---
+
+Pourquoi c’est réellement générique
+
+Si tu ne passes rien en partitionExtractors → on ne projette que les colonnes Parquet.
+
+Si tu veux des colonnes de partition, tu dis quoi extraire via un regex capture 1 (n’importe quel nom).
+
+Pas de dt, symbol, etc. imposés par la lib.
+
+
+Si tu veux, je peux ajouter une petite méthode utilitaire qui détecte automatiquement les paires key=value dans _path (via un regex global) et te renvoie un Map<String,String> prêt à mettre dans partitionExtractors.
