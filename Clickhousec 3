@@ -1,0 +1,215 @@
+Parfait ✅ — voici une version complète, prête à copier-coller de ta classe CHParquetIngestor,
+avec le support du mode Overwrite intégré proprement :
+
+APPEND (par défaut)
+
+OVERWRITE_TABLE (truncate complet)
+
+OVERWRITE_PARTITION (drop partition avant insert)
+
+
+C’est générique, sans supposer de nom de colonne spécifique.
+Tu peux réutiliser la même instance pour tous tes jobs.
+
+
+---
+
+🔧 Classe CHParquetIngestor.java
+
+import java.sql.*;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Charge des Parquet Azure vers ClickHouse via azureBlobStorage().
+ * - Auth via named collection (SPN / Managed Identity) côté ClickHouse.
+ * - Support des modes overwrite (table, partition).
+ * - Pas de colonnes de partition imposées.
+ */
+public class CHParquetIngestor {
+
+    public enum OverwriteMode { APPEND, OVERWRITE_TABLE, OVERWRITE_PARTITION }
+
+    private final String jdbcUrl, user, password, targetTable, namedCollection;
+
+    public CHParquetIngestor(String jdbcUrl, String user, String password,
+                             String targetTable, String namedCollection) {
+        this.jdbcUrl = jdbcUrl;
+        this.user = user;
+        this.password = password;
+        this.targetTable = targetTable;
+        this.namedCollection = namedCollection;
+    }
+
+    /**
+     * Ingestion principale :
+     *  - azureGlob : chemin Parquet (peut contenir des wildcards)
+     *  - dataColumns : colonnes à lire depuis le parquet (null = *)
+     *  - partitionExtractors : Map<colonne, regexCapture> pour extraire depuis _path
+     *  - overwriteMode : APPEND / OVERWRITE_TABLE / OVERWRITE_PARTITION
+     *  - partitionValue : utilisé uniquement si mode = OVERWRITE_PARTITION
+     */
+    public void ingest(String azureGlob,
+                       List<String> dataColumns,
+                       Map<String,String> partitionExtractors,
+                       Map<String,String> extraSettings,
+                       OverwriteMode overwriteMode,
+                       String partitionValue,
+                       int retries) throws Exception {
+
+        try (Connection c = DriverManager.getConnection(jdbcUrl, user, password)) {
+            // Gestion du mode overwrite
+            switch (overwriteMode) {
+                case OVERWRITE_TABLE -> truncateTarget(c);
+                case OVERWRITE_PARTITION -> {
+                    if (partitionValue == null)
+                        throw new IllegalArgumentException("partitionValue required for OVERWRITE_PARTITION mode");
+                    dropPartition(c, partitionValue);
+                }
+                default -> {} // append
+            }
+        }
+
+        // Construction de la requête SELECT
+        String proj = buildProjection(dataColumns, partitionExtractors);
+        String select = "SELECT " + proj + " FROM azureBlobStorage('" + azureGlob + "') " +
+                "SETTINGS " + settings(null, extraSettings);
+        String sql = "INSERT INTO " + targetTable + " " + select;
+
+        execWithRetry(sql, retries);
+        System.out.println("✅ Ingestion terminée : " + overwriteMode);
+    }
+
+    // ----------------- Méthodes internes -----------------
+
+    private void truncateTarget(Connection c) throws SQLException {
+        try (Statement st = c.createStatement()) {
+            st.execute("TRUNCATE TABLE " + targetTable);
+            System.out.println("🧹 Table " + targetTable + " vidée (overwrite global)");
+        }
+    }
+
+    private void dropPartition(Connection c, String partitionValue) throws SQLException {
+        try (Statement st = c.createStatement()) {
+            String sql = "ALTER TABLE " + targetTable + " DROP PARTITION '" + partitionValue + "'";
+            st.execute(sql);
+            System.out.println("🧹 Partition " + partitionValue + " supprimée avant réécriture");
+        }
+    }
+
+    private String buildProjection(List<String> dataCols, Map<String,String> partExtractors) {
+        String left = (dataCols == null || dataCols.isEmpty())
+                ? "*"
+                : String.join(", ", dataCols);
+        if (partExtractors == null || partExtractors.isEmpty()) return left;
+        String right = partExtractors.entrySet().stream()
+                .map(e -> "extract(_path, '" + e.getValue().replace("'", "\\'") + "') AS " + e.getKey())
+                .collect(Collectors.joining(", "));
+        return left + ", " + right;
+    }
+
+    private String settings(Integer limit, Map<String,String> extra) {
+        List<String> s = new ArrayList<>();
+        s.add("azure_named_collection = '" + namedCollection + "'");
+        s.add("format = 'Parquet'");
+        s.add("input_format_parquet_allow_missing_columns = 1");
+        s.add("input_format_parquet_case_insensitive = 1");
+        s.add("max_threads = 16");
+        s.add("max_block_size = 8192");
+        if (limit != null) {
+            s.add("max_result_rows = " + limit);
+            s.add("result_overflow_mode = 'break'");
+        }
+        if (extra != null) extra.forEach((k,v) -> s.add(k + " = " + v));
+        return String.join(", ", s);
+    }
+
+    private void execWithRetry(String sql, int retries) throws Exception {
+        try (Connection c = DriverManager.getConnection(jdbcUrl, user, password);
+             Statement st = c.createStatement()) {
+            long backoff = 2000;
+            for (int i=1; i<=Math.max(1,retries); i++) {
+                try {
+                    System.out.println("▶️ Execution (" + i + "/" + retries + "): " + sql);
+                    st.execute(sql);
+                    return;
+                } catch (SQLException ex) {
+                    if (i == retries) throw ex;
+                    System.err.println("⚠️ Try " + i + " failed: " + ex.getMessage() + " — retry in " + backoff + "ms");
+                    Thread.sleep(backoff);
+                    backoff = Math.min(backoff*2, 30000);
+                }
+            }
+        }
+    }
+}
+
+
+---
+
+🚀 Exemple d’utilisation
+
+public class MainIngest {
+    public static void main(String[] args) throws Exception {
+        CHParquetIngestor ing = new CHParquetIngestor(
+            "jdbc:clickhouse://<host>:443/<db>?ssl=true&compress=1&socket_timeout=600000",
+            "<USER>", "<PWD>",
+            "srv.t_parquet_ingest",
+            "azure_spn" // ta collection nommée côté ClickHouse
+        );
+
+        // 🔹 Exemple 1 : append simple
+        ing.ingest(
+            "https://<account>.blob.core.windows.net/<container>/prefix/dt=2025-10-24/*.parquet",
+            List.of("*"),
+            Map.of(), // pas d'extraction de partitions
+            Map.of("max_threads", "16"),
+            CHParquetIngestor.OverwriteMode.APPEND,
+            null,
+            3
+        );
+
+        // 🔹 Exemple 2 : overwrite de la table complète
+        ing.ingest(
+            "https://<account>.blob.core.windows.net/<container>/prefix/*.parquet",
+            List.of("*"),
+            Map.of(),
+            Map.of(),
+            CHParquetIngestor.OverwriteMode.OVERWRITE_TABLE,
+            null,
+            3
+        );
+
+        // 🔹 Exemple 3 : overwrite d’une seule partition
+        ing.ingest(
+            "https://<account>.blob.core.windows.net/<container>/prefix/dt=2025-10-24/*.parquet",
+            List.of("*"),
+            Map.of("dt", "/dt=([^/]+)/"), // extraire dt
+            Map.of(),
+            CHParquetIngestor.OverwriteMode.OVERWRITE_PARTITION,
+            "2025-10-24", // valeur de la partition
+            3
+        );
+    }
+}
+
+
+---
+
+💡 Notes importantes
+
+La colonne de partition (DROP PARTITION) doit exister dans la table ClickHouse (ex. PARTITION BY dt).
+
+Tu peux remplacer DROP PARTITION par ALTER TABLE DELETE WHERE si tu veux gérer une condition personnalisée.
+
+TRUNCATE TABLE fonctionne pour toutes les tables non répliquées.
+Pour les tables Replicated, tu peux remplacer par ALTER TABLE ... TRUNCATE PARTITION si nécessaire.
+
+Tu peux étendre le code pour que le partitionValue soit automatiquement extrait depuis le azureGlob.
+
+
+
+---
+
+Souhaites-tu que je t’ajoute aussi une version transactionnelle (avec sauvegarde temporaire puis swap de table pour éviter les pertes en cas d’échec) ?
+C’est souvent utilisé dans les environnements prod avec ingestion journalière.
