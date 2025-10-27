@@ -1,0 +1,98 @@
+Ça arrive souvent quand on pousse de gros batches vers ClickHouse : la connexion HTTP se coupe en plein insert (“Connection reset / Server failed to respond”).
+Voici un plan pragmatique (côté Spark + ClickHouse + réseau) qui règle 90% des cas.
+
+1) Côté Spark / Connecteur V2
+
+Dans ton SparkApplication.yaml (Spark Operator) ou dans ton code, ajoute/ajuste ces confs :
+
+spec:
+  sparkConf:
+    # — réduire la taille des lots et compresser —
+    "spark.clickhouse.write.batchSize": "5000"          # 5k–20k selon essais
+    "spark.clickhouse.write.compression.codec": "lz4"   # par défaut lz4, garde
+
+    # — format d’insert : JSON souvent plus robuste que Arrow —
+    "spark.clickhouse.write.format": "json"             # par défaut 'arrow'
+
+    # — aligner la distribution : éviter des mega-batches irréguliers —
+    "spark.clickhouse.write.repartitionByPartition": "true"
+    "spark.clickhouse.write.repartitionStrictly": "false"
+    "spark.clickhouse.write.localSortByKey": "true"
+
+    # — tolérance aux erreurs transitoires + retries —
+    "spark.clickhouse.write.maxRetry": "5"
+    "spark.clickhouse.write.retryInterval": "15s"
+    # Ajouter des codes réellement transitoires (timeouts, network, etc.)
+    "spark.clickhouse.write.retryableErrorCodes": "159,202,203,209,210,242,252,285,319"
+
+batchSize plus petit → requêtes plus courtes, moins de “reset”.
+
+write.format=json → moins sensible aux soucis de client/Arrow.
+
+retryableErrorCodes inclut 209 (SOCKET_TIMEOUT) et 210 (NETWORK_ERROR) etc., considérés transitoires par l’écosystème ClickHouse. 
+
+
+👉 Et adapte le parallélisme de l’insert pour ne pas saturer CH :
+df = df.repartition(<nb raisonnable>, col("partition_key"))
+(évite 1000 requêtes concurrentes énormes).
+
+2) Si HTTP est instable, passe en TCP natif
+
+Le connecteur V2 supporte TCP via le catalog :
+
+spec:
+  sparkConf:
+    "spark.sql.catalog.clickhouse": "com.clickhouse.spark.ClickHouseCatalog"
+    "spark.sql.catalog.clickhouse.protocol": "tcp"
+    "spark.sql.catalog.clickhouse.tcp_port": "9000"
+    "spark.sql.catalog.clickhouse.host": "clickhouse.default.svc.cluster.local"
+    "spark.sql.catalog.clickhouse.user": "default"
+    "spark.sql.catalog.clickhouse.password": "<secret>"
+
+Le TCP est souvent plus tolérant aux proxies/Ingress que HTTP/8123. Le support tcp_port est documenté dans les releases du connecteur. 
+
+3) Timeouts/Keep-alive (client)
+
+Les timeouts viennent du driver Java/JDBC utilisé par le connecteur.
+Selon ton setup, augmente socket_timeout côté client (ms) ; c’est un paramètre standard des stacks CH. (Ex. de refs publiques montrant l’usage de socket_timeout.) 
+
+4) Côté ClickHouse (serveur)
+
+Vérifie les logs (clickhouse-server.log) pour confirmer des SOCKET_TIMEOUT (209) / NETWORK_ERROR (210) côté serveur. 
+
+Si tu écris sur une table Distributed, tu peux réduire les sauts réseau :
+
+Écrire sur les tables locales en activant (si pertinent) :
+
+"spark.clickhouse.write.distributed.convertLocal": "true"
+"spark.clickhouse.write.distributed.useClusterNodes": "true"
+
+(diminue les risques de reset via le nœud distributeur). 
+
+
+
+5) Côté AKS / réseau (très fréquent)
+
+Les “connection reset” viennent souvent d’un Ingress/Load Balancer qui coupe la socket sur les gros uploads (INSERT). Solutions :
+
+Si ClickHouse est derrière NGINX Ingress, augmente proxy_read_timeout, proxy_send_timeout et client_max_body_size, ou bypasse l’Ingress pour les flux Spark → CH (Service ClusterIP headless).
+
+Vérifie aussi les idles sur ton LB (Azure) qui peuvent tuer la connexion longue.
+
+
+6) Checklist express
+
+🔧 Réduis spark.clickhouse.write.batchSize (5k–20k) + write.format=json. 
+
+🔁 Active maxRetry, retryInterval, et ajoute 209,210,… aux retryableErrorCodes. 
+
+🧩 repartitionByPartition=true + localSortByKey=true + coalesce/repartition côté DF. 
+
+🔌 En cas de resets persistants : passe HTTP → TCP (9000) via le catalog. 
+
+🌐 Évite l’Ingress pour les inserts massifs, ou augmente ses timeouts.
+
+📜 Regarde les logs CH pour 209/210 afin de confirmer la nature “réseau/timeout”. 
+
+
+Si tu veux, je te prépare un YAML SparkApplication complet (HTTP et variante TCP) + un snippet Java qui lit les secrets d’env et applique ces confs automatiquement.
