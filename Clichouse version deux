@@ -1,0 +1,164 @@
+Excellente question 👌 — tu veux pouvoir faire un mode=overwrite (réécrire les données ClickHouse) de façon sûre et générique, sans réinventer la roue.
+Voici trois approches, selon ton besoin de granularité (totale, par partition, ou transactionnelle).
+
+
+---
+
+🧩 1️⃣ Overwrite global (effacer toute la table avant réinsertion)
+
+👉 le plus simple et universel, utilisable directement dans ton CHParquetIngestor.
+
+Ajoute un petit bloc avant l’INSERT :
+
+private void truncateTarget(Connection c) throws SQLException {
+    try (Statement st = c.createStatement()) {
+        st.execute("TRUNCATE TABLE " + targetTable);
+        System.out.println("🧹 Table " + targetTable + " vidée (mode overwrite global)");
+    }
+}
+
+Et dans ta méthode ingestGlob(...) ou ingestByPathTemplate(...), appelle-la une seule fois avant la première insertion :
+
+try (Connection c = DriverManager.getConnection(jdbcUrl, user, password)) {
+    truncateTarget(c);
+}
+// puis continue avec execWithRetry("INSERT INTO ...")
+
+✅ Avantages
+
+Très simple.
+
+Aucune dépendance au schéma ou partition.
+
+Compatible avec n’importe quel moteur ClickHouse (MergeTree, Replicated, etc.).
+
+
+⚠️ Inconvénient
+
+Supprime tout le contenu avant chaque ingestion (non sélectif).
+
+Si l’ingestion échoue à mi-parcours, ta table est vide.
+
+
+
+---
+
+🧱 2️⃣ Overwrite par partition
+
+👉 beaucoup plus sûr pour les gros volumes (tu ne réécris que ce que tu recharges).
+
+Supposons que ta table est partitionnée par dt (ou n’importe quelle colonne de partition).
+
+Avant chaque INSERT, tu peux supprimer la partition correspondante :
+
+private void dropPartition(Connection c, String partitionValue) throws SQLException {
+    String sql = "ALTER TABLE " + targetTable + " DROP PARTITION '" + partitionValue + "'";
+    try (Statement st = c.createStatement()) {
+        st.execute(sql);
+        System.out.println("🧹 Partition " + partitionValue + " supprimée dans " + targetTable);
+    }
+}
+
+Puis, dans ton ingestion par date :
+
+try (Connection c = DriverManager.getConnection(jdbcUrl, user, password)) {
+    dropPartition(c, dateValue);  // ex: "2025-10-24"
+}
+execWithRetry(insertSql, retries);
+
+✅ Avantages
+
+Tu effaces uniquement la partition remplacée.
+
+Tu peux relancer un jour précis sans effacer le reste.
+
+Compatible avec les scripts journaliers ou horaires.
+
+
+⚠️ À savoir
+
+ClickHouse doit connaître la clé de partition exacte (souvent un Date ou String).
+
+L’opération est rapide, mais verrouille temporairement la table.
+
+
+
+---
+
+🧠 3️⃣ Overwrite logique (DELETE + INSERT)
+
+👉 pour les cas où tu n’as pas de vrai champ de partition.
+
+Avant ton INSERT, tu peux exécuter un ALTER TABLE … DELETE WHERE … :
+
+private void deleteWhere(Connection c, String condition) throws SQLException {
+    String sql = "ALTER TABLE " + targetTable + " DELETE WHERE " + condition;
+    try (Statement st = c.createStatement()) {
+        st.execute(sql);
+        System.out.println("🧹 Suppression logique avec condition: " + condition);
+    }
+}
+
+Puis :
+
+deleteWhere(c, "year=2025 AND month=10 AND day=24");
+execWithRetry(insertSql, retries);
+
+> ⚠️ Attention : ALTER TABLE … DELETE est asynchrone dans ClickHouse.
+Les lignes peuvent subsister quelques secondes avant d’être réellement purgées.
+Si tu veux un overwrite strict et immédiat, préfère la DROP PARTITION.
+
+
+
+
+---
+
+🚀 4️⃣ Intégration dans ta classe CHParquetIngestor
+
+On peut généraliser en ajoutant un paramètre overwriteMode dans les méthodes publiques.
+
+Exemple d’enrichissement minimal :
+
+public enum OverwriteMode { APPEND, OVERWRITE_TABLE, OVERWRITE_PARTITION }
+
+public void ingestGlob(String azureGlob,
+                       List<String> dataColumns,
+                       Map<String,String> partitionExtractors,
+                       Map<String,String> extraSettings,
+                       int retries,
+                       OverwriteMode mode) throws Exception {
+    try (Connection c = DriverManager.getConnection(jdbcUrl, user, password)) {
+        if (mode == OverwriteMode.OVERWRITE_TABLE) {
+            truncateTarget(c);
+        }
+    }
+    String proj = buildProjection(dataColumns, partitionExtractors);
+    String select = "SELECT " + proj + " FROM azureBlobStorage('" + azureGlob + "') " +
+        "SETTINGS " + settings(null, extraSettings);
+    execWithRetry("INSERT INTO " + targetTable + " " + select, retries);
+}
+
+Et dans la version par partition :
+
+if (mode == OverwriteMode.OVERWRITE_PARTITION) {
+    try (Connection c = DriverManager.getConnection(jdbcUrl, user, password)) {
+        dropPartition(c, partitionValue); // ex: "2025-10-24"
+    }
+}
+
+
+---
+
+TL;DR
+
+Objectif	Solution	Méthode	Risque
+
+Tout remplacer	TRUNCATE TABLE	simple, immédiat	perte totale si plantage
+Remplacer une partition	ALTER TABLE DROP PARTITION	recommandé	aucun si clé connue
+Effacer selon condition	ALTER TABLE DELETE WHERE	utile sans partition	suppression asynchrone
+
+
+
+---
+
+Souhaites-tu que je t’ajoute directement cette logique (OverwriteMode) dans la classe générique que je t’ai donnée plus haut, avec un exemple concret d’appel ?
