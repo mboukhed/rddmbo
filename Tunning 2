@@ -1,0 +1,143 @@
+2 milliards de lignes, ça se traite “indus”. Voilà un plan pragmatique et robuste pour ClickHouse + Spark V2 (Catalog) qui évite les connection reset et sécurise le débit.
+
+1) Côté schéma ClickHouse (clé)
+
+Choisis un MergeTree adapté à tes requêtes et à l’ingestion massive.
+
+CREATE TABLE default.events (
+  dt Date,                      -- partition
+  ts DateTime64(3),             -- tri secondaire
+  user_id UInt64,
+  event_type LowCardinality(String),
+  value Float64                 -- adapte
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(dt)       -- partiton = mois (simple et efficace)
+ORDER BY (dt, user_id, ts)      -- tri = filtres fréquents
+-- SAMPLE BY user_id            -- si tu veux des SAMPLE reproductibles
+TTL ts + INTERVAL 90 DAY        -- si rétention nécessaire
+SETTINGS index_granularity = 8192;  -- défaut OK, ajuste si besoin
+
+Pourquoi : partitions mensuelles → gros lots “indépendants”, ORDER BY sur tes filtres principaux → lecture rapide, TTL optionnel.
+
+2) Stratégie d’ingestion (Spark V2 Catalog)
+
+Objectif : beaucoup de petits lots en parallèle maîtrisé, côté TCP 9000, et réessais.
+
+SparkApplication (extrait)
+
+spec:
+  sparkConf:
+    # -- Catalog ClickHouse V2 en TCP (plus stable que HTTP pour gros inserts) --
+    "spark.sql.catalog.clickhouse": "com.clickhouse.spark.ClickHouseCatalog"
+    "spark.sql.catalog.clickhouse.protocol": "tcp"
+    "spark.sql.catalog.clickhouse.tcp_port": "9000"
+    "spark.sql.catalog.clickhouse.host": "clickhouse.default.svc.cluster.local"
+    "spark.sql.catalog.clickhouse.user": "default"
+    "spark.sql.catalog.clickhouse.password": "$(CH_PASSWORD)"
+    "spark.sql.catalog.clickhouse.database": "default"
+
+    # -- Format et lot --
+    "spark.clickhouse.write.format": "json"          # json souvent + robuste qu’arrow
+    "spark.clickhouse.write.batchSize": "10000"      # 5k–20k (teste 10k, 20k)
+
+    # -- Répartition & alignement sur les partitions CH --
+    "spark.clickhouse.write.repartitionByPartition": "true"
+    "spark.clickhouse.write.localSortByKey": "true"
+
+    # -- Concurrence raisonnable (évite 1000 connexions) --
+    "spark.sql.shuffle.partitions": "200"            # à dimensionner selon cluster
+    "spark.task.maxFailures": "8"
+
+    # -- Résilience (réessais) --
+    "spark.clickhouse.write.maxRetry": "6"
+    "spark.clickhouse.write.retryInterval": "15s"
+
+    # -- Distributed → écrire localement sur chaque shard si tu utilises une table Distributed --
+    # "spark.clickhouse.write.distributed.convertLocal": "true"
+    # "spark.clickhouse.write.distributed.useClusterNodes": "true"
+
+> Évite de passer par un Ingress pour l’insert massif ; cible le Service ClusterIP du serveur CH (ou chaque shard) en interne AKS.
+
+
+
+Java (esprit) – préparation du DataFrame
+
+// 1) Lire tes sources (Parquet/ADLS/...) → df
+// 2) Normaliser / caster les colonnes (dt, ts, user_id, ...)
+// 3) Aligner la répartition Spark sur la partition CH et sur la clé d’ORDER BY
+df = df
+  .repartition(200, df.col("dt")) // 1 partition spark ≈ 1 partition CH
+  .sortWithinPartitions("dt", "user_id", "ts");
+
+// 4) Append → table finale
+df.writeTo("clickhouse.default.events").append();
+
+// Variante safe: écrire d’abord dans une table STAGING (même structure), puis
+// côté CH: INSERT INTO events SELECT * FROM events_staging BY PARTITION → atomique.
+
+3) Paramétrage cluster ClickHouse (serveur)
+
+TCP 9000 exposé en interne (pas d’Ingress/LB HTTP pour Spark).
+
+Si cluster sharded : écris sur la table Distributed avec convertLocal=true/useClusterNodes=true pour pousser directement sur chaque shard (réduit les sauts réseau).
+
+Timeouts serveur & keep-alive : garde des valeurs généreuses si tes commits durent (mais le but est d’avoir des lots courts).
+
+Après ingestion massive : planifie des OPTIMIZE ... FINAL par partition si nécessaire (hors heures de pointe).
+
+
+4) Débit & stabilité : règles d’or
+
+Lots courts : batchSize 5k–20k → moins de “connection reset”.
+
+Parallélisme maîtrisé : nombre de tâches ≈ executors * cores * 1–2, pas 1000.
+
+Aligner la donnée : repartitionByPartition=true + sortWithinPartitions → meilleurs “parts” CH, moins d’OPTIMIZE coûteux.
+
+TCP plutôt que HTTP pour gros volumes.
+
+Réessais activés (réseau capricieux = normal à cette échelle).
+
+Staging si tu veux des chargements atomiques et du back-pressure côté CH.
+
+
+5) Si ça casse encore (checklist express)
+
+Baisse encore batchSize (ex. 5000).
+
+Descends spark.sql.shuffle.partitions si trop de concurrence.
+
+Augmente légèrement la mémoire/executors pour éviter OOM/GC longs.
+
+Vérifie que tu n’es pas derrière un LB avec idle timeout court.
+
+Sur une table Distributed, vérifie la latence inter-shards (écris local quand possible).
+
+Surveille system.query_log, system.parts, system.merges côté CH pour comprendre le goulot.
+
+
+6) Option “très gros volumes” (pipeline alternatif)
+
+Si tu dois charger très vite et très gros de manière continue :
+
+Kafka → ClickHouse (Engine Kafka + Materialized View vers MergeTree) : ingestion haute cadence, résiliente.
+
+S3/ADLS + table function (si dispo dans ta version) pour INSERT SELECT côté ClickHouse (moins d’aller-retour Spark↔CH).
+
+clickhouse-client (Native) depuis des fichiers Native/Parquet préparés par Spark (mode batch “offline”).
+
+
+
+---
+
+Si tu veux, donne-moi :
+
+le dimensionnement de ton cluster CH (nb de shards/replicas),
+
+ta clé de partition logique (date ?),
+
+et le profil de requêtes (filtres/tri).
+
+
+Je te renvoie un YAML SparkApplication + DDL CH + snippet Java taillés pile pour ton cas (débit vs coûts, et marges de sécurité).
