@@ -1,0 +1,10 @@
+SELECT
+    query_id,
+    user,
+    elapsed,
+    read_rows,
+    read_bytes,
+    memory_usage,
+    query
+FROM system.processes
+ORDER BY elapsed DESC;
