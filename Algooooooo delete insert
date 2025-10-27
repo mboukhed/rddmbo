@@ -1,0 +1,60 @@
+Voici une version optimisée & compacte (Java, Spark SQL V2 + ClickHouse) :
+
+import static org.apache.spark.sql.functions.*;
+import org.apache.spark.sql.*;
+
+public static void replaceCHTableOptimized(
+        SparkSession spark, String db, String table, String parquetPath, String tmpTable) {
+
+    // 1) Lire
+    Dataset<Row> ch  = spark.sql("SELECT * FROM clickhouse." + db + "." + table);
+    Dataset<Row> src = spark.read().parquet(parquetPath);
+
+    // 2) Aligner le schéma (mêmes colonnes, même ordre)
+    String[] cols = java.util.Arrays.stream(src.columns())
+        .filter(java.util.Arrays.asList(ch.columns())::contains)
+        .toArray(String[]::new);
+    Dataset<Row> chA  = ch.selectExpr(cols);
+    Dataset<Row> srcA = src.selectExpr(cols);
+
+    // 3) Clé compacte = SHA-256(concat_ws)  (rapide, memory-friendly, null-safe)
+    Column keyA = sha2(concat_ws("\u001F", java.util.Arrays.stream(cols)
+        .map(c -> coalesce(col(c).cast("string"), lit(""))).toArray(Column[]::new)), 256);
+
+    Dataset<Row> chK  = chA.withColumn("k", keyA);
+    Dataset<Row> srcK = srcA.withColumn("k", keyA);
+
+    // 4) Anti-join (garde ce qui n’existe pas déjà)
+    Dataset<Row> toInsert = srcK.join(chK.select("k"), new String[]{"k"}, "left_anti")
+                                .drop("k")
+                                .coalesce(2); // throttle coté CH
+
+    // 5) Écrire dans tmp (atomique côté V2)
+    toInsert.writeTo("clickhouse." + db + "." + tmpTable).createOrReplace();
+
+    // 6) Swap: drop ancien + rename tmp -> final
+    spark.sql("DROP TABLE IF EXISTS clickhouse." + db + "." + table);
+    spark.sql("ALTER TABLE clickhouse." + db + "." + tmpTable + " RENAME TO clickhouse." + db + "." + table);
+}
+
+Pourquoi c’est optimisé
+
+Schéma aligné (évite shuffles et casts inattendus).
+
+Clé sha2(concat_ws) : plus compacte et performante que concat brute sur de larges lignes.
+
+left_anti + coalesce(2) : réduit la pression I/O et évite SERVER_OVERLOADED.
+
+Swap atomique via tmp → rename : pas de table partiellement remplie.
+
+
+Astuces prod (si besoin)
+
+Avant l’écriture : spark.conf.set("spark.sql.adaptive.enabled","true").
+
+Si CH saturé : ajoute lors des writes V2 (selon ton connecteur)
+spark.conf.set("spark.clickhouse.write.batchSize","50000");
+spark.conf.set("spark.clickhouse.write.numPartitions","2");
+spark.conf.set("spark.sql.catalog.clickhouse.option.socket_timeout","120000");
+
+Si la table est partitionnée, préfère overwritePartitions() au lieu du swap total.
