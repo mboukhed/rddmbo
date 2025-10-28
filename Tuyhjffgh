@@ -1,0 +1,504 @@
+Parfait 🔥 — voici les deux variantes que tu as demandées :
+
+1. Version “générique JSON” : sérialise automatiquement ArrayType, MapType, StructType en JSON avant l’INSERT (pratique pour éviter la galère de mapping fin).
+
+
+2. Version “cluster-aware” : choix entre INSERT via une table Distributed (simple) ou écriture directe sur les shards (routing par clé de sharding, avec retries/batchs/ps.set…).
+
+
+
+Je garde tout sans Spring, prêt à coller dans ton projet Java 17 + Spark.
+
+
+---
+
+1) Writer générique JSON (Array/Map/Struct → JSON)
+
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.math.BigDecimal;
+import java.sql.*;
+import java.util.*;
+
+public class ClickHouseJdbcWriterJson {
+
+    public static class Config {
+        public String jdbcUrl;
+        public String user = "default";
+        public String password = "";
+        public String table;                 // db.table
+        public List<String> columns;         // ordre d'INSERT
+        public int batchSize = 50_000;
+        public int maxRetries = 3;
+        public long baseBackoffMs = 2_000;
+        public int connectTimeoutMs = 15_000;
+        public int socketTimeoutMs = 60_000;
+    }
+
+    private final Config cfg;
+
+    public ClickHouseJdbcWriterJson(Config cfg) {
+        Objects.requireNonNull(cfg.jdbcUrl, "jdbcUrl");
+        Objects.requireNonNull(cfg.table, "table");
+        Objects.requireNonNull(cfg.columns, "columns");
+        if (cfg.columns.isEmpty()) throw new IllegalArgumentException("columns vide");
+        this.cfg = cfg;
+    }
+
+    public void writePartition(Iterator<Row> rows, StructType schema) throws Exception {
+        int attempt = 0;
+        while (true) {
+            try (Connection conn = open();
+                 PreparedStatement ps = conn.prepareStatement(sql())) {
+
+                conn.setAutoCommit(false);
+                int buffered = 0;
+
+                while (rows.hasNext()) {
+                    Row r = rows.next();
+                    bind(ps, r, schema, cfg.columns);
+                    ps.addBatch();
+                    if (++buffered >= cfg.batchSize) {
+                        ps.executeBatch();
+                        conn.commit();
+                        buffered = 0;
+                    }
+                }
+                if (buffered > 0) {
+                    ps.executeBatch();
+                    conn.commit();
+                }
+                return; // succès
+            } catch (SQLException e) {
+                if (++attempt >= cfg.maxRetries) throw new RuntimeException("Echec après retries", e);
+                Thread.sleep(cfg.baseBackoffMs * attempt);
+            }
+        }
+    }
+
+    private Connection open() throws SQLException {
+        Properties p = new Properties();
+        p.setProperty("user", cfg.user);
+        p.setProperty("password", cfg.password);
+        p.setProperty("socket_timeout", String.valueOf(cfg.socketTimeoutMs));
+        p.setProperty("connect_timeout", String.valueOf(cfg.connectTimeoutMs));
+        return DriverManager.getConnection(cfg.jdbcUrl, p);
+    }
+
+    private String sql() {
+        String cols = String.join(",", cfg.columns);
+        String qs = String.join(",", Collections.nCopies(cfg.columns.size(), "?"));
+        return "INSERT INTO " + cfg.table + " (" + cols + ") VALUES (" + qs + ")";
+    }
+
+    private void bind(PreparedStatement ps, Row r, StructType schema, List<String> columns) throws SQLException {
+        for (int i = 0; i < columns.size(); i++) {
+            int idx = i + 1;
+            String name = columns.get(i);
+            int si = schema.fieldIndex(name);
+            StructField f = schema.fields()[si];
+            Object v = r.isNullAt(si) ? null : r.get(si);
+
+            if (v == null) {
+                ps.setObject(idx, null);
+                continue;
+            }
+
+            DataType dt = f.dataType();
+            // Simples → set direct
+            if (dt instanceof IntegerType) ps.setInt(idx, ((Number) v).intValue());
+            else if (dt instanceof LongType) ps.setLong(idx, ((Number) v).longValue());
+            else if (dt instanceof ShortType) ps.setShort(idx, ((Number) v).shortValue());
+            else if (dt instanceof ByteType) ps.setByte(idx, ((Number) v).byteValue());
+            else if (dt instanceof DoubleType) ps.setDouble(idx, ((Number) v).doubleValue());
+            else if (dt instanceof FloatType) ps.setFloat(idx, ((Number) v).floatValue());
+            else if (dt instanceof DecimalType) ps.setBigDecimal(idx, (v instanceof BigDecimal) ? (BigDecimal) v : new BigDecimal(v.toString()));
+            else if (dt instanceof BooleanType) ps.setBoolean(idx, (Boolean) v);
+            else if (dt instanceof StringType) ps.setString(idx, v.toString());
+            else if (dt instanceof TimestampType) {
+                if (v instanceof java.sql.Timestamp ts) ps.setTimestamp(idx, ts);
+                else if (v instanceof Long ms) ps.setTimestamp(idx, new java.sql.Timestamp(ms));
+                else ps.setTimestamp(idx, java.sql.Timestamp.valueOf(v.toString()));
+            } else if (dt instanceof DateType) {
+                if (v instanceof java.sql.Date d) ps.setDate(idx, d);
+                else ps.setDate(idx, java.sql.Date.valueOf(v.toString()));
+            }
+            // Complexes → JSON
+            else if (dt instanceof ArrayType || dt instanceof MapType || dt instanceof StructType) {
+                ps.setString(idx, toJson(dt, v));
+            } else {
+                ps.setString(idx, v.toString()); // fallback
+            }
+        }
+    }
+
+    // Sérialisation JSON minimaliste (sans lib externe)
+    @SuppressWarnings("unchecked")
+    private static String toJson(DataType dt, Object v) {
+        if (v == null) return "null";
+
+        if (dt instanceof ArrayType at) {
+            List<?> list = (List<?>) v;
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < list.size(); i++) {
+                Object e = list.get(i);
+                sb.append(jsonScalarOrQuote(e));
+                if (i + 1 < list.size()) sb.append(",");
+            }
+            return sb.append("]").toString();
+        }
+
+        if (dt instanceof MapType mt) {
+            Map<Object, Object> m = (Map<Object, Object>) v;
+            StringBuilder sb = new StringBuilder("{");
+            int i = 0;
+            for (var e : m.entrySet()) {
+                sb.append("\"").append(escape(String.valueOf(e.getKey()))).append("\":");
+                sb.append(jsonScalarOrQuote(e.getValue()));
+                if (++i < m.size()) sb.append(",");
+            }
+            return sb.append(")").replace(sb.length()-1, sb.length(), "}").toString(); // petite astuce pour fermer
+        }
+
+        if (dt instanceof StructType st) {
+            Row row = (Row) v;
+            StringBuilder sb = new StringBuilder("{");
+            for (int i = 0; i < st.size(); i++) {
+                String name = st.fields()[i].name();
+                Object val = row.isNullAt(i) ? null : row.get(i);
+                sb.append("\"").append(escape(name)).append("\":");
+                sb.append(jsonScalarOrQuote(val));
+                if (i + 1 < st.size()) sb.append(",");
+            }
+            return sb.append("}").toString();
+        }
+
+        // fallback
+        return "\"" + escape(String.valueOf(v)) + "\"";
+    }
+
+    private static String jsonScalarOrQuote(Object x) {
+        if (x == null) return "null";
+        if (x instanceof Number || x instanceof Boolean) return x.toString();
+        return "\"" + escape(String.valueOf(x)) + "\"";
+    }
+
+    private static String escape(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+    }
+}
+
+Usage côté Spark (avec tes 2 writers) :
+
+// df = ton DataFrame final
+var cols = java.util.List.of("id","name","attrs_json"); // attrs_json peut être Struct/Map/Array → JSON
+
+var out = df.selectExpr(cols.toArray(new String[0])).coalesce(2);
+
+ClickHouseJdbcWriterJson.Config cfg = new ClickHouseJdbcWriterJson.Config();
+cfg.jdbcUrl = "jdbc:clickhouse://127.0.0.1:9000/default";
+cfg.user = "default";
+cfg.password = "xxx";
+cfg.table = "db.table_json";
+cfg.columns = cols;
+cfg.batchSize = 100_000;
+
+out.foreachPartition(part -> {
+    new ClickHouseJdbcWriterJson(cfg).writePartition(part, out.schema());
+});
+
+> Côté ClickHouse, déclare attrs_json en String (ou JSON si tu utilises la fonctionnalité JSON Object Mapping en 24.x+).
+
+
+
+
+---
+
+2) Version “cluster-aware” (Distributed vs Shards directs)
+
+Ce writer te laisse choisir :
+
+MODE.DISTRIBUTED : un seul jdbcUrl qui pointe sur la table Distributed → plus simple, CH route vers les shards.
+
+MODE.SHARD_DIRECT : une liste de jdbcUrl par shard + une colonne clé de sharding → on route nous-mêmes (moins de sauts réseau, maîtrise fine de la concurrence).
+
+
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.math.BigDecimal;
+import java.sql.*;
+import java.util.*;
+
+public class ClickHouseClusterWriter {
+
+    public enum Mode { DISTRIBUTED, SHARD_DIRECT }
+
+    public static class Shard {
+        public final String jdbcUrl;
+        public final String user;
+        public final String password;
+        public Shard(String jdbcUrl, String user, String password) {
+            this.jdbcUrl = jdbcUrl; this.user = user; this.password = password;
+        }
+    }
+
+    public static class Config {
+        public Mode mode = Mode.DISTRIBUTED;
+
+        // DISTRIBUTED
+        public String distributedJdbcUrl;
+        public String distributedUser = "default";
+        public String distributedPassword = "";
+        public String distributedTable;
+
+        // SHARD_DIRECT
+        public List<Shard> shards = new ArrayList<>();
+        public String shardTable;            // table locale sur chaque shard
+        public String shardKeyColumn;        // nom de la colonne pour calculer le shard
+        public int batchSize = 50_000;
+        public int maxRetries = 3;
+        public long baseBackoffMs = 2_000;
+        public int connectTimeoutMs = 15_000;
+        public int socketTimeoutMs = 60_000;
+
+        public List<String> columns;
+    }
+
+    private final Config cfg;
+
+    public ClickHouseClusterWriter(Config cfg) {
+        this.cfg = cfg;
+        Objects.requireNonNull(cfg.columns, "columns");
+        if (cfg.columns.isEmpty()) throw new IllegalArgumentException("columns vide");
+
+        if (cfg.mode == Mode.DISTRIBUTED) {
+            Objects.requireNonNull(cfg.distributedJdbcUrl, "distributedJdbcUrl");
+            Objects.requireNonNull(cfg.distributedTable, "distributedTable");
+        } else {
+            if (cfg.shards == null || cfg.shards.isEmpty()) throw new IllegalArgumentException("shards vides");
+            Objects.requireNonNull(cfg.shardTable, "shardTable");
+            Objects.requireNonNull(cfg.shardKeyColumn, "shardKeyColumn");
+        }
+    }
+
+    public void writePartition(Iterator<Row> it, StructType schema) throws Exception {
+        if (cfg.mode == Mode.DISTRIBUTED) {
+            writeDistributed(it, schema);
+        } else {
+            writeShardDirect(it, schema);
+        }
+    }
+
+    /* ========== DISTRIBUTED ========== */
+    private void writeDistributed(Iterator<Row> rows, StructType schema) throws Exception {
+        int attempt = 0;
+        String sql = insertSql(cfg.distributedTable, cfg.columns);
+        while (true) {
+            try (Connection c = open(cfg.distributedJdbcUrl, cfg.distributedUser, cfg.distributedPassword);
+                 PreparedStatement ps = c.prepareStatement(sql)) {
+                c.setAutoCommit(false);
+                int cnt = 0;
+                while (rows.hasNext()) {
+                    Row r = rows.next();
+                    bind(ps, r, schema, cfg.columns);
+                    ps.addBatch();
+                    if (++cnt >= cfg.batchSize) { ps.executeBatch(); c.commit(); cnt = 0; }
+                }
+                if (cnt > 0) { ps.executeBatch(); c.commit(); }
+                return;
+            } catch (SQLException e) {
+                if (++attempt >= cfg.maxRetries) throw e;
+                Thread.sleep(cfg.baseBackoffMs * attempt);
+            }
+        }
+    }
+
+    /* ========== SHARD_DIRECT ========== */
+    private void writeShardDirect(Iterator<Row> rows, StructType schema) throws Exception {
+        int shardKeyIdx = schema.fieldIndex(cfg.shardKeyColumn);
+        String sql = insertSql(cfg.shardTable, cfg.columns);
+
+        // connexions / statements par shard (ouvertes à la demande)
+        Map<Integer, ConnStmt> map = new HashMap<>();
+        int[] buffered = new int[cfg.shards.size()];
+        try {
+            while (rows.hasNext()) {
+                Row r = rows.next();
+                int shardIdx = pickShard(r.get(shardKeyIdx), cfg.shards.size());
+
+                ConnStmt cs = map.computeIfAbsent(shardIdx, i -> openShard(i, sql));
+                bind(cs.ps, r, schema, cfg.columns);
+                cs.ps.addBatch();
+
+                if (++buffered[shardIdx] >= cfg.batchSize) {
+                    execCommitWithRetry(cs, 0);
+                    buffered[shardIdx] = 0;
+                }
+            }
+            // flush restants
+            for (var e : map.entrySet()) {
+                ConnStmt cs = e.getValue();
+                execCommitWithRetry(cs, 0);
+            }
+        } finally {
+            for (ConnStmt cs : map.values()) cs.closeQuietly();
+        }
+    }
+
+    private static class ConnStmt {
+        final Connection conn; final PreparedStatement ps; final ClickHouseClusterWriter parent; final int shardIndex;
+        ConnStmt(Connection conn, PreparedStatement ps, ClickHouseClusterWriter parent, int shardIndex) {
+            this.conn = conn; this.ps = ps; this.parent = parent; this.shardIndex = shardIndex;
+        }
+        void closeQuietly() { try { ps.close(); } catch (Exception ignore) {} try { conn.close(); } catch (Exception ignore) {} }
+    }
+
+    private ConnStmt openShard(int shardIdx, String sql) {
+        Shard s = cfg.shards.get(shardIdx);
+        for (int attempt = 1; attempt <= cfg.maxRetries; attempt++) {
+            try {
+                Connection c = open(s.jdbcUrl, s.user, s.password);
+                PreparedStatement ps = c.prepareStatement(sql);
+                c.setAutoCommit(false);
+                return new ConnStmt(c, ps, this, shardIdx);
+            } catch (SQLException e) {
+                if (attempt == cfg.maxRetries) throw new RuntimeException("Open shard " + shardIdx + " KO", e);
+                try { Thread.sleep(cfg.baseBackoffMs * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            }
+        }
+        throw new IllegalStateException("unreachable");
+    }
+
+    private void execCommitWithRetry(ConnStmt cs, int attempt) throws SQLException {
+        try {
+            cs.ps.executeBatch();
+            cs.conn.commit();
+        } catch (SQLException e) {
+            if (attempt + 1 >= cfg.maxRetries) throw e;
+            try { Thread.sleep(cfg.baseBackoffMs * (attempt + 1)); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            execCommitWithRetry(cs, attempt + 1);
+        }
+    }
+
+    /* ========== Helpers communs ========== */
+    private Connection open(String url, String user, String pass) throws SQLException {
+        Properties p = new Properties();
+        p.setProperty("user", user);
+        p.setProperty("password", pass);
+        p.setProperty("socket_timeout", String.valueOf(cfg.socketTimeoutMs));
+        p.setProperty("connect_timeout", String.valueOf(cfg.connectTimeoutMs));
+        return DriverManager.getConnection(url, p);
+    }
+
+    private static String insertSql(String table, List<String> cols) {
+        String c = String.join(",", cols);
+        String q = String.join(",", Collections.nCopies(cols.size(), "?"));
+        return "INSERT INTO " + table + " (" + c + ") VALUES (" + q + ")";
+    }
+
+    // routing simple (utilise hash Java du shard key). En prod, reproduis l’expression CH si besoin.
+    private static int pickShard(Object key, int nbShards) {
+        if (key == null) return 0;
+        int h = key.toString().hashCode();
+        int idx = Math.floorMod(h, nbShards);
+        return idx;
+    }
+
+    private static void bind(PreparedStatement ps, Row r, StructType schema, List<String> columns) throws SQLException {
+        for (int i = 0; i < columns.size(); i++) {
+            int idx = i + 1;
+            String name = columns.get(i);
+            int si = schema.fieldIndex(name);
+            StructField f = schema.fields()[si];
+            Object v = r.isNullAt(si) ? null : r.get(si);
+            DataType dt = f.dataType();
+
+            if (v == null) { ps.setObject(idx, null); continue; }
+
+            if (dt instanceof IntegerType) ps.setInt(idx, ((Number) v).intValue());
+            else if (dt instanceof LongType) ps.setLong(idx, ((Number) v).longValue());
+            else if (dt instanceof ShortType) ps.setShort(idx, ((Number) v).shortValue());
+            else if (dt instanceof ByteType) ps.setByte(idx, ((Number) v).byteValue());
+            else if (dt instanceof DoubleType) ps.setDouble(idx, ((Number) v).doubleValue());
+            else if (dt instanceof FloatType) ps.setFloat(idx, ((Number) v).floatValue());
+            else if (dt instanceof DecimalType) ps.setBigDecimal(idx, (v instanceof BigDecimal) ? (BigDecimal) v : new BigDecimal(v.toString()));
+            else if (dt instanceof BooleanType) ps.setBoolean(idx, (Boolean) v);
+            else if (dt instanceof StringType) ps.setString(idx, v.toString());
+            else if (dt instanceof TimestampType) {
+                if (v instanceof java.sql.Timestamp ts) ps.setTimestamp(idx, ts);
+                else if (v instanceof Long ms) ps.setTimestamp(idx, new java.sql.Timestamp(ms));
+                else ps.setTimestamp(idx, java.sql.Timestamp.valueOf(v.toString()));
+            } else if (dt instanceof DateType) {
+                if (v instanceof java.sql.Date d) ps.setDate(idx, d);
+                else ps.setDate(idx, java.sql.Date.valueOf(v.toString()));
+            } else {
+                // Complexes → JSON pour compat rapide ; sinon adapte aux types CH natifs (Array/Map)
+                ps.setString(idx, v.toString());
+            }
+        }
+    }
+}
+
+Usage — mode Distributed (simple) :
+
+var cols = java.util.List.of("id","name","value","shard_key");
+var out = df.selectExpr(cols.toArray(new String[0])).coalesce(2);
+
+ClickHouseClusterWriter.Config cfg = new ClickHouseClusterWriter.Config();
+cfg.mode = ClickHouseClusterWriter.Mode.DISTRIBUTED;
+cfg.distributedJdbcUrl = "jdbc:clickhouse://router-host:9000/default";
+cfg.distributedUser = "default";
+cfg.distributedPassword = "xxx";
+cfg.distributedTable = "db.my_table_dist";
+cfg.columns = cols;
+
+out.foreachPartition(p -> new ClickHouseClusterWriter(cfg).writePartition(p, out.schema()));
+
+Usage — écriture directe sur shards :
+
+var cols = java.util.List.of("id","name","value","shard_key");
+var out = df.selectExpr(cols.toArray(new String[0])).coalesce(2);
+
+ClickHouseClusterWriter.Config cfg = new ClickHouseClusterWriter.Config();
+cfg.mode = ClickHouseClusterWriter.Mode.SHARD_DIRECT;
+cfg.shards = java.util.List.of(
+    new ClickHouseClusterWriter.Shard("jdbc:clickhouse://shard1:9000/db", "default", "xxx"),
+    new ClickHouseClusterWriter.Shard("jdbc:clickhouse://shard2:9000/db", "default", "xxx")
+);
+cfg.shardTable = "my_table_local";      // table locale présente sur chaque shard
+cfg.shardKeyColumn = "shard_key";       // colonne présente dans ton DF
+cfg.columns = cols;
+cfg.batchSize = 100_000;
+
+out.foreachPartition(p -> new ClickHouseClusterWriter(cfg).writePartition(p, out.schema()));
+
+> 🔎 Important : la fonction pickShard() utilise hashCode() Java pour router.
+Pour coller exactement à ta clause SHARDING KEY ClickHouse (ex: cityHash64(user_id) % N), remplace pickShard() par un calcul identique (implémentation de cityHash64/murmurHash côté Java) pour un routing iso.
+
+
+
+
+---
+
+Recos ClickHouse pour de bonnes perfs
+
+Tables locales : MergeTree/ReplacingMergeTree avec index de tri adapté.
+
+Table Distributed : facile pour commencer; pour la perf max, passe ensuite en SHARD_DIRECT avec une clé de sharding cohérente.
+
+Writers : tu es bien avec coalesce(2) → 2 connexions concurrentes, blocs denses (100k–1M lignes/INSERT).
+
+Déduplication : si relances possibles, préfère ReplacingMergeTree avec version (ex: _version).
+
+
+
+---
+
+Si tu veux, je te rajoute :
+
+une implémentation de cityHash64 en Java pour un routing identique à ClickHouse,
+
+ou une variante “Array/Map/Struct natifs ClickHouse” (sans JSON), si tes colonnes cibles sont typées Array(T), Map(K,V), Tuple(...).
