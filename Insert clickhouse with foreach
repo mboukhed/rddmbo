@@ -1,0 +1,145 @@
+Excellente question 👌 — et c’est crucial quand tu écris dans ClickHouse depuis Spark ou JDBC, car les erreurs de type
+Connection reset, No client available, ou SocketTimeoutException peuvent apparaître sur de gros volumes ou longues transactions.
+
+
+---
+
+🎯 Objectif
+
+Mettre en place un retry automatique et robuste en cas de perte de connexion ClickHouse (reset TCP, timeout, etc.), sans casser ton job Spark complet.
+
+
+---
+
+🧩 1️⃣ En Spark (niveau DataFrameWriter)
+
+🧠 Si tu utilises le ClickHouse Spark Connector (V2)
+
+Tu peux activer le retry automatique via les options internes :
+
+df.write()
+  .format("clickhouse")
+  .option("url", "clickhouse://localhost:8123/default")
+  .option("user", "default")
+  .option("password", "xxx")
+  // paramètres de retry
+  .option("retry", "3")                   // nombre de tentatives
+  .option("retry_interval", "3s")         // délai entre tentatives
+  .option("connect_timeout", "15s")
+  .option("socket_timeout", "60s")
+  .mode("append")
+  .save();
+
+👉 Le connecteur gère un reconnect transparent à chaque tâche Spark,
+ce qui évite d’échouer le job entier pour un seul worker.
+
+
+---
+
+☕ 2️⃣ En JDBC (pur Java)
+
+Si tu passes par un ClickHouseConnection via JDBC, tu peux implémenter un retry manuel autour de ton exécution SQL.
+
+Exemple simple et propre :
+
+public void executeWithRetry(String sql, int maxRetries) {
+    int attempt = 0;
+    while (true) {
+        try (Connection conn = DriverManager.getConnection(
+                "jdbc:clickhouse://localhost:9000/default", "default", "xxx");
+             Statement stmt = conn.createStatement()) {
+
+            stmt.execute(sql);
+            return; // succès
+        } catch (SQLException e) {
+            attempt++;
+            if (attempt >= maxRetries) {
+                throw new RuntimeException("Echec après " + maxRetries + " tentatives", e);
+            }
+            System.err.println("Connexion ClickHouse échouée, retry " + attempt + "/" + maxRetries);
+            try {
+                Thread.sleep(3000L * attempt); // backoff progressif
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+}
+
+✅ Ce bloc :
+
+Gère les Connection reset by peer, SocketTimeoutException, No route to host…
+
+Ferme proprement chaque connexion avant retry.
+
+Évite de saturer ClickHouse par des boucles trop rapides.
+
+
+
+---
+
+🔁 3️⃣ En Spark + JDBC (write en batch)
+
+Si tu écris dans ClickHouse via JDBC (sans le connecteur natif) :
+
+df.foreachPartition(rows -> {
+    int retries = 3;
+    while (retries > 0) {
+        try (Connection conn = DriverManager.getConnection(jdbcUrl, user, password)) {
+            conn.setAutoCommit(false);
+            PreparedStatement ps = conn.prepareStatement(insertSql);
+            for (Row r : rows) {
+                // ps.set...()
+                ps.addBatch();
+            }
+            ps.executeBatch();
+            conn.commit();
+            break; // succès
+        } catch (SQLException e) {
+            retries--;
+            System.err.println("Retry ClickHouse write, remaining: " + retries + " - " + e.getMessage());
+            Thread.sleep(2000L);
+        }
+    }
+});
+
+✅ Ce code gère :
+
+La reconnexion automatique par partition Spark.
+
+Un backoff progressif.
+
+Une reprise propre même après un “connection reset”.
+
+
+
+---
+
+🧠 4️⃣ En production (bonnes pratiques)
+
+Bon réflexe	Description
+
+Connexion courte par partition	Ouvre/ferme une connexion par batch, pas globale
+Timeout raisonnable	connect_timeout=15s, socket_timeout=60s
+Limiter le parallélisme	Trop de writers saturent ClickHouse (évite > 8 connexions)
+Retry exponentiel	Attendre un peu plus à chaque tentative
+Logging clair	Log les query_id ou batchs échoués
+
+
+
+---
+
+🧾 En résumé
+
+Situation	Solution
+
+Spark Connector v2	.option("retry", "3").option("retry_interval", "3s")
+JDBC simple	Boucle try/catch avec backoff (voir code)
+Spark foreachPartition JDBC	Retry manuel par partition
+Production stable	Timeout, peu de writers, retry exponentiel
+
+
+
+---
+
+Souhaites-tu que je te montre un exemple complet Java Spark (connector ClickHouse v2) avec gestion automatique du retry, des logs et du coalesce(2) pour ton cas précis ?
