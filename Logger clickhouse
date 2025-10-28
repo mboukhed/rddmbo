@@ -1,0 +1,100 @@
+Excellente question 👌 — pour activer le mode debug de l’intégration ClickHouse ↔ Spark, tu peux le faire à plusieurs niveaux : Spark, ClickHouse-client, et ClickHouse-Spark-connector.
+Voici les méthodes les plus efficaces selon ton contexte :
+
+
+---
+
+🧩 1. Activer le DEBUG dans Spark (niveau Java / log4j)
+
+Ajoute dans ton log4j.properties (ou log4j2.xml) :
+
+# Log général Spark
+log4j.rootCategory=INFO, console
+
+# Active le debug ClickHouse Spark Connector
+log4j.logger.org.apache.spark.sql.clickhouse=DEBUG
+log4j.logger.com.clickhouse.spark=DEBUG
+log4j.logger.com.clickhouse.client=DEBUG
+log4j.logger.ru.yandex.clickhouse=DEBUG
+log4j.logger.com.github.housepower=DEBUG
+
+> 📁 Fichier : src/main/resources/log4j.properties
+
+
+
+
+---
+
+⚙️ 2. Activer le DEBUG par code (si tu ne veux pas modifier log4j)
+
+Tu peux forcer le niveau de log via code au démarrage de ton SparkSession :
+
+import org.apache.log4j.Logger;
+import org.apache.log4j.Level;
+
+Logger.getLogger("org.apache.spark.sql.clickhouse").setLevel(Level.DEBUG);
+Logger.getLogger("com.clickhouse.spark").setLevel(Level.DEBUG);
+Logger.getLogger("com.clickhouse.client").setLevel(Level.DEBUG);
+
+
+---
+
+🧠 3. Côté Spark submit ou test (paramètres)
+
+Ajoute dans ta commande spark-submit ou dans ton test Java :
+
+--conf "spark.executor.extraJavaOptions=-Dlog4j.configuration=log4j.properties"
+--conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=log4j.properties"
+
+ou, directement :
+
+--conf "spark.driver.extraJavaOptions=-Dlog.level=DEBUG"
+
+
+---
+
+🧾 4. Vérifier les logs ClickHouse côté serveur
+
+Sur ton pod ClickHouse (ou instance), tu peux activer le niveau debug dans config.xml :
+
+<yandex>
+  <logger>
+    <level>debug</level>
+    <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+    <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+  </logger>
+</yandex>
+
+Puis redémarre le pod :
+
+kubectl rollout restart statefulset clickhouse -n <namespace>
+
+
+---
+
+🧩 5. Option Spark Connector spécifique (si tu utilises clickhouse-spark-connector)
+
+Tu peux aussi ajouter :
+
+spark.read()
+     .format("clickhouse")
+     .option("logLevel", "DEBUG")
+     .option("verbose", "true")
+     ...
+
+ou dans ta config Spark :
+
+--conf "spark.sql.clickhouse.log.level=DEBUG"
+
+
+---
+
+💡 Astuce pratique : inspection des logs Spark côté exécuteurs
+
+Dans le Spark UI (souvent sur localhost:4040 si local), tu verras les logs détaillés com.clickhouse.spark.client et com.clickhouse.spark.result si tout est bien activé.
+
+
+---
+
+Souhaites-tu que je te montre un exemple complet de test Java Spark ClickHouse avec DEBUG activé (y compris configuration SparkSession et log4j) ?
+Ça te permettrait de voir ligne par ligne ce que fait le connecteur.
