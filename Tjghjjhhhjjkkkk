@@ -1,0 +1,56 @@
+Tu as un ClassNotFoundException: org.codehaus.stax2.XMLInputFactory2 sur AKS, alors qu’en local ça passe.
+Cette classe vient de stax2-api / Woodstox (dépendance de jackson-dataformat-xml). En local ton IDE a tout sur le classpath, mais sur AKS le jar exécuté ne contient pas Woodstox/stax2-api, donc Spark ne la trouve pas.
+
+Fix rapide (au choix)
+
+1) Mettre les libs dans ton fat-jar (recommandé)
+
+Ajoute explicitement ces deps (pas de scope provided), puis rebuild ton shade/assembly :
+
+<dependency>
+  <groupId>com.fasterxml.jackson.dataformat</groupId>
+  <artifactId>jackson-dataformat-xml</artifactId>
+  <version>${jackson.version}</version>
+</dependency>
+<dependency>
+  <groupId>com.fasterxml.woodstox</groupId>
+  <artifactId>woodstox-core</artifactId>
+  <version>6.5.1</version>
+</dependency>
+<dependency>
+  <groupId>org.codehaus.woodstox</groupId>
+  <artifactId>stax2-api</artifactId>
+  <version>4.2.1</version>
+</dependency>
+
+(et assure-toi que ton maven-shade-plugin embarque bien ces libs).
+
+2) Les fournir à l’exécution
+
+Si tu ne rebuilds pas le jar, passe-les à Spark :
+
+--packages com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.16.1,\
+com.fasterxml.woodstox:woodstox-core:6.5.1,\
+org.codehaus.woodstox:stax2-api:4.2.1
+
+Avec Spark Operator/YAML: mets-les dans spec.deps.packages ou --packages.
+
+Si ton cluster n’a pas internet, monte un repo interne ou utilise --jars vers des .jar que tu déposes dans l’image/volume.
+
+
+3) (optionnel) Priorité au classpath appli
+
+Si tu utilises un fat-jar et veux éviter les conflits :
+
+--conf spark.driver.userClassPathFirst=true
+--conf spark.executor.userClassPathFirst=true
+
+Pourquoi ça plante uniquement sur AKS ?
+
+En local, Maven/IDE apporte les dépendances transitives automatiquement.
+
+En AKS, seul ton jar (et ce que tu fournis avec --packages/--jars) est vu.
+Comme XMLInputFactory2 n’est pas dedans, ClassNotFound.
+
+
+Applique l’une des deux solutions (idéalement le fat-jar avec Woodstox + stax2-api) et l’erreur disparaîtra.
