@@ -1,0 +1,94 @@
+Très bon réflexe 👌 — les scopes Azure sont essentiels pour comprendre à quoi ton jeton d’accès (AccessToken) donne droit.
+
+Voici un récapitulatif clair et complet 👇
+
+
+---
+
+🧩 1️⃣ Qu’est-ce qu’un “scope” Azure ?
+
+Un scope définit la ressource cible pour laquelle ton jeton OAuth2 est valide.
+C’est ce que tu passes dans :
+
+new TokenRequestContext().addScopes("https://vault.azure.net/.default");
+
+👉 En gros :
+
+https://vault.azure.net/.default → pour Azure Key Vault
+
+https://storage.azure.com/.default → pour Azure Storage
+
+https://management.azure.com/.default → pour Azure Resource Manager (ARM)
+
+
+
+---
+
+🗂️ 2️⃣ Enum typique de scopes Azure
+
+Voici une enum Java que tu peux utiliser dans ton projet 👇
+
+public enum AzureScope {
+
+    KEY_VAULT("https://vault.azure.net/.default"),
+    STORAGE("https://storage.azure.com/.default"),
+    RESOURCE_MANAGER("https://management.azure.com/.default"),
+    GRAPH_API("https://graph.microsoft.com/.default"),
+    DATALAKE("https://datalake.azure.net/.default"),
+    SERVICE_BUS("https://servicebus.azure.net/.default"),
+    EVENT_HUBS("https://eventhubs.azure.net/.default"),
+    SQL_DATABASE("https://database.windows.net/.default"),
+    SIGNALR("https://signalr.azure.com/.default"),
+    CONTAINER_REGISTRY("https://management.azure.com/.default"),
+    MONITOR("https://monitor.azure.com/.default");
+
+    private final String scope;
+
+    AzureScope(String scope) {
+        this.scope = scope;
+    }
+
+    public String getScope() {
+        return scope;
+    }
+}
+
+
+---
+
+🧠 3️⃣ Utilisation
+
+Exemple pour récupérer un jeton valide :
+
+TokenCredential credential = new DefaultAzureCredentialBuilder().build();
+
+AccessToken token = credential
+    .getToken(new TokenRequestContext()
+        .addScopes(AzureScope.KEY_VAULT.getScope()))
+    .block();
+
+System.out.println("Access Token = " + token.getToken());
+
+
+---
+
+🧾 4️⃣ Scopes Azure les plus utilisés (référence rapide)
+
+Service Azure	Scope à utiliser
+
+Key Vault	https://vault.azure.net/.default
+Storage / ADLS Gen2	https://storage.azure.com/.default
+Resource Manager (ARM)	https://management.azure.com/.default
+Microsoft Graph	https://graph.microsoft.com/.default
+Event Hubs	https://eventhubs.azure.net/.default
+Service Bus	https://servicebus.azure.net/.default
+Azure SQL Database	https://database.windows.net/.default
+Log Analytics / Monitor	https://monitor.azure.com/.default
+Container Registry	https://management.azure.com/.default
+Data Lake (v1)	https://datalake.azure.net/.default
+
+
+
+---
+
+Souhaites-tu que je t’ajoute aussi une factory Java qui détecte automatiquement le scope en fonction du service que tu appelles (par exemple KeyVaultClient, BlobClient, etc.) ?
