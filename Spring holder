@@ -1,0 +1,135 @@
+Excellent réflexe 👌 — c’est exactement le cas classique où Spring et le code statique se croisent.
+➡️ Une méthode statique ne peut pas recevoir d’injection Spring directe (@Autowired impossible).
+Mais il existe 3 solutions propres selon ton architecture et ton niveau de contrôle sur la classe.
+
+
+---
+
+🧩 1️⃣ — Utiliser un “SpringContextHolder” (propre et universel)
+
+Tu crées un bean utilitaire qui garde une référence statique au contexte Spring :
+
+import org.springframework.beans.BeansException;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.stereotype.Component;
+
+@Component
+public class SpringContextHolder implements ApplicationContextAware {
+
+    private static ApplicationContext context;
+
+    @Override
+    public void setApplicationContext(ApplicationContext ctx) throws BeansException {
+        context = ctx;
+    }
+
+    public static <T> T getBean(Class<T> clazz) {
+        return context.getBean(clazz);
+    }
+
+    public static Object getBean(String name) {
+        return context.getBean(name);
+    }
+}
+
+✅ Une fois ce bean initialisé au démarrage, tu peux récupérer n’importe quel bean Spring depuis une méthode statique :
+
+public class ParquetWriterUtil {
+
+    public static void writeAndExport(Dataset<Row> df, String path) {
+        df.write().parquet(path);
+
+        // Récupération d’un bean Spring dans une méthode statique
+        ClickHouseExporter exporter = SpringContextHolder.getBean(ClickHouseExporter.class);
+        exporter.export(df);
+    }
+}
+
+💡 Avantage :
+
+Pas besoin de casser ton code.
+
+Récupération propre, contrôlée et thread-safe.
+
+Compatible même avec tes tests Cucumber/SpringCore non-boot.
+
+
+
+---
+
+🧩 2️⃣ — Injection indirecte via Singleton non statique
+
+Si tu peux légèrement refactoriser la classe :
+
+@Component
+public class ParquetWriterService {
+    private final ClickHouseExporter exporter;
+
+    @Autowired
+    public ParquetWriterService(ClickHouseExporter exporter) {
+        this.exporter = exporter;
+    }
+
+    public static ParquetWriterService instance;
+
+    @PostConstruct
+    public void init() {
+        instance = this;
+    }
+
+    public static void writeAndExport(Dataset<Row> df, String path) {
+        df.write().parquet(path);
+        instance.exporter.export(df);
+    }
+}
+
+✅ Les anciens appels ParquetWriterService.writeAndExport(...) restent valides,
+mais tu bénéficies d’un accès Spring propre.
+
+
+---
+
+🧩 3️⃣ — Passer le bean via paramètre d’environnement (si vraiment statique “pur”)
+
+Si ton code statique est chargé avant le contexte Spring (ex. dans un Spark job “pur”),
+tu peux passer le bean via une factory statique au démarrage :
+
+ParquetWriterUtil.init(clickHouseExporter);
+ParquetWriterUtil.write(df, path);
+
+avec :
+
+public class ParquetWriterUtil {
+    private static ClickHouseExporter exporter;
+
+    public static void init(ClickHouseExporter exp) {
+        exporter = exp;
+    }
+}
+
+💡 Pratique pour tes tests unitaires Spark hors Spring, mais plus manuel.
+
+
+---
+
+✅ En résumé
+
+Besoin	Solution	Impact
+
+Accéder à un bean Spring depuis une méthode statique	SpringContextHolder ✅	aucune modif majeure
+Tu veux rester “Spring-pur”	@PostConstruct + instance statique	très propre
+Pas de Spring (exécution Spark standalone)	init(exporter) manuel	simple, hors contexte
+
+
+
+---
+
+👉 Recommandation claire pour ton cas :
+
+> Crée un petit SpringContextHolder (solution 1).
+Tu gardes ta méthode statique intacte et tu récupères proprement le bean dont tu as besoin (ClickHouseExporter, VaultClient, etc.).
+
+
+
+Souhaites-tu que je t’écrive une version exactement adaptée à ton projet Spark Core non-Boot (sans dépendance Spring Boot, juste ApplicationContext standard) ?
