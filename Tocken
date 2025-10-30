@@ -1,0 +1,56 @@
+Oui. Le plus propre est de garder l’objet TokenCredential dans ton code et lui demander un jeton (AccessToken) quand tu en as besoin.
+L’Azure Identity SDK met déjà en cache les jetons et les renouvelle tout seul — pas besoin de “récupérer” un token depuis Key Vault.
+
+1) AKS + Managed/Workload Identity (recommandé)
+
+import com.azure.identity.*;
+import com.azure.core.credential.*;
+import com.azure.core.credential.TokenRequestContext;
+
+TokenCredential cred =
+    new WorkloadIdentityCredentialBuilder()   // ou ManagedIdentityCredentialBuilder() si MI classique
+      .build();
+
+// Exemple: jeton pour Key Vault (scope)
+AccessToken t = cred.getToken(
+    new TokenRequestContext().addScopes("https://vault.azure.net/.default")
+).block();
+
+// À réutiliser pour une lib HTTP externe
+String bearer = t.getToken();           // "eyJ0eXAiOiJKV1QiL..."
+OffsetDateTime exp = t.getExpiresAt();  // date d’expiration
+
+2) Si tu stockes un SPN (clientId/secret) dans Key Vault
+
+Récupère une fois le secret, construis un ClientSecretCredential, puis réutilise la même cred partout.
+
+// 2.1 lire le secret depuis Key Vault (avec une cred "sûre", ex. Workload Identity)
+SecretClient kv = new SecretClientBuilder().vaultUrl(vaultUrl).credential(cred).buildClient();
+String clientId = kv.getSecret("spn-client-id").getValue();
+String clientSecret = kv.getSecret("spn-client-secret").getValue();
+String tenantId = kv.getSecret("spn-tenant-id").getValue();
+
+// 2.2 construire la crédential SPN
+TokenCredential spnCred = new ClientSecretCredentialBuilder()
+    .tenantId(tenantId).clientId(clientId).clientSecret(clientSecret).build();
+
+// 2.3 demander des jetons quand tu veux (caching auto)
+AccessToken t = spnCred.getToken(
+    new TokenRequestContext().addScopes("https://management.azure.com/.default")
+).block();
+
+À savoir
+
+Scopes courants :
+Key Vault → https://vault.azure.net/.default
+Storage → https://storage.azure.com/.default
+ARM → https://management.azure.com/.default
+
+Ne loggue jamais le token ni le secret SPN.
+
+Inutile d’“extraire” le token d’un client (ex. SecretClient) : garde la même TokenCredential et appelle getToken(...) où tu veux.
+
+Côté Spark, crée la TokenCredential dans le driver et/ou dans chaque executor (le cache est process-local). Éviter de diffuser un token via Broadcast (risque sécurité et expiration).
+
+
+Si tu me dis quel service tu veux cibler (KV, Storage, ARM…), je te donne la ligne scope exacte et où brancher le bearer dans ta lib.
