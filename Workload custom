@@ -1,0 +1,97 @@
+Exactement 💪 — tu veux rester en mode “token manuel” (pour ne plus dépendre des SPN du Vault),
+mais gérer le renouvellement automatiquement pendant que Spark lit/écrit.
+
+👉 Voici la seule solution propre et réaliste dans ce cas :
+tu construis un AccessTokenProvider custom (classe Java) que Spark appelle à chaque besoin de token.
+
+
+---
+
+✅ 1️⃣ Principe simple
+
+Spark peut utiliser une classe personnalisée qui implémente :
+
+org.apache.hadoop.fs.azurebfs.oauth2.AccessTokenProvider
+
+👉 Et à chaque fois que Spark a besoin d’un token, il appelle ta méthode :
+
+public String getAccessToken()
+
+Donc tu peux régénérer un nouveau token Workload Identity à la volée,
+et Spark le réutilise automatiquement pendant tout le job.
+
+
+---
+
+🧩 2️⃣ Exemple concret (classe Java simple)
+
+package com.example.azure;
+
+import com.azure.core.credential.AccessToken;
+import com.azure.core.credential.TokenCredential;
+import com.azure.identity.WorkloadIdentityCredentialBuilder;
+import com.azure.core.credential.TokenRequestContext;
+import org.apache.hadoop.fs.azurebfs.oauth2.AccessTokenProvider;
+
+public class WorkloadTokenProvider extends AccessTokenProvider {
+
+    private static final String SCOPE = "https://storage.azure.com/.default";
+    private static final TokenCredential CREDENTIAL =
+        new WorkloadIdentityCredentialBuilder().build();
+
+    @Override
+    public String getAccessToken() {
+        AccessToken token = CREDENTIAL
+            .getToken(new TokenRequestContext().addScopes(SCOPE))
+            .block();
+        return token.getToken();
+    }
+
+    @Override
+    public long getExpiryTime() {
+        // Spark peut utiliser l'expiration pour savoir quand rafraîchir
+        AccessToken token = CREDENTIAL
+            .getToken(new TokenRequestContext().addScopes(SCOPE))
+            .block();
+        return token.getExpiresAt().toEpochMilli();
+    }
+}
+
+
+---
+
+⚙️ 3️⃣ Configuration Spark
+
+Dans ton spark-defaults.conf ou ton code :
+
+fs.azure.account.auth.type.<account>.dfs.core.windows.net=OAuth
+fs.azure.account.oauth.provider.type.<account>.dfs.core.windows.net=com.example.azure.WorkloadTokenProvider
+
+Spark appellera ta classe régulièrement → elle ira chercher un nouveau token Workload Identity à chaque expiration.
+
+
+---
+
+💪 4️⃣ Avantages
+
+✅ Aucun secret SPN
+✅ Token toujours valide (même sur 8h, 12h, etc.)
+✅ Pas besoin de relancer le job
+✅ Compatible avec ton AKS Workload actuel
+
+
+---
+
+⚠️ À noter
+
+Ton token reste valide ~1h → Spark rappellera getAccessToken() automatiquement.
+
+Cette classe ne dépend que du SDK Azure standard (azure-identity).
+
+Tu peux la mettre dans ton JAR “core” ou “common” et l’utiliser partout.
+
+
+
+---
+
+Tu veux que je te génère la version complète avec import Maven et test local (que tu puisses directement coller dans ton projet Spark) ?
