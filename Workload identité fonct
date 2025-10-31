@@ -1,0 +1,82 @@
+Excellent 👏
+Si ton Workload Identity marche maintenant, c’est une très bonne nouvelle — ça veut dire que ton pod AKS récupère bien un token fédéré et peut s’authentifier sans SPN ni secret 🎯
+
+Voici un petit récap’ rapide pour que tu saches exactement pourquoi ça fonctionne et comment vérifier que tout est propre 👇
+
+
+---
+
+✅ 1️⃣ Pourquoi ça marche
+
+Ton cluster AKS et ton pod ont été configurés pour utiliser Azure Workload Identity.
+Du coup :
+
+Kubernetes monte automatiquement un token fédéré dans ton pod :
+
+/var/run/secrets/azure/tokens/azure-identity-token
+
+Et expose ces variables d’environnement :
+
+AZURE_TENANT_ID=<ton-tenant-id>
+AZURE_CLIENT_ID=<client-id-de-ton-identity>
+AZURE_FEDERATED_TOKEN_FILE=/var/run/secrets/azure/tokens/azure-identity-token
+
+Le SDK Azure Java (via WorkloadIdentityCredentialBuilder ou DefaultAzureCredentialBuilder) lit ces variables et obtient un Access Token valide auprès d’Azure AD.
+
+
+🎯 Résultat : ton code s’exécute dans AKS sans client secret ni SPN, de manière 100 % managée et sécurisée.
+
+
+---
+
+🔍 2️⃣ Pour vérifier que tout est OK
+
+Dans ton pod :
+
+env | grep AZURE
+ls /var/run/secrets/azure/tokens
+
+Tu dois voir quelque chose comme :
+
+AZURE_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+AZURE_CLIENT_ID=yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
+AZURE_FEDERATED_TOKEN_FILE=/var/run/secrets/azure/tokens/azure-identity-token
+
+Et le fichier doit exister :
+
+azure-identity-token
+
+
+---
+
+⚙️ 3️⃣ Dans ton code Java
+
+Tu peux vérifier que le credential est bien lu :
+
+TokenCredential credential = new WorkloadIdentityCredentialBuilder().build();
+AccessToken token = credential.getToken(
+    new TokenRequestContext().addScopes("https://vault.azure.net/.default")
+).block();
+
+System.out.println("Access token obtenu : " + token.getToken().substring(0, 20) + "...");
+
+Si ça passe ✅ sans erreur, tu es 100 % configuré.
+
+
+---
+
+💡 4️⃣ Bonnes pratiques
+
+Ne mélange pas SPN et Workload Identity dans le même pod.
+
+Si tu veux tester localement → utilise DefaultAzureCredentialBuilder() (qui essaiera ton az login).
+
+En AKS → préfère WorkloadIdentityCredentialBuilder().
+
+Gère tes accès Key Vault avec les rôles RBAC : Key Vault Secrets User ou Key Vault Reader.
+
+
+
+---
+
+Souhaites-tu que je te montre comment faire un fallback automatique dans ton code Java (utiliser WorkloadIdentityCredential dans AKS et DefaultAzureCredential ailleurs) ?
