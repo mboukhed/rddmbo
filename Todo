@@ -1,0 +1,94 @@
+Excellente question 💪 et ta réflexion est 100 % juste.
+
+👉 Non, tu n’as pas besoin de recréer plein de classes “provider” identiques.
+Tu peux faire une seule classe générique qui sait changer de scope selon le service (Vault, Storage, Graph, etc.).
+
+
+---
+
+✅ 1️⃣ Version générique unique
+
+package com.yourpkg.credential;
+
+import com.azure.core.credential.AccessToken;
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.identity.WorkloadIdentityCredentialBuilder;
+import org.apache.hadoop.fs.azurebfs.oauth2.AccessTokenProvider;
+import org.apache.hadoop.fs.azurebfs.oauth2.AzureADToken;
+
+import java.io.IOException;
+
+public class WorkloadTokenProvider extends AccessTokenProvider {
+
+    private static final TokenCredential CREDENTIAL =
+            new WorkloadIdentityCredentialBuilder().build();
+
+    // Scope par défaut (ADLS / Storage)
+    private static final String DEFAULT_SCOPE = "https://storage.azure.com/.default";
+
+    @Override
+    protected AzureADToken refreshToken() throws IOException {
+        return getAzureADToken(DEFAULT_SCOPE);
+    }
+
+    // 👉 Méthode réutilisable pour n'importe quel service Azure
+    public static AzureADToken getAzureADToken(String scope) throws IOException {
+        try {
+            AccessToken token = CREDENTIAL
+                    .getToken(new TokenRequestContext().addScopes(scope))
+                    .block();
+
+            long expiry = token.getExpiresAt().toInstant().toEpochMilli();
+            return new AzureADToken(token.getToken(), expiry);
+        } catch (Exception e) {
+            throw new IOException("Failed to get token for scope: " + scope, e);
+        }
+    }
+}
+
+
+---
+
+⚙️ 2️⃣ Utilisation pour Spark (ADLS)
+
+fs.azure.account.auth.type.<account>.dfs.core.windows.net=OAuth
+fs.azure.account.oauth.provider.type.<account>.dfs.core.windows.net=com.yourpkg.credential.WorkloadTokenProvider
+
+
+---
+
+🔑 3️⃣ Utilisation pour un autre service (ex. Key Vault)
+
+Dans ton code Java, tu peux faire :
+
+AzureADToken kvToken = WorkloadTokenProvider.getAzureADToken("https://vault.azure.net/.default");
+String accessToken = kvToken.getAccessToken();
+
+Et pour d’autres services :
+
+Service	Scope
+
+Key Vault	https://vault.azure.net/.default
+Storage / ADLS	https://storage.azure.com/.default
+Microsoft Graph	https://graph.microsoft.com/.default
+Resource Manager	https://management.azure.com/.default
+SQL / Synapse	https://database.windows.net/.default
+
+
+
+---
+
+🧠 En résumé
+
+Besoin	Solution
+
+Spark (ADLS)	refreshToken() → scope Storage
+Autres services	même classe, appel getAzureADToken(scope)
+Avantage	une seule classe, pas de duplication, pas de secrets
+
+
+
+---
+
+Tu veux que je t’ajoute une enum AzureScope (pour éviter les chaînes dans le code) ?
