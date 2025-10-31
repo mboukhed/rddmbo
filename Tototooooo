@@ -1,0 +1,42 @@
+Parfait 👌 voici la version courte et claire :
+
+
+---
+
+✅ 1️⃣ Récupère le token via Workload
+
+TokenCredential cred = new WorkloadIdentityCredentialBuilder().build();
+AccessToken token = cred.getToken(
+    new TokenRequestContext().addScopes("https://storage.azure.com/.default")
+).block();
+
+String accessToken = token.getToken();
+
+
+---
+
+✅ 2️⃣ Passe le token à Spark
+
+spark.conf().set("fs.azure.account.auth.type.<account>.dfs.core.windows.net", "OAuth");
+spark.conf().set("fs.azure.account.oauth.provider.type.<account>.dfs.core.windows.net", 
+                 "org.apache.hadoop.fs.azurebfs.oauth2.AccessTokenProvider");
+spark.conf().set("fs.azure.account.oauth2.access.token.<account>.dfs.core.windows.net", accessToken);
+
+
+---
+
+✅ 3️⃣ Lis ton container
+
+Dataset<Row> df = spark.read().parquet("abfss://<container>@<account>.dfs.core.windows.net/path/");
+
+
+---
+
+🟢 Résumé :
+
+Tu obtiens le token avec WorkloadIdentityCredential
+
+Tu le passes dans la conf Spark via
+fs.azure.account.oauth2.access.token...
+
+Et tu lis ton container normalement.
