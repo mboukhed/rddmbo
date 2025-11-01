@@ -1,0 +1,119 @@
+Compris ✅
+Je garde les parenthèses même s’il n’y a qu’une seule partition.
+Voici la classe mise à jour (commentaires en anglais uniquement dans le code).
+
+package com.myproject.core.model;
+
+import java.io.Serializable;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Represents one or multiple Spark partitions.
+ *
+ * Rules:
+ * - Empty partitions are ignored.
+ * - If no .add() was called, the current partition (if not empty) is considered.
+ * - If no valid partitions exist, returns "1=1".
+ * - Parentheses are kept even for a single partition: (col='val')
+ */
+public final class PartitionDescriptor implements Serializable {
+
+    // Each map represents one finalized partition (column -> value)
+    private final List<LinkedHashMap<String, String>> partitions = new ArrayList<>();
+
+    // Current (in-progress) partition; included if no .add() was called
+    private LinkedHashMap<String, String> current = new LinkedHashMap<>();
+
+    public PartitionDescriptor() {}
+
+    // Add or update a column in the current partition
+    public PartitionDescriptor column(String column, Object value) {
+        current.put(column, value == null ? null : String.valueOf(value));
+        return this;
+    }
+
+    // Finalize the current partition and start a new blank one
+    public PartitionDescriptor add() {
+        if (!current.isEmpty()) {
+            partitions.add(current);
+            current = new LinkedHashMap<>();
+        }
+        return this;
+    }
+
+    // Escape single quotes for SQL safety
+    private static String esc(String v) {
+        return v == null ? null : v.replace("'", "''");
+    }
+
+    // Build an SQL predicate for a single partition map
+    private static String toPredicate(Map<String, String> map) {
+        if (map == null || map.isEmpty()) return null;
+        return map.entrySet().stream()
+                .map(e -> {
+                    String v = e.getValue();
+                    return v == null
+                            ? e.getKey() + " IS NULL"
+                            : e.getKey() + "='" + esc(v) + "'";
+                })
+                .collect(Collectors.joining(" AND "));
+    }
+
+    // Build a full SQL WHERE clause
+    // - Uses finalized partitions + current if no .add() was called
+    // - Keeps parentheses even for a single partition
+    // - Returns "1=1" if no valid partitions exist
+    public String toPredicateSql() {
+        List<LinkedHashMap<String, String>> all = new ArrayList<>(partitions);
+        if (!current.isEmpty()) all.add(current);
+
+        List<String> predicates = all.stream()
+                .map(PartitionDescriptor::toPredicate)
+                .filter(Objects::nonNull)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toList());
+
+        if (predicates.isEmpty()) return "1=1";
+        if (predicates.size() == 1) return "(" + predicates.get(0) + ")";
+
+        return predicates.stream()
+                .map(p -> "(" + p + ")")
+                .collect(Collectors.joining(" OR "));
+    }
+
+    // Build Hive-style paths for all considered partitions
+    public List<String> toHivePaths(String basePath) {
+        List<LinkedHashMap<String, String>> all = new ArrayList<>(partitions);
+        if (!current.isEmpty()) all.add(current);
+
+        if (all.isEmpty()) return Collections.emptyList();
+        return all.stream()
+                .filter(m -> m != null && !m.isEmpty())
+                .map(m -> {
+                    String path = m.entrySet().stream()
+                            .map(e -> e.getKey() + "=" + e.getValue())
+                            .collect(Collectors.joining("/", "", "/"));
+                    return basePath + path;
+                })
+                .collect(Collectors.toList());
+    }
+
+    // True if at least one non-empty partition exists (finalized or current)
+    public boolean hasPartitions() {
+        if (!current.isEmpty()) return true;
+        return partitions.stream().anyMatch(m -> m != null && !m.isEmpty());
+    }
+
+    @Override public String toString() { return partitions.toString(); }
+}
+
+Exemple rapide
+
+PartitionDescriptor p = new PartitionDescriptor()
+    .column("dt","2025-11-01")
+    .column("hour",13);  // no add()
+
+System.out.println(p.toPredicateSql());
+// (dt='2025-11-01' AND hour='13')   <-- parenthèses conservées
+```0
