@@ -1,0 +1,115 @@
+Compris ✅
+Tu veux que seules les partitions terminées par .add() soient prises en compte.
+Aucune auto-finalisation : si tu n’appelles pas .add(), la dernière partition n’est pas incluse.
+
+Voici la version mise à jour (commentaires en anglais dans le code uniquement) + deux exemples.
+
+
+---
+
+package com.myproject.core.model;
+
+import java.io.Serializable;
+import java.util.*;
+import java.util.stream.Collectors;
+
+public final class PartitionDescriptor implements Serializable {
+
+    // Each map represents one complete partition (column -> value) that has been finalized via add()
+    private final List<LinkedHashMap<String, String>> partitions = new ArrayList<>();
+
+    // Currently building partition; NOT counted until add() is called
+    private LinkedHashMap<String, String> current = new LinkedHashMap<>();
+
+    public PartitionDescriptor() {}
+
+    // Add or update a column in the current (in-progress) partition
+    public PartitionDescriptor column(String column, Object value) {
+        current.put(column, value == null ? null : String.valueOf(value));
+        return this;
+    }
+
+    // Finalize the current partition and start a new blank one
+    public PartitionDescriptor add() {
+        if (!current.isEmpty()) {
+            partitions.add(current);
+            current = new LinkedHashMap<>();
+        }
+        return this;
+    }
+
+    // Escape single quotes for SQL safety
+    private static String esc(String v) {
+        return v == null ? null : v.replace("'", "''");
+    }
+
+    // Build an SQL predicate for a single finalized partition map
+    private static String toPredicate(Map<String, String> map, List<String> order) {
+        if (map.isEmpty()) return "1=1";
+        List<String> keys = (order == null || order.isEmpty()) ? new ArrayList<>(map.keySet()) : order;
+        return keys.stream()
+                .map(k -> {
+                    String v = map.get(k);
+                    return v == null ? k + " IS NULL" : k + "='" + esc(v) + "'";
+                })
+                .collect(Collectors.joining(" AND "));
+    }
+
+    // Build a full SQL WHERE clause for all finalized partitions (current is ignored until add())
+    public String toPredicateSql() { return toPredicateSql(null); }
+
+    // Build a full SQL WHERE clause with explicit column order
+    public String toPredicateSql(List<String> order) {
+        if (partitions.isEmpty()) return "1=0";
+        return partitions.stream()
+                .map(p -> "(" + toPredicate(p, order) + ")")
+                .collect(Collectors.joining(" OR "));
+    }
+
+    // Build Hive-style paths for all finalized partitions (current is ignored until add())
+    public List<String> toHivePaths(String basePath) {
+        if (partitions.isEmpty()) return Collections.emptyList();
+        return partitions.stream()
+                .map(m -> {
+                    String path = m.entrySet().stream()
+                            .map(e -> e.getKey() + "=" + e.getValue())
+                            .collect(Collectors.joining("/", "", "/"));
+                    return basePath + path;
+                })
+                .collect(Collectors.toList());
+    }
+
+    @Override public String toString() { return partitions.toString(); }
+}
+
+
+---
+
+Exemples d’utilisation (⚠️ .add() obligatoire)
+
+1) Une seule colonne de partition
+
+PartitionDescriptor p = new PartitionDescriptor()
+    .column("dt", "2025-11-01").add()
+    .column("dt", "2025-11-02").add()
+    .column("dt", "2025-11-03"); // NOT included (no .add())
+
+System.out.println(p.toPredicateSql());
+// (dt='2025-11-01') OR (dt='2025-11-02')
+
+System.out.println(p.toHivePaths("/mnt/data/output/"));
+// [/mnt/data/output/dt=2025-11-01/, /mnt/data/output/dt=2025-11-02/]
+
+2) Plusieurs colonnes
+
+PartitionDescriptor p = new PartitionDescriptor()
+    .column("dt","2025-11-01").column("hour",13).column("country","FR").add()
+    .column("dt","2025-11-02").column("hour",14).column("country","MA"); // NOT included (no .add())
+
+System.out.println(p.toPredicateSql());
+// (dt='2025-11-01' AND hour='13' AND country='FR')
+
+System.out.println(p.toHivePaths("/mnt/data/output/"));
+// [/mnt/data/output/dt=2025-11-01/hour=13/country=FR/]
+
+Si tu veux, je peux aussi ajouter une méthode clearCurrent() (pour annuler une partition en cours) ou isCurrentEmpty() (pour vérifier avant .add()).
