@@ -1,0 +1,198 @@
+Parfait — on respecte ta contrainte :
+
+core.model.PartitionDescriptor : ne contient qu’une Map (pas de logique).
+
+core.helper.PartitionUtils : toute la logique (Row → PartitionDescriptor, liste/DS, Hive-path, predicate SQL, build chemins, relecture des partitions écrites).
+
+
+
+---
+
+1) core.model.PartitionDescriptor (seulement la Map)
+
+package com.myproject.core.model;
+
+import java.io.Serializable;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/** Représente une partition Spark comme un simple mapping colonne->valeur. */
+public final class PartitionDescriptor implements Serializable {
+
+    private final LinkedHashMap<String, String> values = new LinkedHashMap<>();
+
+    public PartitionDescriptor() {}
+
+    public PartitionDescriptor(Map<String, ?> map) {
+        if (map != null) {
+            map.forEach((k, v) -> values.put(k, v == null ? null : v.toString()));
+        }
+    }
+
+    /** Ajoute ou remplace une paire colonne/valeur. */
+    public PartitionDescriptor put(String column, Object value) {
+        values.put(column, value == null ? null : value.toString());
+        return this;
+    }
+
+    /** Récupère la valeur d'une colonne. */
+    public String get(String column) {
+        return values.get(column);
+    }
+
+    /** Accès en lecture seule à la map. */
+    public Map<String, String> asMap() {
+        return Collections.unmodifiableMap(values);
+    }
+
+    @Override public String toString() { return values.toString(); }
+    @Override public int hashCode() { return values.hashCode(); }
+    @Override public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof PartitionDescriptor)) return false;
+        return values.equals(((PartitionDescriptor) o).values);
+    }
+}
+
+
+---
+
+2) core.helper.PartitionUtils (toute la logique)
+
+package com.myproject.core.helper;
+
+import com.myproject.core.model.PartitionDescriptor;
+import org.apache.spark.sql.*;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+import static org.apache.spark.sql.functions.col;
+
+/** Outils pour créer/consommer des PartitionDescriptor et relire les partitions écrites. */
+public final class PartitionUtils {
+    private PartitionUtils() {}
+
+    /* ---------- Création depuis Spark ---------- */
+
+    /** Row -> PartitionDescriptor (colonne(s) de partition fournies). */
+    public static PartitionDescriptor fromRow(Row row, List<String> partitionCols) {
+        PartitionDescriptor pd = new PartitionDescriptor();
+        for (String c : partitionCols) pd.put(c, row.getAs(c));
+        return pd;
+    }
+
+    /** Dataset<Row> -> List<PartitionDescriptor> (collect des partitions distinctes). */
+    public static List<PartitionDescriptor> fromDataset(Dataset<Row> df, List<String> partitionCols) {
+        List<Row> rows = df.selectExpr(partitionCols.toArray(new String[0])).distinct().collectAsList();
+        List<PartitionDescriptor> out = new ArrayList<>(rows.size());
+        for (Row r : rows) out.add(fromRow(r, partitionCols));
+        return out;
+    }
+
+    /** Dataset<Row> -> Dataset<PartitionDescriptor> (sans collect). */
+    public static Dataset<PartitionDescriptor> fromDatasetAsDs(Dataset<Row> df, List<String> partitionCols) {
+        Dataset<Row> only = df.selectExpr(partitionCols.toArray(new String[0])).distinct();
+        return only.map(
+                (MapFunction<Row, PartitionDescriptor>) r -> fromRow(r, partitionCols),
+                Encoders.javaSerialization(PartitionDescriptor.class)
+        );
+    }
+
+    /* ---------- Formatages / chemins / filtres ---------- */
+
+    /** Hive-style path : col1=val1/col2=val2/ */
+    public static String toHivePath(PartitionDescriptor pd) {
+        return pd.asMap().entrySet().stream()
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .collect(Collectors.joining("/", "", "/"));
+    }
+
+    /** WHERE predicate : col1='val1' AND col2='val2' */
+    public static String toSqlPredicate(PartitionDescriptor pd) {
+        return pd.asMap().entrySet().stream()
+                .map(e -> e.getKey() + "='" + e.getValue() + "'")
+                .collect(Collectors.joining(" AND "));
+    }
+
+    /** Construit les chemins complets à partir d’un basePath et d’une liste de partitions. */
+    public static List<String> buildPaths(String basePath, List<PartitionDescriptor> parts) {
+        return parts.stream().map(p -> basePath + toHivePath(p)).collect(Collectors.toList());
+    }
+
+    /* ---------- Relecture ciblée ---------- */
+
+    /**
+     * Relit uniquement les partitions présentes dans dfOut (celles que tu viens d’écrire),
+     * sans rescanner tout le dossier.
+     */
+    public static Dataset<Row> readJustWritten(SparkSession spark,
+                                               Dataset<Row> dfOutWithPartitions,
+                                               String basePath,
+                                               List<String> partitionCols) {
+        List<String> paths = buildPaths(basePath, fromDataset(dfOutWithPartitions, partitionCols));
+        return spark.read().parquet(paths.toArray(new String[0]));
+    }
+
+    /** Variante filtrée si tu as enregistré une table externe parquet (partition pruning). */
+    public static Dataset<Row> readFromRegisteredTable(SparkSession spark,
+                                                       String table,
+                                                       Map<String, List<Object>> partitionFilters) {
+        Dataset<Row> t = spark.table(table);
+        for (Map.Entry<String, List<Object>> e : partitionFilters.entrySet()) {
+            // cast en String pour isin()
+            List<String> vals = e.getValue().stream().map(String::valueOf).collect(Collectors.toList());
+            t = t.where(col(e.getKey()).isin(vals.toArray(new String[0])));
+        }
+        return t;
+    }
+}
+
+
+---
+
+3) Exemple d’usage (Parquet ➜ relecture ciblée ➜ ClickHouse v2)
+
+import com.myproject.core.helper.PartitionUtils;
+import com.myproject.core.model.PartitionDescriptor;
+import org.apache.spark.sql.*;
+
+import java.util.Arrays;
+import java.util.List;
+
+import static org.apache.spark.sql.SaveMode.Overwrite;
+
+public class PipelineExample {
+    public static void main(String[] args) {
+        SparkSession spark = SparkSession.builder().appName("Parquet->CH CatalogV2").getOrCreate();
+
+        // Conf Overwrite dynamique pour n’écraser que les partitions touchées
+        spark.conf().set("spark.sql.sources.partitionOverwriteMode", "dynamic");
+
+        // 1) Source
+        Dataset<Row> df = spark.read()
+                .option("header", "true")
+                .option("inferSchema", "true")
+                .csv("abfss://container@acct.dfs.core.windows.net/in/*.gz")
+                .filter("status = 'OK'");
+
+        // 2) Écriture Parquet partitionnée
+        String base = "abfss://container@acct.dfs.core.windows.net/out/my_table/";
+        List<String> partCols = Arrays.asList("dt", "hour");
+        df.write().mode(Overwrite).partitionBy(partCols.toArray(new String[0])).parquet(base);
+
+        // 3) Relecture uniquement des partitions écrites
+        Dataset<Row> justWritten = PartitionUtils.readJustWritten(spark, df, base, partCols);
+
+        // 4) Écriture ClickHouse via Catalog V2
+        justWritten.writeTo("clickhouse.default.my_table").append();
+
+        spark.stop();
+    }
+}
+
+
+---
+
+Si tu veux, je peux ajouter un petit ParquetHelper dans helper pour regrouper writeParquet(...), readJustWritten(...) et le manifest JSON (pour relances idempotentes) — le tout en restant 100% séparé du model.
