@@ -1,0 +1,157 @@
+Parfait 👍
+Voici la version complète et finale de la classe PartitionDescriptor avec la méthode utilitaire fromRow(Row, List<String>), qui permet de convertir directement une ligne Spark (Row) en objet partition :
+
+
+---
+
+✅ Classe Java finale : PartitionDescriptor
+
+import org.apache.spark.sql.Row;
+
+import java.io.Serializable;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Représente une partition Spark sous forme de mapping colonne->valeur.
+ * Exemple : { dt=2025-11-01, hour=13 }
+ */
+public class PartitionDescriptor implements Serializable {
+
+    private final LinkedHashMap<String, String> values = new LinkedHashMap<>();
+
+    /** Constructeur vide */
+    public PartitionDescriptor() {}
+
+    /** Constructeur à partir d’une Map */
+    public PartitionDescriptor(Map<String, ?> map) {
+        if (map != null) {
+            map.forEach((k, v) -> values.put(k, v == null ? null : v.toString()));
+        }
+    }
+
+    /** Ajoute une clé/valeur */
+    public PartitionDescriptor add(String column, Object value) {
+        values.put(column, value == null ? null : value.toString());
+        return this;
+    }
+
+    /** Retourne la valeur d'une colonne */
+    public String get(String column) {
+        return values.get(column);
+    }
+
+    /** Colonnes de partition (ordre d’insertion) */
+    public List<String> getColumns() {
+        return new ArrayList<>(values.keySet());
+    }
+
+    /** Valeurs */
+    public List<String> getValues() {
+        return new ArrayList<>(values.values());
+    }
+
+    /** Formate en chemin Hive-style : col1=val1/col2=val2/ */
+    public String toHivePath() {
+        return values.entrySet().stream()
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .collect(Collectors.joining("/", "", "/"));
+    }
+
+    /** Formate en prédicat SQL : col1='val1' AND col2='val2' */
+    public String toSqlPredicate() {
+        return values.entrySet().stream()
+                .map(e -> e.getKey() + "='" + e.getValue() + "'")
+                .collect(Collectors.joining(" AND "));
+    }
+
+    /** Représentation lisible */
+    @Override
+    public String toString() {
+        return values.toString();
+    }
+
+    /** Retourne la map interne (non modifiable) */
+    public Map<String, String> asMap() {
+        return Collections.unmodifiableMap(values);
+    }
+
+    // ------------------ Méthodes statiques utilitaires ------------------
+
+    /** Crée une PartitionDescriptor à partir d’un Row Spark et d’une liste de colonnes */
+    public static PartitionDescriptor fromRow(Row row, List<String> partitionCols) {
+        PartitionDescriptor pd = new PartitionDescriptor();
+        for (String col : partitionCols) {
+            Object val = row.getAs(col);
+            pd.add(col, val);
+        }
+        return pd;
+    }
+
+    /** Fabriques rapides */
+    public static PartitionDescriptor of(String k1, Object v1) {
+        return new PartitionDescriptor().add(k1, v1);
+    }
+
+    public static PartitionDescriptor of(String k1, Object v1, String k2, Object v2) {
+        return new PartitionDescriptor().add(k1, v1).add(k2, v2);
+    }
+
+    public static PartitionDescriptor of(String k1, Object v1, String k2, Object v2, String k3, Object v3) {
+        return new PartitionDescriptor().add(k1, v1).add(k2, v2).add(k3, v3);
+    }
+}
+
+
+---
+
+🧩 Exemple d’utilisation
+
+Dataset<Row> df = ...; // dataset partitionné par dt et hour
+List<String> partitionCols = Arrays.asList("dt", "hour");
+
+// 1️⃣ Extraire les partitions distinctes
+List<Row> rows = df.selectExpr(partitionCols.toArray(new String[0])).distinct().collectAsList();
+
+// 2️⃣ Conversion automatique Row → PartitionDescriptor
+List<PartitionDescriptor> partitions = new ArrayList<>();
+for (Row r : rows) {
+    partitions.add(PartitionDescriptor.fromRow(r, partitionCols));
+}
+
+// 3️⃣ Exemple : affichage
+for (PartitionDescriptor p : partitions) {
+    System.out.println("Partition: " + p.toHivePath());
+    // Ex: dt=2025-11-01/hour=13/
+}
+
+// 4️⃣ Lire uniquement les chemins nécessaires
+String basePath = "abfss://container@storage.dfs.core.windows.net/out/my_table/";
+List<String> paths = partitions.stream()
+        .map(p -> basePath + p.toHivePath())
+        .toList();
+
+Dataset<Row> toLoad = spark.read().parquet(paths.toArray(new String[0]));
+
+// 5️⃣ Charger dans ClickHouse (catalogue V2)
+toLoad.writeTo("clickhouse.default.my_table").append();
+
+
+---
+
+🔍 Avantages
+
+Fonction	Description
+
+fromRow(Row, List<String>)	Convertit instantanément un Row Spark en objet partition
+toHivePath()	Génère le chemin du dossier Parquet à relire
+toSqlPredicate()	Permet de filtrer dans Spark ou ClickHouse
+asMap()	Compatible JSON / manifest / log
+Serializable	Peut être envoyé à l’exécuteur Spark ou stocké
+
+
+
+---
+
+Souhaites-tu que je t’ajoute une méthode fromDataset(Dataset<Row>, List<String>)
+qui renvoie directement List<PartitionDescriptor> à partir d’un Dataset<Row> (en une seule ligne, sans boucle manuelle) ?
