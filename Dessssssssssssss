@@ -1,0 +1,151 @@
+Tu as raison — il faut que ça gère plusieurs colonnes de partition (2, 3, …) et plusieurs combinaisons de partitions sans bug (NULL, quotes, ordre des colonnes).
+Voici une version robuste qui reste “model-pur” (une Map) mais avec des helpers minimaux pour produire un prédicat SQL correct.
+
+PartitionDescriptor (Map seule + helpers SQL fiables)
+
+package com.myproject.core.model;
+
+import java.io.Serializable;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Représente les colonnes/valeurs d'une partition Spark.
+ * - Map ordonnée (LinkedHashMap) => ordre déterministe si tu ajoutes les colonnes dans l'ordre voulu.
+ * - Helpers SQL avec gestion des NULL et échappement des quotes.
+ */
+public final class PartitionDescriptor implements Serializable {
+
+    private final LinkedHashMap<String, String> values = new LinkedHashMap<>();
+
+    public PartitionDescriptor() {}
+
+    public PartitionDescriptor(Map<String, ?> map) {
+        if (map != null) {
+            map.forEach((k, v) -> values.put(k, v == null ? null : String.valueOf(v)));
+        }
+    }
+
+    /** Ajoute / remplace une paire (colonne, valeur). L'ordre d'insertion est conservé. */
+    public PartitionDescriptor put(String column, Object value) {
+        values.put(column, value == null ? null : String.valueOf(value));
+        return this;
+    }
+
+    public String get(String column) { return values.get(column); }
+
+    /** Vue non modifiable. */
+    public Map<String, String> getValues() { return Collections.unmodifiableMap(values); }
+
+    /* ----------------- Helpers SQL (MINIMES mais FIABLES) ----------------- */
+
+    /** Échappe les quotes simples dans les littéraux SQL. */
+    private static String esc(String v) { return v.replace("'", "''"); }
+
+    /**
+     * Prédicat SQL pour CETTE partition, en joignant toutes ses colonnes par AND.
+     * - NULL => IS NULL
+     * - Non-NULL => 'valeur' (quoted + escaped)
+     * - Ordre: celui d'insertion dans la Map (ou donne colOrder ci-dessous).
+     *
+     * Exemple (3 colonnes):  dt='2025-11-01' AND hour='13' AND country='FR'
+     */
+    public String toPredicateSql() {
+        return values.entrySet().stream()
+                .map(e -> e.getValue() == null
+                        ? e.getKey() + " IS NULL"
+                        : e.getKey() + "='" + esc(e.getValue()) + "'")
+                .collect(Collectors.joining(" AND "));
+    }
+
+    /**
+     * Variante avec ordre de colonnes imposé.
+     * Utile pour garantir le même ordre entre plusieurs partitions.
+     */
+    public String toPredicateSql(List<String> colOrder) {
+        return colOrder.stream()
+                .map(c -> {
+                    String v = values.get(c);
+                    return v == null ? c + " IS NULL" : c + "='" + esc(v) + "'";
+                })
+                .collect(Collectors.joining(" AND "));
+    }
+
+    /**
+     * Construit un prédicat pour PLUSIEURS partitions (OR de conjonctions).
+     * Sûr et universel (marche même avec NULL).
+     *
+     * (dt='2025-11-01' AND hour='13' AND country='FR')
+     *   OR (dt='2025-11-02' AND hour='14' AND country='MA')
+     */
+    public static String orOf(List<PartitionDescriptor> parts) {
+        if (parts == null || parts.isEmpty()) return "1=0"; // vide => aucun match
+        return parts.stream()
+                .map(p -> "(" + p.toPredicateSql() + ")")
+                .collect(Collectors.joining(" OR "));
+    }
+
+    /**
+     * Même chose mais avec ordre de colonnes imposé.
+     * Garantit un ordre identique pour toutes les partitions.
+     */
+    public static String orOf(List<PartitionDescriptor> parts, List<String> colOrder) {
+        if (parts == null || parts.isEmpty()) return "1=0";
+        return parts.stream()
+                .map(p -> "(" + p.toPredicateSql(colOrder) + ")")
+                .collect(Collectors.joining(" OR "));
+    }
+
+    @Override public String toString() { return values.toString(); }
+    @Override public int hashCode() { return values.hashCode(); }
+    @Override public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof PartitionDescriptor)) return false;
+        return values.equals(((PartitionDescriptor) o).values);
+    }
+}
+
+Pourquoi cette version corrige le problème « 3 partitions » ?
+
+Elle gère n colonnes (2, 3, 4…) en les joignant avec AND — c’est ce qu’il faut pour une partition complète (ex. dt, hour, country).
+
+Pour plusieurs partitions (plusieurs combinaisons de dt/hour/country), tu utilises orOf(...) :
+
+ça produit un OR de conjonctions, qui marche même avec des NULL (contrairement au IN tuple).
+
+
+Ordre des colonnes maîtrisable via toPredicateSql(colOrder) et orOf(parts, colOrder).
+
+Quotes correctement échappées, pour éviter les erreurs SQL.
+
+
+Exemples (3 colonnes de partition)
+
+// Une partition (3 colonnes)
+PartitionDescriptor p1 = new PartitionDescriptor()
+    .put("dt", "2025-11-01")
+    .put("hour", 13)
+    .put("country", "FR");
+
+System.out.println(p1.toPredicateSql());
+// dt='2025-11-01' AND hour='13' AND country='FR'
+
+// Deux partitions (OR)
+PartitionDescriptor p2 = new PartitionDescriptor()
+    .put("dt", "2025-11-02")
+    .put("hour", 14)
+    .put("country", "MA");
+
+String where = PartitionDescriptor.orOf(Arrays.asList(p1, p2));
+// (dt='2025-11-01' AND hour='13' AND country='FR')
+//   OR (dt='2025-11-02' AND hour='14' AND country='MA')
+
+// Avec ordre imposé (utile si tu construis ensuite des tuples ailleurs)
+List<String> order = Arrays.asList("dt", "hour", "country");
+String whereOrdered = PartitionDescriptor.orOf(Arrays.asList(p1, p2), order);
+
+> Si un champ vaut NULL, la méthode émet col IS NULL (et non col='null'), ce qui est correct en SQL/Spark/ClickHouse.
+
+
+
+Si tu veux, je peux te donner la version helper côté PartitionUtils qui prend une List<PartitionDescriptor> et relit uniquement les partitions (chemins Hive) et applique en plus ce WHERE côté Spark pour double-sécurité.
