@@ -1,0 +1,163 @@
+Parfait 👌 — tu veux que la méthode fromDataset(...) (ou équivalent) retourne directement une Map au lieu d’une List<PartitionDescriptor>,
+par exemple :
+
+Map<String, PartitionDescriptor>
+
+où la clé serait une chaîne unique représentant la partition (ex: dt=2025-11-01/hour=13), et la valeur l’objet PartitionDescriptor.
+
+C’est très utile pour accéder rapidement à une partition ou pour générer un manifest indexé.
+
+
+---
+
+Voici la version mise à jour de PartitionUtils avec cette capacité 👇
+(j’ai ajouté collectToMap() tout en gardant les méthodes précédentes)
+
+
+---
+
+✅ core.helper.PartitionUtils (version enrichie avec collectToMap)
+
+package com.myproject.core.helper;
+
+import com.myproject.core.model.PartitionDescriptor;
+import org.apache.spark.sql.*;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+import static org.apache.spark.sql.functions.col;
+
+/**
+ * Outils pour manipuler les partitions Spark (création, relecture ciblée, formatage Hive).
+ */
+public final class PartitionUtils {
+    private PartitionUtils() {}
+
+    /* -------------------- Création -------------------- */
+
+    /** Row -> PartitionDescriptor */
+    public static PartitionDescriptor fromRow(Row row, List<String> partitionCols) {
+        PartitionDescriptor pd = new PartitionDescriptor();
+        for (String c : partitionCols) {
+            pd.put(c, row.getAs(c));
+        }
+        return pd;
+    }
+
+    /** Dataset<Row> -> List<PartitionDescriptor> */
+    public static List<PartitionDescriptor> fromDataset(Dataset<Row> df, List<String> partitionCols) {
+        List<Row> rows = df.selectExpr(partitionCols.toArray(new String[0])).distinct().collectAsList();
+        List<PartitionDescriptor> out = new ArrayList<>(rows.size());
+        for (Row r : rows) out.add(fromRow(r, partitionCols));
+        return out;
+    }
+
+    /** Dataset<Row> -> Dataset<PartitionDescriptor> (sans collect, scalable) */
+    public static Dataset<PartitionDescriptor> fromDatasetAsDs(Dataset<Row> df, List<String> partitionCols) {
+        Dataset<Row> only = df.selectExpr(partitionCols.toArray(new String[0])).distinct();
+        return only.map(
+                (MapFunction<Row, PartitionDescriptor>) r -> fromRow(r, partitionCols),
+                Encoders.javaSerialization(PartitionDescriptor.class)
+        );
+    }
+
+    /* -------------------- Formatage / Clé / Map -------------------- */
+
+    /** Clé unique pour une partition (ex: "dt=2025-11-01/hour=13"). */
+    public static String toKey(PartitionDescriptor pd) {
+        return pd.asMap().entrySet().stream()
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .collect(Collectors.joining("/"));
+    }
+
+    /** Hive-style path : col1=val1/col2=val2/ */
+    public static String toHivePath(PartitionDescriptor pd) {
+        return toKey(pd) + "/";
+    }
+
+    /** WHERE predicate : col1='val1' AND col2='val2' */
+    public static String toSqlPredicate(PartitionDescriptor pd) {
+        return pd.asMap().entrySet().stream()
+                .map(e -> e.getKey() + "='" + e.getValue() + "'")
+                .collect(Collectors.joining(" AND "));
+    }
+
+    /** Construit les chemins complets à partir d’un basePath et d’une liste de partitions. */
+    public static List<String> buildPaths(String basePath, List<PartitionDescriptor> parts) {
+        return parts.stream().map(p -> basePath + toHivePath(p)).collect(Collectors.toList());
+    }
+
+    /** ✅ Collecte directement les partitions en Map<clé, PartitionDescriptor> */
+    public static Map<String, PartitionDescriptor> collectToMap(Dataset<Row> df, List<String> partitionCols) {
+        List<PartitionDescriptor> list = fromDataset(df, partitionCols);
+        return list.stream().collect(Collectors.toMap(PartitionUtils::toKey, p -> p));
+    }
+
+    /* -------------------- Relecture ciblée -------------------- */
+
+    /** Relit uniquement les partitions présentes dans dfOut (celles écrites). */
+    public static Dataset<Row> readJustWritten(SparkSession spark,
+                                               Dataset<Row> dfOut,
+                                               String basePath,
+                                               List<String> partitionCols) {
+        List<String> paths = buildPaths(basePath, fromDataset(dfOut, partitionCols));
+        return spark.read().parquet(paths.toArray(new String[0]));
+    }
+
+    /** Variante si la table Parquet est enregistrée dans le metastore (partition pruning). */
+    public static Dataset<Row> readFromRegisteredTable(SparkSession spark,
+                                                       String table,
+                                                       Map<String, List<Object>> partitionFilters) {
+        Dataset<Row> t = spark.table(table);
+        for (Map.Entry<String, List<Object>> e : partitionFilters.entrySet()) {
+            List<String> vals = e.getValue().stream().map(String::valueOf).collect(Collectors.toList());
+            t = t.where(col(e.getKey()).isin(vals.toArray(new String[0])));
+        }
+        return t;
+    }
+}
+
+
+---
+
+🧩 Exemple d’utilisation
+
+List<String> partCols = Arrays.asList("dt", "hour");
+
+// ✅ Collecte les partitions écrites sous forme de Map
+Map<String, PartitionDescriptor> partsMap = PartitionUtils.collectToMap(dfOut, partCols);
+
+partsMap.forEach((key, pd) -> {
+    System.out.println("Partition key: " + key);
+    System.out.println("Hive path: " + PartitionUtils.toHivePath(pd));
+    System.out.println("SQL filter: " + PartitionUtils.toSqlPredicate(pd));
+});
+
+// 🔹 Relire uniquement ces partitions
+List<String> paths = PartitionUtils.buildPaths(
+        "abfss://container@storage.dfs.core.windows.net/out/my_table/",
+        new ArrayList<>(partsMap.values())
+);
+
+Dataset<Row> justWritten = spark.read().parquet(paths.toArray(new String[0]));
+
+// 🔹 Puis insertion ClickHouse V2
+justWritten.writeTo("clickhouse.default.my_table").append();
+
+
+---
+
+🧠 Résumé
+
+Méthode	Type de sortie	Usage
+
+fromDataset()	List<PartitionDescriptor>	simple, petit nombre de partitions
+fromDatasetAsDs()	Dataset<PartitionDescriptor>	gros volumes (pas de collect)
+collectToMap()	Map<String, PartitionDescriptor>	rapide, indexé, parfait pour manifest ou log
+
+
+
+---
+
+Souhaites-tu que je te montre comment écrire ce Map en manifest JSON (clé → valeurs de partition) et le relire dans un autre job Spark (par exemple pour relancer une étape ClickHouse sans relire tout le Parquet) ?
