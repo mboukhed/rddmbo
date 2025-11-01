@@ -1,0 +1,232 @@
+Voici la classe finale (commentaires en anglais dans le code uniquement) :
+
+package com.myproject.core.model;
+
+import java.io.Serializable;
+import java.text.SimpleDateFormat;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Represents one or multiple Spark partitions.
+ *
+ * Features:
+ * - Fluent API: .column(k,v).add() to build partitions
+ * - Empty partitions are ignored
+ * - If no .add() was called, the current partition (if not empty) is considered
+ * - SQL generation keeps parentheses even for a single partition
+ * - Returns "1=1" when no valid partitions exist (neutral filter)
+ * - Temporal support: java.sql.Date/Timestamp/Time, java.util.Date/Calendar, java.time.*
+ * - Configurable patterns for date, timestamp, and time
+ * - Numeric types are emitted without quotes (int/long/float/double/BigDecimal/BigInteger)
+ */
+public final class PartitionDescriptor implements Serializable {
+
+    // Default patterns (Spark/SQL friendly)
+    private static final String DEFAULT_DATE_PATTERN = "yyyy-MM-dd";
+    private static final String DEFAULT_TIMESTAMP_PATTERN = "yyyy-MM-dd HH:mm:ss";
+    private static final String DEFAULT_TIME_PATTERN = "HH:mm:ss";
+    private static final ZoneId DEFAULT_ZONE = ZoneId.systemDefault();
+
+    // Thread-unsafe SimpleDateFormat guarded by synchronized blocks
+    private SimpleDateFormat utilDateFmt = new SimpleDateFormat(DEFAULT_DATE_PATTERN);
+    private SimpleDateFormat utilTsFmt   = new SimpleDateFormat(DEFAULT_TIMESTAMP_PATTERN);
+    private SimpleDateFormat utilTimeFmt = new SimpleDateFormat(DEFAULT_TIME_PATTERN);
+
+    // java.time formatters (thread-safe)
+    private DateTimeFormatter dtDateFmt = DateTimeFormatter.ofPattern(DEFAULT_DATE_PATTERN);
+    private DateTimeFormatter dtTsFmt   = DateTimeFormatter.ofPattern(DEFAULT_TIMESTAMP_PATTERN);
+    private DateTimeFormatter dtTimeFmt = DateTimeFormatter.ofPattern(DEFAULT_TIME_PATTERN);
+
+    // Finalized partitions (each LinkedHashMap = one partition: column -> value)
+    private final List<LinkedHashMap<String, String>> partitions = new ArrayList<>();
+    // In-progress partition; included if no .add() is called and not empty
+    private LinkedHashMap<String, String> current = new LinkedHashMap<>();
+
+    public PartitionDescriptor() {}
+
+    // ---------------- Configuration ----------------
+
+    // Set date-only pattern (e.g., "yyyy-MM-dd")
+    public PartitionDescriptor setDatePattern(String pattern) {
+        this.utilDateFmt = new SimpleDateFormat(pattern);
+        this.dtDateFmt = DateTimeFormatter.ofPattern(pattern);
+        return this;
+    }
+
+    // Set timestamp pattern (e.g., "yyyy-MM-dd HH:mm:ss")
+    public PartitionDescriptor setTimestampPattern(String pattern) {
+        this.utilTsFmt = new SimpleDateFormat(pattern);
+        this.dtTsFmt = DateTimeFormatter.ofPattern(pattern);
+        return this;
+    }
+
+    // Set time-only pattern (e.g., "HH:mm:ss")
+    public PartitionDescriptor setTimePattern(String pattern) {
+        this.utilTimeFmt = new SimpleDateFormat(pattern);
+        this.dtTimeFmt = DateTimeFormatter.ofPattern(pattern);
+        return this;
+    }
+
+    // ---------------- Builder API ----------------
+
+    // Add or update a column; temporal values are formatted with appropriate patterns
+    public PartitionDescriptor column(String column, Object value) {
+        if (value == null) {
+            current.put(column, null);
+            return this;
+        }
+
+        // java.sql types
+        if (value instanceof java.sql.Date) {
+            synchronized (utilDateFmt) {
+                current.put(column, utilDateFmt.format((java.sql.Date) value));
+            }
+            return this;
+        }
+        if (value instanceof java.sql.Timestamp) {
+            synchronized (utilTsFmt) {
+                current.put(column, utilTsFmt.format((java.sql.Timestamp) value));
+            }
+            return this;
+        }
+        if (value instanceof java.sql.Time) {
+            synchronized (utilTimeFmt) {
+                current.put(column, utilTimeFmt.format((java.sql.Time) value));
+            }
+            return this;
+        }
+
+        // java.util types
+        if (value instanceof Date) {
+            synchronized (utilTsFmt) { // treat generic Date as timestamp
+                current.put(column, utilTsFmt.format((Date) value));
+            }
+            return this;
+        }
+        if (value instanceof Calendar) {
+            synchronized (utilTsFmt) {
+                current.put(column, utilTsFmt.format(((Calendar) value).getTime()));
+            }
+            return this;
+        }
+
+        // java.time types
+        if (value instanceof LocalDate) {
+            current.put(column, ((LocalDate) value).format(dtDateFmt));
+            return this;
+        }
+        if (value instanceof LocalTime) {
+            current.put(column, ((LocalTime) value).format(dtTimeFmt));
+            return this;
+        }
+        if (value instanceof LocalDateTime) {
+            current.put(column, ((LocalDateTime) value).format(dtTsFmt));
+            return this;
+        }
+        if (value instanceof Instant) {
+            LocalDateTime ldt = LocalDateTime.ofInstant((Instant) value, DEFAULT_ZONE);
+            current.put(column, ldt.format(dtTsFmt));
+            return this;
+        }
+        if (value instanceof ZonedDateTime) {
+            current.put(column, ((ZonedDateTime) value).format(dtTsFmt));
+            return this;
+        }
+        if (value instanceof OffsetDateTime) {
+            current.put(column, ((OffsetDateTime) value).format(dtTsFmt));
+            return this;
+        }
+
+        // Fallback for non-temporal types: stringify for now
+        current.put(column, String.valueOf(value));
+        return this;
+    }
+
+    // Finalize the current partition and start a new blank one (ignores empty)
+    public PartitionDescriptor add() {
+        if (!current.isEmpty()) {
+            partitions.add(current);
+            current = new LinkedHashMap<>();
+        }
+        return this;
+    }
+
+    // ---------------- SQL / Paths ----------------
+
+    // Escape single quotes for SQL safety
+    private static String esc(String v) {
+        return v == null ? null : v.replace("'", "''");
+    }
+
+    // Render one partition into SQL predicate (AND-joined)
+    // - Numbers are emitted without quotes
+    // - Strings and temporal values are quoted and escaped
+    // - Nulls use IS NULL
+    private static String toPredicate(Map<String, String> map) {
+        if (map == null || map.isEmpty()) return null;
+        return map.entrySet().stream()
+                .map(e -> {
+                    String key = e.getKey();
+                    String val = e.getValue();
+                    if (val == null) return key + " IS NULL";
+
+                    boolean isNumeric = false;
+                    try {
+                        new java.math.BigDecimal(val);
+                        isNumeric = true;
+                    } catch (NumberFormatException ignored) {}
+
+                    return isNumeric ? key + "=" + val : key + "='" + esc(val) + "'";
+                })
+                .collect(Collectors.joining(" AND "));
+    }
+
+    // Build a full SQL WHERE clause:
+    // - Uses finalized partitions; if none, includes current if not empty
+    // - Keeps parentheses even for a single partition
+    // - Returns "1=1" if no valid partitions exist
+    public String toPredicateSql() {
+        List<LinkedHashMap<String, String>> all = new ArrayList<>(partitions);
+        if (!current.isEmpty()) all.add(current);
+
+        List<String> predicates = all.stream()
+                .map(PartitionDescriptor::toPredicate)
+                .filter(Objects::nonNull)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toList());
+
+        if (predicates.isEmpty()) return "1=1";
+        return predicates.stream()
+                .map(p -> "(" + p + ")")
+                .collect(Collectors.joining(" OR "));
+    }
+
+    // Build Hive-style paths for all considered partitions
+    public List<String> toHivePaths(String basePath) {
+        List<LinkedHashMap<String, String>> all = new ArrayList<>(partitions);
+        if (!current.isEmpty()) all.add(current);
+
+        if (all.isEmpty()) return Collections.emptyList();
+        return all.stream()
+                .filter(m -> m != null && !m.isEmpty())
+                .map(m -> {
+                    String path = m.entrySet().stream()
+                            .map(e -> e.getKey() + "=" + e.getValue())
+                            .collect(Collectors.joining("/", "", "/"));
+                    return basePath + path;
+                })
+                .collect(Collectors.toList());
+    }
+
+    // True if at least one non-empty partition exists (finalized or current)
+    public boolean hasPartitions() {
+        if (!current.isEmpty()) return true;
+        return partitions.stream().anyMatch(m -> m != null && !m.isEmpty());
+    }
+
+    @Override public String toString() { return partitions.toString(); }
+}
+```0
