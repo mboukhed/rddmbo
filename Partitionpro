@@ -1,0 +1,146 @@
+Tu as raison : il ne faut pas relire tout le dossier Parquet, seulement les partitions que tu viens d’écrire.
+Voici 3 techniques fiables (avec code Java Spark) — prends la #1, c’est la plus simple et robuste.
+
+
+---
+
+✅ Technique #1 — Relire par liste de chemins des partitions écrites
+
+Pendant/juste après l’écriture, récupère les valeurs de partition distinctes dans le DataFrame source (ou celui que tu as écrit), construis les chemins Hive-style et relis uniquement ces chemins.
+
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.Row;
+import java.util.*;
+import static org.apache.spark.sql.functions.*;
+
+public class ReadJustWrittenPartitions {
+
+  // Exemple: partitionCols = ["dt","hour"], basePath = ".../out/my_table/"
+  public static Dataset<Row> readJustWritten(SparkSession spark,
+                                             Dataset<Row> dfWrittenSource,
+                                             String basePath,
+                                             List<String> partitionCols) {
+    // 1) Liste des partitions touchées (distinct)
+    Dataset<Row> keys = dfWrittenSource.selectExpr(partitionCols.toArray(new String[0])).distinct();
+
+    // 2) Collecte (le nb de partitions reste petit vs nb de lignes)
+    List<Row> parts = keys.collectAsList();
+
+    // 3) Construire les chemins Hive-style dt=2025-11-01/hour=13/
+    List<String> paths = new ArrayList<>(parts.size());
+    for (Row r : parts) {
+      StringBuilder p = new StringBuilder(basePath);
+      for (int i = 0; i < partitionCols.size(); i++) {
+        String col = partitionCols.get(i);
+        Object v = r.get(i);
+        if (v == null) throw new IllegalStateException("Partition null pour " + col);
+        p.append(col).append('=').append(v.toString()).append('/');
+      }
+      paths.add(p.toString());
+    }
+
+    // 4) Relire UNIQUEMENT ces partitions
+    return spark.read().parquet(paths.toArray(new String[0]));
+  }
+
+  // Usage
+  public static void main(String[] args) {
+    SparkSession spark = SparkSession.builder().appName("read-new-partitions").getOrCreate();
+
+    String base = "abfss://container@acct.dfs.core.windows.net/out/my_table/";
+    List<String> partCols = Arrays.asList("dt","hour");
+
+    // dfOut = ce que tu viens d’écrire (ou sa version transformée avant write)
+    Dataset<Row> dfOut = ...; // contient colonnes dt, hour
+
+    // Écriture (en n’écrivant que certaines partitions)
+    spark.conf().set("spark.sql.sources.partitionOverwriteMode", "dynamic"); // important si Overwrite
+    dfOut.write().mode(SaveMode.Overwrite).partitionBy(partCols.toArray(new String[0])).parquet(base);
+
+    // Relecture des seules partitions écrites :
+    Dataset<Row> justWritten = readJustWritten(spark, dfOut, base, partCols);
+
+    // -> charge ensuite dans ClickHouse
+    justWritten.writeTo("clickhouse.default.my_table").append();
+
+    spark.stop();
+  }
+}
+
+Pourquoi c’est bien :
+
+Zéro scan de tout le dossier
+
+Compatible HDFS/ABFS/S3
+
+Pas de dépendance au metastore : on lit par chemins ciblés
+
+
+
+---
+
+🧰 Technique #2 — Relire par filtre sur partitions (si table enregistrée)
+
+Si tu as enregistré la table Parquet dans le metastore (ou une table Iceberg/Delta), tu peux filtrer le partition prune côté Spark :
+
+// Table externe parquet déclarée: spark.sql("CREATE TABLE bronze.my_table USING parquet LOCATION '.../out/my_table/' PARTITIONED BY (dt, hour)")
+Dataset<Row> justWritten = spark.table("bronze.my_table")
+  .where(col("dt").isin("2025-11-01"))
+  .where(col("hour").isin(13, 14)); // valeurs que tu viens d’écrire
+
+// puis vers ClickHouse v2
+justWritten.writeTo("clickhouse.default.my_table").append();
+
+> Ici Spark nira que les partitions correspondantes (partition pruning), mais il faut la table enregistrée.
+
+
+
+
+---
+
+🧾 Technique #3 — Manifest des partitions écrites
+
+Si tu veux une traçabilité, écris un manifest JSON des partitions touchées pendant le job, puis relis ce manifest pour construire la liste de chemins :
+
+// 1) Construire un mini DF des partitions puis l’écrire en JSON
+Dataset<Row> manifest = dfOut.select("dt","hour").distinct();
+manifest.coalesce(1).write().mode(SaveMode.Overwrite).json(base + "_manifest/run_2025-11-01T13-00Z/");
+
+// 2) Plus tard, relire le manifest et composer les chemins
+Dataset<Row> mf = spark.read().json(base + "_manifest/run_2025-11-01T13-00Z/");
+List<Row> parts = mf.collectAsList();
+// -> reconstruire les chemins comme en #1
+
+> Utile pour des pipelines multi-étapes et des relances idempotentes.
+
+
+
+
+---
+
+Réglages utiles
+
+Overwrite sélectif :
+
+spark.conf().set("spark.sql.sources.partitionOverwriteMode","dynamic")
+
+➜ Spark n’écrase que les partitions touchées (pas tout le dossier).
+
+Schémas : garde strictement les mêmes noms/types entre Parquet et ClickHouse (ou mappe avant l’insert).
+
+Gros volumes : si you as des milliers de partitions par run, préfère le manifest (#3) pour éviter un collect() trop grand (même si, en pratique, le nb de partitions touchées par run reste souvent raisonnable).
+
+
+
+---
+
+Mini-résumé
+
+Le meilleur compromis : construire les chemins Hive-style des partitions que tu viens d’écrire et relire uniquement ces chemins (#1).
+
+Si tu as une table déclarée : filtre par colonnes de partition (#2) et laisse Spark faire le partition pruning.
+
+Pour l’audit et la relance : écris un manifest (#3).
+
+
+Si tu me donnes tes colonnes de partition (ex. dt, hour, country…), je te fournis la méthode util exactement adaptée (String/Int/Date, formatage, null handling) + l’appel writeTo() ClickHouse v2 prêt à coller.
