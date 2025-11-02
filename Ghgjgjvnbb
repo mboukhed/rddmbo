@@ -1,0 +1,55 @@
+import java.util.*;
+
+public final class SqlPredicateBuilder {
+
+    private SqlPredicateBuilder() {}
+
+    /**
+     * Build a clean SQL WHERE predicate string from a list of predicates.
+     * - Keeps parentheses even for single predicates.
+     * - Skips null, blank, and "1=1".
+     * - Returns "1=1" if all inputs are blank.
+     *
+     * Examples:
+     *   build("AND", "a=1", "b=2") -> "(a=1) AND (b=2)"
+     *   build("OR", Arrays.asList("x>1", "y<5")) -> "(x>1) OR (y<5)"
+     */
+    public static String build(String operator, String... predicates) {
+        if (predicates == null || predicates.length == 0) {
+            return "1=1";
+        }
+        return build(operator, Arrays.asList(predicates));
+    }
+
+    public static String build(String operator, List<String> predicates) {
+        // Normalize operator (default = AND)
+        String op = (operator == null || operator.isBlank()) ? "AND" : operator.trim().toUpperCase(Locale.ROOT);
+
+        List<String> parts = new ArrayList<>();
+        for (String p : predicates) {
+            String np = normalize(p);
+            if (np != null) parts.add("(" + np + ")");
+        }
+
+        if (parts.isEmpty()) return "1=1";
+        return String.join(" " + op + " ", parts);
+    }
+
+    // --- Internal helpers ---
+
+    private static String normalize(String s) {
+        if (s == null) return null;
+        String t = s.trim();
+        if (t.isEmpty()) return null;
+        if (t.replaceAll("\\s+", "").equalsIgnoreCase("1=1")) return null;
+        return t;
+    }
+
+    // --- Quick demo ---
+    public static void main(String[] args) {
+        System.out.println(build("AND", "a=1", "b=2"));                // (a=1) AND (b=2)
+        System.out.println(build("OR", Arrays.asList("x>1", "y<5")));  // (x>1) OR (y<5)
+        System.out.println(build("AND", " ", null, "1=1"));            // 1=1
+        System.out.println(build(null, "c=3"));                        // (c=3)
+    }
+}
