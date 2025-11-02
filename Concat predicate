@@ -1,0 +1,125 @@
+Parfait 👌
+Tu veux maintenant gérer plusieurs prédicats dynamiques (par exemple une List<String> ou varargs),
+et les concaténer proprement, en ignorant les vides, les null, et les "1=1".
+
+C’est une super pratique à avoir dans tes loaders Spark → ClickHouse/Hive.
+
+
+---
+
+✅ Méthode complète (multi-prédicats)
+
+(commentaires en anglais uniquement dans le code)
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Utility for safe concatenation of multiple SQL predicates.
+ *
+ * Rules:
+ * - Ignores null, empty, or "1=1" predicates.
+ * - Wraps each in parentheses if not already wrapped.
+ * - Joins valid ones with " AND ".
+ * - Returns "" if all predicates are empty.
+ */
+public static String mergePredicates(String... predicates) {
+    if (predicates == null || predicates.length == 0) return "";
+
+    List<String> valid = Arrays.stream(predicates)
+            .filter(Objects::nonNull)
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .filter(s -> !"1=1".equalsIgnoreCase(s))
+            .map(PartitionDescriptor::normalizePredicate)
+            .collect(Collectors.toList());
+
+    if (valid.isEmpty()) return "";
+    if (valid.size() == 1) return valid.get(0);
+
+    return valid.stream()
+            .map(s -> "(" + s + ")")
+            .collect(Collectors.joining(" AND "));
+}
+
+/**
+ * Utility for safe concatenation from a collection of predicates.
+ */
+public static String mergePredicates(Collection<String> predicates) {
+    if (predicates == null || predicates.isEmpty()) return "";
+    return mergePredicates(predicates.toArray(new String[0]));
+}
+
+// Internal helper to remove redundant parentheses
+private static String normalizePredicate(String s) {
+    if (s.startsWith("(") && s.endsWith(")")) {
+        String inner = s.substring(1, s.length() - 1).trim();
+        // unwrap only simple expressions
+        if (!inner.contains(" OR ") && !inner.contains(" AND ")) return inner;
+    }
+    return s;
+}
+
+
+---
+
+🧩 Exemples d’utilisation
+
+🟢 Cas simple
+
+String result = mergePredicates("country='FR'", "year=2025", "1=1", null);
+System.out.println(result);
+
+🟩 Résultat :
+
+(country='FR') AND (year=2025)
+
+
+---
+
+🟢 Avec des sous-clauses complexes
+
+String result = mergePredicates("(a=1 OR b=2)", "c IS NOT NULL", "(1=1)");
+System.out.println(result);
+
+🟩 Résultat :
+
+((a=1 OR b=2)) AND (c IS NOT NULL)
+
+
+---
+
+🟢 Avec une liste dynamique
+
+List<String> filters = Arrays.asList(
+    "country='FR'",
+    null,
+    "",
+    "dt='2025-11-01'",
+    "1=1"
+);
+
+String result = mergePredicates(filters);
+System.out.println(result);
+
+🟩 Résultat :
+
+(country='FR') AND (dt='2025-11-01')
+
+
+---
+
+✅ En résumé
+
+Entrée	Sortie
+
+null, "", "1=1"	ignoré
+"a=1" seul	a=1
+"a=1", "b=2"	(a=1) AND (b=2)
+"a=1 OR b=2", "c=3"	((a=1 OR b=2)) AND (c=3)
+
+
+
+---
+
+Souhaites-tu que je t’ajoute une option (operator) pour pouvoir fusionner avec "OR" au lieu de "AND" selon le contexte (ex : mergePredicatesWith("OR", preds...)) ?
