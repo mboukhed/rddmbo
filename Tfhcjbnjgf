@@ -1,0 +1,32 @@
+private static Boolean tableClickhouseExists(SparkSession spark, String database, String table) {
+    String query = String.format("DESCRIBE clickhouse.`%s`.`%s`", database, table);
+    try {
+        spark.sql(query).limit(1).collect(); // trigger execution
+        System.out.println("✅ Table exists: " + database + "." + table);
+        return true;
+    } 
+    catch (Throwable e) { // catch Throwable to cover all Spark errors without imports
+        String msg = (e.getMessage() != null) ? e.getMessage().toLowerCase() : "";
+
+        // Cas "table inexistante"
+        if (msg.contains("table or view not found") ||
+            msg.contains("no such table") ||
+            msg.contains("not found in catalog") ||
+            msg.contains("cannot resolve") ||
+            msg.contains("does not exist")) {
+            System.out.println("⚠️ Table does NOT exist: " + database + "." + table);
+            return false;
+        }
+
+        // Cas réseau / TLS / proxy / autres erreurs Spark
+        if (msg.contains("ssl") || msg.contains("tls") || msg.contains("connection") ||
+            msg.contains("timeout") || msg.contains("network")) {
+            System.err.println("🚨 Network-related error while checking table " + database + "." + table);
+            return null; // état inconnu
+        }
+
+        // Toute autre erreur Spark
+        System.err.println("❌ Unexpected error while checking table " + database + "." + table + ": " + e);
+        return null; // état inconnu
+    }
+}
