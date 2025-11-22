@@ -1,0 +1,88 @@
+Parfait. On peut faire ça de manière propre en utilisant un Jenkinsfile parent qui appelle les stages définis dans les fichiers enfants, soit via load (scripted pipeline) soit via Shared Libraries (plus propre à long terme). Comme tu veux juste un seul Jenkinsfile parent, voici une approche simple avec load.
+
+
+---
+
+1️⃣ Exemple de structure
+
+Jenkinsfile          # Parent
+stages_project1.groovy
+stages_project2.groovy
+
+
+---
+
+2️⃣ Fichiers enfants (exemple stages_project1.groovy)
+
+def call() {
+    stage('Build Project1') {
+        echo "Building Project1..."
+        // commandes build
+    }
+
+    stage('Test Project1') {
+        echo "Testing Project1..."
+        // commandes test
+    }
+}
+
+return this
+
+Et stages_project2.groovy :
+
+def call() {
+    stage('Build Project2') {
+        echo "Building Project2..."
+    }
+
+    stage('Test Project2') {
+        echo "Testing Project2..."
+    }
+}
+
+return this
+
+
+---
+
+3️⃣ Jenkinsfile parent
+
+pipeline {
+    agent any
+
+    stages {
+        stage('Project1 Stages') {
+            steps {
+                script {
+                    def project1Stages = load 'stages_project1.groovy'
+                    project1Stages()
+                }
+            }
+        }
+
+        stage('Project2 Stages') {
+            steps {
+                script {
+                    def project2Stages = load 'stages_project2.groovy'
+                    project2Stages()
+                }
+            }
+        }
+    }
+}
+
+✅ Avantages :
+
+Tu gardes chaque projet séparé et lisible.
+
+Tu peux appeler les stages conditionnellement (via des if sur les branches ou variables).
+
+Facile à étendre à plus de projets.
+
+
+
+---
+
+Si tu veux, je peux te faire une version encore plus propre qui regroupe tous les stages enfants directement dans le pipeline parent sans créer des "super-stages" pour chaque projet, ce qui donne un pipeline plus fluide et modulable.
+
+Veux-tu que je fasse ça ?
