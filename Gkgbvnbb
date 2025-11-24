@@ -1,0 +1,87 @@
+Tu as une erreur SLF4JBridgeHandler manquant :
+
+Caused by: java.lang.NoClassDefFoundError: org/slf4j/bridge/SLF4JBridgeHandler
+Caused by: java.lang.ClassNotFoundException: org.slf4j.bridge.SLF4JBridgeHandler
+
+👉 Cette erreur n’a rien à voir avec Spark lui-même,
+👉 elle vient de tests JUnit/Cucumber qui exécutent du code Spark sans le bon binding SLF4J.
+
+En clair :
+Spark essaye d’activer le bridge JUL → SLF4J, mais la classe n’existe pas dans ton classpath test.
+
+
+---
+
+✅ Solution immédiate
+
+Ajoute cette dépendance dans le scope test :
+
+<dependency>
+    <groupId>org.slf4j</groupId>
+    <artifactId>jul-to-slf4j</artifactId>
+    <version>1.7.36</version> 
+    <scope>test</scope>
+</dependency>
+
+Ou si tu utilises SLF4J 2.x :
+
+<dependency>
+    <groupId>org.slf4j</groupId>
+    <artifactId>jul-to-slf4j</artifactId>
+    <version>2.0.9</version>
+    <scope>test</scope>
+</dependency>
+
+Spark 3.3 / 3.4 utilise encore SLF4J 1.7.x → prends la 1.7.36.
+
+
+---
+
+❗ Pourquoi ça apparaît dans tes CucumberPipelineTests ?
+
+Parce que :
+
+Spark charge ParquetFileFormat
+
+Ce code appelle SLF4JBridgeHandler.removeHandlersForRootLogger()
+
+Dans un environnement de test, tu n'as pas le binding SLF4J complet
+
+→ erreur NoClassDefFoundError
+
+
+En production, tu n’as pas ce souci car ton image Docker Spark fournit tout.
+
+
+---
+
+🔍 Vérification supplémentaire
+
+Vérifie que tu as bien aussi un binding SLF4J (logback par exemple) :
+
+<dependency>
+    <groupId>ch.qos.logback</groupId>
+    <artifactId>logback-classic</artifactId>
+    <version>1.2.11</version>
+    <scope>test</scope>
+</dependency>
+
+Sinon tu vas avoir un autre warning :
+
+SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+
+
+---
+
+✨ Résumé clair
+
+1️⃣ Le test charge Spark → Spark active SLF4JBridgeHandler
+2️⃣ SLF4JBridgeHandler n’est pas dans ton classpath test
+3️⃣ → crash
+
+👉 Ajoute jul-to-slf4j en scope test, et c’est réglé.
+
+
+---
+
+Si tu veux, envoie-moi ton pom.xml (partie logging & tests) et je te le corrige proprement pour Spark + JUnit + Cucumber.
