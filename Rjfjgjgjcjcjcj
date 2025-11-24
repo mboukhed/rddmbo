@@ -1,0 +1,36 @@
+pipeline {
+    agent any
+
+    environment {
+        // ==== Maven coordinates ====
+        GROUP_ID        = 'com.mycompany.project'   // TODO: replace
+        ARTIFACT_ID     = 'my-service'              // TODO: replace
+        SNAPSHOT_VERSION = '1.2.3-SNAPSHOT'         // TODO: can also be a parameter
+
+        // ==== JFrog repositories ====
+        // Snapshot repo (url1)
+        JFROG_SNAPSHOT_URL = 'https://jfrog.company.com/artifactory/libs-snapshot-local' // TODO: replace
+
+        // Release repo (url2)
+        JFROG_RELEASE_URL  = 'https://jfrog.company.com/artifactory/libs-release-local'   // TODO: replace
+        RELEASE_REPO_ID    = 'jfrog-releases'   // <server id> in ~/.m2/settings.xml
+
+        // Do not set MAVEN_REPO here, WORKSPACE is not yet defined
+    }
+
+    stages {
+
+        stage('Init versions & Maven repo') {
+            steps {
+                script {
+                    // Compute release version by removing "-SNAPSHOT"
+                    env.RELEASE_VERSION = env.SNAPSHOT_VERSION.replace('-SNAPSHOT', '')
+
+                    // Use Jenkins workspace as local Maven repository
+                    env.MAVEN_REPO = "${env.WORKSPACE}/.m2"
+
+                    echo "GROUP_ID        = ${env.GROUP_ID}"
+                    echo "ARTIFACT_ID     = ${env.ARTIFACT_ID}"
+                    echo "SNAPSHOT_VERSION= ${env.SNAPSHOT_VERSION}"
+                    echo "RELEASE_VERSION = ${env.RELEASE_VERSION}"
+                    echo "MAVEN_REPO      = ${env.MAVEN_RE
