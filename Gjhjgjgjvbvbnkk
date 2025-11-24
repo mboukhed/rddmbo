@@ -1,0 +1,123 @@
+Parfait, on va dériver la version release automatiquement à partir de la version snapshot (1.2.3-SNAPSHOT → 1.2.3) et tout faire avec Maven uniquement.
+
+Je te donne un Jenkinsfile minimal qui fait exactement :
+
+1. Tire le JAR snapshot depuis JFrog (url1) avec Maven
+
+
+2. Déduit la version release en supprimant -SNAPSHOT
+
+
+3. Renomme le JAR
+
+
+4. Pousse le JAR en release (+ POM sans snapshot) dans JFrog (url2) avec mvn deploy:deploy-file
+
+
+
+
+---
+
+Jenkinsfile
+
+pipeline {
+    agent any
+
+    environment {
+        // Coordonnées Maven
+        GROUP_ID         = 'com.mycompany.project'
+        ARTIFACT_ID      = 'spark-loader'
+        SNAPSHOT_VERSION = '1.2.3-SNAPSHOT'   // tu peux la passer en param si tu veux
+
+        // JFrog
+        JFROG_SNAPSHOT_URL = 'https://jfrog.company.com/artifactory/libs-snapshot-local'
+        JFROG_RELEASE_URL  = 'https://jfrog.company.com/artifactory/libs-release-local'
+        RELEASE_REPO_ID    = 'jfrog-releases'   // <server id> dans ton settings.xml
+    }
+
+    stages {
+
+        stage('Init versions') {
+            steps {
+                script {
+                    // 2. Dérive automatiquement la version release : on enlève "-SNAPSHOT"
+                    env.RELEASE_VERSION = env.SNAPSHOT_VERSION.replace('-SNAPSHOT', '')
+                    echo "SNAPSHOT_VERSION = ${env.SNAPSHOT_VERSION}"
+                    echo "RELEASE_VERSION  = ${env.RELEASE_VERSION}"
+                }
+            }
+        }
+
+        stage('1. Télécharger le JAR SNAPSHOT depuis JFrog') {
+            steps {
+                sh '''
+                    set -e
+
+                    # Maven copie directement le jar snapshot dans le workspace
+                    mvn -B org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+                        -DremoteRepositories=snaps::default::${JFROG_SNAPSHOT_URL} \
+                        -Dartifact=${GROUP_ID}:${ARTIFACT_ID}:${SNAPSHOT_VERSION}:jar \
+                        -DoutputDirectory=.
+
+                    ls -l
+                '''
+            }
+        }
+
+        stage('2. Renommer le JAR en version release (sans SNAPSHOT)') {
+            steps {
+                sh '''
+                    set -e
+                    SNAPSHOT_JAR="${ARTIFACT_ID}-${SNAPSHOT_VERSION}.jar"
+                    RELEASE_JAR="${ARTIFACT_ID}-${RELEASE_VERSION}.jar"
+
+                    cp "$SNAPSHOT_JAR" "$RELEASE_JAR"
+
+                    echo "Snapshot jar : $SNAPSHOT_JAR"
+                    echo "Release  jar : $RELEASE_JAR"
+                '''
+            }
+        }
+
+        stage('3. Déployer le JAR + POM release dans JFrog') {
+            steps {
+                sh '''
+                    set -e
+
+                    # Maven publie le JAR en version RELEASE_VERSION
+                    # et génère un POM sans -SNAPSHOT
+                    mvn -B org.apache.maven.plugins:maven-deploy-plugin:3.1.1:deploy-file \
+                        -Dfile="${ARTIFACT_ID}-${RELEASE_VERSION}.jar" \
+                        -DgroupId="${GROUP_ID}" \
+                        -DartifactId="${ARTIFACT_ID}" \
+                        -Dversion="${RELEASE_VERSION}" \
+                        -Dpackaging=jar \
+                        -DrepositoryId="${RELEASE_REPO_ID}" \
+                        -Durl="${JFROG_RELEASE_URL}" \
+                        -DgeneratePom=true
+                '''
+            }
+        }
+    }
+}
+
+
+---
+
+Points importants
+
+Aucune commande curl :
+
+téléchargement → maven-dependency-plugin:copy
+
+upload → maven-deploy-plugin:deploy-file
+
+
+RELEASE_VERSION est calculée automatiquement :
+
+env.RELEASE_VERSION = env.SNAPSHOT_VERSION.replace('-SNAPSHOT', '')
+
+Les credentials JFrog sont gérés dans ton settings.xml Maven via le <server id="${RELEASE_REPO_ID}">.
+
+
+Si tu me donnes tes vraies valeurs (groupId, artifactId, URLs snapshot/release, id du serveur Maven), je te le retourne déjà rempli avec tes infos réelles.
