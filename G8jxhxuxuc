@@ -1,0 +1,41 @@
+stage("get_snapshot") {
+    steps {
+        script {
+
+            echo "1) Downloading snapshot JAR from JFrog…"
+            sh """
+                mvn -Dmaven.repo.local=${env.WORKSPACE}/.m2 \\
+                    org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \\
+                    -DremoteRepositories=snapshot::default::${params.jfrog_url_snapshot} \\
+                    -Dartifact=${params.group_id}:${params.project_name}:${params.version_snapshot}:jar \\
+                    -DoutputDirectory=.
+            """
+
+            echo "2) Renaming snapshot jar → release jar…"
+            sh """
+                SNAP_JAR="${params.project_name}-${params.version_snapshot}.jar"
+                REL_JAR="${params.project_name}-${params.version_snapshot.replace('-SNAPSHOT','')}.jar"
+
+                cp "$SNAP_JAR" "$REL_JAR"
+
+                echo "SNAPSHOT  = $SNAP_JAR"
+                echo "RELEASE   = $REL_JAR"
+            """
+
+            echo "3) Deploying release jar to JFrog…"
+            sh """
+                mvn -Dmaven.repo.local=${env.WORKSPACE}/.m2 \\
+                    org.apache.maven.plugins:maven-deploy-plugin:3.1.1:deploy-file \\
+                    -Dfile="${params.project_name}-${params.version_snapshot.replace('-SNAPSHOT','')}.jar" \\
+                    -DgroupId=${params.group_id} \\
+                    -DartifactId=${params.project_name} \\
+                    -Dversion=${params.version_snapshot.replace('-SNAPSHOT','')} \\
+                    -Dpackaging=jar \\
+                    -DrepositoryId=${params.jfrog_repo_id_release} \\
+                    -Durl=${params.jfrog_url_release} \\
+                    -DgeneratePom=true
+            """
+
+        }
+    }
+}
