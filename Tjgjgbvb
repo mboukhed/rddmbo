@@ -1,0 +1,173 @@
+Parfait, on garde tout pareil mais on change uniquement la partie Azure :
+
+le JAR est déployé sous le nom : monjar.jar (sans version),
+
+le JSON est déployé sous le nom : monjar.json et contient la version.
+
+
+Je te redonne le Jenkinsfile complet déjà adapté 👇
+
+pipeline {
+    agent any
+
+    environment {
+        // JFrog
+        JFROG_USER             = "${env.JFROG_USER}"
+        JFROG_TOKEN            = "${env.JFROG_TOKEN}"
+
+        // URL 1 = artefact SNAPSHOT complet
+        SNAPSHOT_JAR_URL       = 'https://jfrog-snapshot-url/path/to/app-1.0.0-SNAPSHOT.jar'
+        SNAPSHOT_POM_URL       = 'https://jfrog-snapshot-url/path/to/app-1.0.0-SNAPSHOT.pom'
+
+        // URL 2 = dossier cible release
+        JFROG_RELEASE_BASE_URL = 'https://jfrog-release-url/path/to/release/1.0.0'
+
+        // Azure
+        AZURE_STORAGE_ACCOUNT  = "${env.AZURE_STORAGE_ACCOUNT}"
+        AZURE_CONTAINER        = "${env.AZURE_CONTAINER}"
+        AZURE_PATH_PREFIX      = 'releases/app'  // sous-dossier dans le container
+    }
+
+    stages {
+
+        stage('Download SNAPSHOT from JFrog') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Downloading SNAPSHOT JAR and POM..."
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" -O "${SNAPSHOT_JAR_URL}"
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" -O "${SNAPSHOT_POM_URL}"
+                '''
+            }
+        }
+
+        stage('Rename SNAPSHOT -> release') {
+            steps {
+                script {
+                    sh '''
+                        set -e
+
+                        JAR_SNAPSHOT_FILE=$(basename "${SNAPSHOT_JAR_URL}")
+                        POM_SNAPSHOT_FILE=$(basename "${SNAPSHOT_POM_URL}")
+
+                        # app-1.0.0-SNAPSHOT.jar -> app-1.0.0.jar
+                        JAR_RELEASE_FILE="${JAR_SNAPSHOT_FILE/-SNAPSHOT/}"
+                        POM_RELEASE_FILE="${POM_SNAPSHOT_FILE/-SNAPSHOT/}"
+
+                        cp "${JAR_SNAPSHOT_FILE}" "${JAR_RELEASE_FILE}"
+                        cp "${POM_SNAPSHOT_FILE}" "${POM_RELEASE_FILE}"
+
+                        BASE_NAME="${JAR_RELEASE_FILE%.jar}"      # app-1.0.0
+                        VERSION="${BASE_NAME##*-}"                # 1.0.0
+                        ARTIFACT_ID="${BASE_NAME%-${VERSION}}"   # app
+
+                        echo "JAR_RELEASE_FILE=${JAR_RELEASE_FILE}"  >  build.env
+                        echo "POM_RELEASE_FILE=${POM_RELEASE_FILE}" >> build.env
+                        echo "ARTIFACT_ID=${ARTIFACT_ID}"           >> build.env
+                        echo "VERSION=${VERSION}"                   >> build.env
+                    '''
+
+                    def props = readProperties file: 'build.env'
+                    props.each { k, v -> env."${k}" = v }
+                }
+            }
+        }
+
+        stage('Push JAR + POM to JFrog release') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Uploading JAR and POM to JFrog release repo..."
+
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" \
+                         -T "${JAR_RELEASE_FILE}" \
+                         "${JFROG_RELEASE_BASE_URL}/${JAR_RELEASE_FILE}"
+
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" \
+                         -T "${POM_RELEASE_FILE}" \
+                         "${JFROG_RELEASE_BASE_URL}/${POM_RELEASE_FILE}"
+                '''
+            }
+        }
+
+        // 5. Générer lenomjar.json avec la version
+        stage('Generate version JSON') {
+            steps {
+                sh '''
+                    set -e
+
+                    # nom logique du jar sans version : app.jar
+                    JAR_NAME="${ARTIFACT_ID}.jar"
+                    JSON_NAME="${ARTIFACT_ID}.json"
+
+                    echo "AZURE_JAR_NAME=${JAR_NAME}"  >  azure.env
+                    echo "AZURE_JSON_NAME=${JSON_NAME}" >> azure.env
+
+                    cat > "${JSON_NAME}" <<EOF
+{
+  "jarName": "${JAR_NAME}",
+  "version": "${VERSION}"
+}
+EOF
+
+                    echo "Generated ${JSON_NAME}:"
+                    cat "${JSON_NAME}"
+                '''
+
+                def props2 = readProperties file: 'azure.env'
+                props2.each { k, v -> env."${k}" = v }
+            }
+        }
+
+        // 4. Déployer dans Azure le jar sans version + le JSON lenomjar.json
+        stage('Deploy JAR + JSON to Azure') {
+            steps {
+                sh '''
+                    set -e
+
+                    # Chemins côté Azure
+                    JAR_BLOB_PATH="${AZURE_PATH_PREFIX}/${AZURE_JAR_NAME}"
+                    JSON_BLOB_PATH="${AZURE_PATH_PREFIX}/${AZURE_JSON_NAME}"
+
+                    echo "Uploading JAR to Azure as ${JAR_BLOB_PATH}"
+                    az storage blob upload \
+                        --account-name "${AZURE_STORAGE_ACCOUNT}" \
+                        --container-name "${AZURE_CONTAINER}" \
+                        --name "${JAR_BLOB_PATH}" \
+                        --file "${JAR_RELEASE_FILE}" \
+                        --overwrite true
+
+                    echo "Uploading JSON to Azure as ${JSON_BLOB_PATH}"
+                    az storage blob upload \
+                        --account-name "${AZURE_STORAGE_ACCOUNT}" \
+                        --container-name "${AZURE_CONTAINER}" \
+                        --name "${JSON_BLOB_PATH}" \
+                        --file "${AZURE_JSON_NAME}" \
+                        --overwrite true
+                '''
+            }
+        }
+    }
+}
+
+Résumé de ce que ça fait côté Azure
+
+Le JAR app-1.0.0.jar est uploadé comme :
+
+releases/app/app.jar
+
+
+Le JSON est :
+
+fichier : releases/app/app.json
+
+contenu :
+
+{
+  "jarName": "app.jar",
+  "version": "1.0.0"
+}
+
+
+
+Si tu me donnes un exemple réel de nom d’artefact (ex : spark-loader-annot.jar), je te remplace app par ton vrai nom exactement comme tu veux.
