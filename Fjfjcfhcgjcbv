@@ -1,0 +1,183 @@
+Je te fais un Jenkinsfile complet, étape par étape, en restant générique.
+Tu n’auras qu’à adapter les URLs et les variables d’environnement.
+
+
+---
+
+Jenkinsfile (déclaratif)
+
+pipeline {
+    agent any
+
+    environment {
+        // JFrog
+        JFROG_USER             = "${env.JFROG_USER}"          // déjà défini dans Jenkins
+        JFROG_TOKEN            = "${env.JFROG_TOKEN}"         // déjà défini dans Jenkins
+
+        // URL 1 = artefact SNAPSHOT complet (fichier, pas dossier)
+        SNAPSHOT_JAR_URL       = 'https://jfrog-snapshot-url/path/to/app-1.0.0-SNAPSHOT.jar'
+        SNAPSHOT_POM_URL       = 'https://jfrog-snapshot-url/path/to/app-1.0.0-SNAPSHOT.pom'
+
+        // URL 2 = dossier cible release (se termine SANS nom de fichier)
+        JFROG_RELEASE_BASE_URL = 'https://jfrog-release-url/path/to/release/1.0.0'
+
+        // Azure (à adapter : storage, container, chemin)
+        AZURE_STORAGE_ACCOUNT  = "${env.AZURE_STORAGE_ACCOUNT}"
+        AZURE_CONTAINER        = "${env.AZURE_CONTAINER}"
+        AZURE_PATH_PREFIX      = 'releases/app'  // sous-dossier dans le container
+    }
+
+    stages {
+
+        stage('Download SNAPSHOT from JFrog') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Downloading SNAPSHOT JAR and POM..."
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" -O "${SNAPSHOT_JAR_URL}"
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" -O "${SNAPSHOT_POM_URL}"
+                '''
+            }
+        }
+
+        stage('Rename SNAPSHOT -> release') {
+            steps {
+                script {
+                    sh '''
+                        set -e
+
+                        JAR_SNAPSHOT_FILE=$(basename "${SNAPSHOT_JAR_URL}")
+                        POM_SNAPSHOT_FILE=$(basename "${SNAPSHOT_POM_URL}")
+
+                        # Exemple : app-1.0.0-SNAPSHOT.jar -> app-1.0.0.jar
+                        JAR_RELEASE_FILE="${JAR_SNAPSHOT_FILE/-SNAPSHOT/}"
+                        POM_RELEASE_FILE="${POM_SNAPSHOT_FILE/-SNAPSHOT/}"
+
+                        cp "${JAR_SNAPSHOT_FILE}" "${JAR_RELEASE_FILE}"
+                        cp "${POM_SNAPSHOT_FILE}" "${POM_RELEASE_FILE}"
+
+                        # Récupérer infos pour le JSON et Azure
+                        BASE_NAME="${JAR_RELEASE_FILE%.jar}"              # app-1.0.0
+                        VERSION="${BASE_NAME##*-}"                        # 1.0.0
+                        ARTIFACT_ID="${BASE_NAME%-${VERSION}}"           # app
+
+                        echo "JAR_RELEASE_FILE=${JAR_RELEASE_FILE}"  >  build.env
+                        echo "POM_RELEASE_FILE=${POM_RELEASE_FILE}" >> build.env
+                        echo "ARTIFACT_ID=${ARTIFACT_ID}"           >> build.env
+                        echo "VERSION=${VERSION}"                   >> build.env
+
+                        echo "Release JAR = ${JAR_RELEASE_FILE}"
+                        echo "Release POM = ${POM_RELEASE_FILE}"
+                        echo "Artifact    = ${ARTIFACT_ID}"
+                        echo "Version     = ${VERSION}"
+                    '''
+
+                    // Charger les variables dans l'env Jenkins
+                    def props = readProperties file: 'build.env'
+                    props.each { k, v -> env."${k}" = v }
+                }
+            }
+        }
+
+        stage('Push JAR + POM to JFrog release') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Uploading JAR and POM to JFrog release repo..."
+
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" \
+                         -T "${JAR_RELEASE_FILE}" \
+                         "${JFROG_RELEASE_BASE_URL}/${JAR_RELEASE_FILE}"
+
+                    curl -u "${JFROG_USER}:${JFROG_TOKEN}" \
+                         -T "${POM_RELEASE_FILE}" \
+                         "${JFROG_RELEASE_BASE_URL}/${POM_RELEASE_FILE}"
+                '''
+            }
+        }
+
+        stage('Generate version JSON') {
+            steps {
+                sh '''
+                    set -e
+                    cat > version.json <<EOF
+{
+  "artifact": "${ARTIFACT_ID}",
+  "version": "${VERSION}"
+}
+EOF
+
+                    echo "Generated version.json:"
+                    cat version.json
+                '''
+            }
+        }
+
+        stage('Deploy JAR + JSON to Azure') {
+            steps {
+                sh '''
+                    set -e
+
+                    # Exemples avec az storage blob upload
+                    # Authentification via az login / workload identity / connexion déjà faite
+
+                    JAR_BLOB_PATH="${AZURE_PATH_PREFIX}/${JAR_RELEASE_FILE}"
+                    JSON_BLOB_PATH="${AZURE_PATH_PREFIX}/version-${VERSION}.json"
+
+                    echo "Uploading JAR to Azure: ${JAR_BLOB_PATH}"
+                    az storage blob upload \
+                        --account-name "${AZURE_STORAGE_ACCOUNT}" \
+                        --container-name "${AZURE_CONTAINER}" \
+                        --name "${JAR_BLOB_PATH}" \
+                        --file "${JAR_RELEASE_FILE}" \
+                        --overwrite true
+
+                    echo "Uploading version.json to Azure: ${JSON_BLOB_PATH}"
+                    az storage blob upload \
+                        --account-name "${AZURE_STORAGE_ACCOUNT}" \
+                        --container-name "${AZURE_CONTAINER}" \
+                        --name "${JSON_BLOB_PATH}" \
+                        --file "version.json" \
+                        --overwrite true
+                '''
+            }
+        }
+    }
+}
+
+
+---
+
+Ce que fait ce pipeline
+
+1. Télécharge le JAR + POM SNAPSHOT depuis url1 (JFrog snapshot).
+
+
+2. Renomme *-SNAPSHOT.jar → *.jar et pareil pour le .pom, et extrait :
+
+ARTIFACT_ID
+
+VERSION
+
+
+
+3. Push JAR + POM renommés dans JFrog release (url2).
+
+
+4. Génère un version.json contenant artifact + version.
+
+
+5. Upload le JAR et le version.json dans Azure Storage (commande az storage blob upload).
+
+
+
+Tu n’as qu’à :
+
+mettre les bonnes valeurs pour SNAPSHOT_JAR_URL, SNAPSHOT_POM_URL, JFROG_RELEASE_BASE_URL,
+
+adapter les variables Azure (AZURE_STORAGE_ACCOUNT, AZURE_CONTAINER, AZURE_PATH_PREFIX),
+
+t’assurer que az est dispo sur l’agent Jenkins et déjà authentifié (workload identity / managed / service principal).
+
+
+Si tu veux, tu m’envoies un exemple réel d’URL snapshot + release et je te redonne la version du Jenkinsfile déjà pré-remplie avec tes chemins exacts.
