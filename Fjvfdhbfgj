@@ -1,0 +1,10 @@
+def deployDate = sh(script: "date -u +%Y-%m-%dT%H:%M:%SZ", returnStdout: true).trim()
+
+def json = """
+{
+  "backup_release": "${REL_VER}",
+  "deployDate": "${deployDate}"
+}
+"""
+
+writeFile file: "${REL_PATH}/${ARTIFACT_ID}.json", text: json
