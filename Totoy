@@ -1,0 +1,190 @@
+Parfait, on passe tout par paramètres 👍
+
+Je te propose une version qui prend en paramètres :
+
+engine (ex : "MergeTree()")
+
+primaryKeyCols : liste de colonnes pour PRIMARY KEY
+
+orderByCols : liste de colonnes pour ORDER BY
+
+partitionByCols : liste de colonnes pour PARTITION BY
+
+
+Tu pourras appeler la méthode en passant simplement des List<String>.
+
+
+---
+
+🔧 Classe utilitaire complète
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public final class ClickHouseDdlGenerator {
+
+    private ClickHouseDdlGenerator() {
+        // util
+    }
+
+    public static String generateCreateTable(
+            Dataset<Row> dataset,
+            String fullTableName,
+            String engine,                  // ex: "MergeTree()"
+            List<String> primaryKeyCols,    // ex: List.of("id")
+            List<String> orderByCols,       // ex: List.of("event_date", "id")
+            List<String> partitionByCols    // ex: List.of("toYYYYMM(event_date)")
+    ) {
+        StructType schema = dataset.schema();
+        List<String> columnDefs = new ArrayList<>();
+
+        for (StructField field : schema.fields()) {
+            String columnName = field.name();
+            DataType sparkType = field.dataType();
+            boolean nullable = field.nullable();
+
+            String ckType = toClickHouseType(sparkType, nullable);
+            String colDef = "  `" + columnName + "` " + ckType;
+            columnDefs.add(colDef);
+        }
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE TABLE IF NOT EXISTS ")
+           .append(fullTableName)
+           .append(" (\n")
+           .append(String.join(",\n", columnDefs))
+           .append("\n)")
+           .append(" ENGINE = ")
+           .append(engine);
+
+        // PRIMARY KEY
+        if (primaryKeyCols != null && !primaryKeyCols.isEmpty()) {
+            ddl.append("\nPRIMARY KEY (")
+               .append(joinColumns(primaryKeyCols))
+               .append(")");
+        }
+
+        // ORDER BY (obligatoire pour MergeTree et dérivés)
+        if (orderByCols != null && !orderByCols.isEmpty()) {
+            ddl.append("\nORDER BY (")
+               .append(joinColumns(orderByCols))
+               .append(")");
+        } else if (primaryKeyCols != null && !primaryKeyCols.isEmpty()) {
+            // fallback : ORDER BY = PRIMARY KEY
+            ddl.append("\nORDER BY (")
+               .append(joinColumns(primaryKeyCols))
+               .append(")");
+        } else {
+            // dernier fallback : première colonne du schéma
+            if (schema.fields().length > 0) {
+                ddl.append("\nORDER BY (`")
+                   .append(schema.fields()[0].name())
+                   .append("`)");
+            }
+        }
+
+        // PARTITION BY
+        if (partitionByCols != null && !partitionByCols.isEmpty()) {
+            // on considère que les expressions sont déjà complètes (avec fonctions éventuelles)
+            String partExpr = partitionByCols.stream()
+                    .map(String::trim)
+                    .collect(Collectors.joining(", "));
+            ddl.append("\nPARTITION BY (")
+               .append(partExpr)
+               .append(")");
+        }
+
+        ddl.append(";");
+        return ddl.toString();
+    }
+
+    private static String joinColumns(List<String> cols) {
+        return cols.stream()
+                .map(String::trim)
+                .map(c -> "`" + c + "`")
+                .collect(Collectors.joining(", "));
+    }
+
+    private static String toClickHouseType(DataType sparkType, boolean nullable) {
+        String baseType;
+
+        if (sparkType instanceof ByteType || sparkType instanceof ShortType || sparkType instanceof IntegerType) {
+            baseType = "Int32";
+        } else if (sparkType instanceof LongType) {
+            baseType = "Int64";
+        } else if (sparkType instanceof FloatType) {
+            baseType = "Float32";
+        } else if (sparkType instanceof DoubleType) {
+            baseType = "Float64";
+        } else if (sparkType instanceof BooleanType) {
+            baseType = "UInt8";
+        } else if (sparkType instanceof StringType) {
+            baseType = "String";
+        } else if (sparkType instanceof DateType) {
+            baseType = "Date";
+        } else if (sparkType instanceof TimestampType) {
+            baseType = "DateTime";
+        } else if (sparkType instanceof DecimalType) {
+            DecimalType dec = (DecimalType) sparkType;
+            baseType = "Decimal(" + dec.precision() + "," + dec.scale() + ")";
+        } else if (sparkType instanceof BinaryType) {
+            baseType = "String";
+        } else if (sparkType instanceof ArrayType) {
+            ArrayType at = (ArrayType) sparkType;
+            String elemType = toClickHouseType(at.elementType(), false);
+            baseType = "Array(" + elemType + ")";
+        } else if (sparkType instanceof MapType) {
+            MapType mt = (MapType) sparkType;
+            String keyType = toClickHouseType(mt.keyType(), false);
+            String valueType = toClickHouseType(mt.valueType(), false);
+            baseType = "Map(" + keyType + "," + valueType + ")";
+        } else if (sparkType instanceof StructType) {
+            baseType = "String"; // ou Nested(...) si tu veux aller plus loin
+        } else {
+            baseType = "String";
+        }
+
+        if (nullable) {
+            return "Nullable(" + baseType + ")";
+        } else {
+            return baseType;
+        }
+    }
+}
+
+
+---
+
+🧪 Exemple d’utilisation
+
+Dataset<Row> ds = ...; // ton Dataset<Row>
+
+String ddl = ClickHouseDdlGenerator.generateCreateTable(
+        ds,
+        "mydb.fact_operations",
+        "MergeTree()",
+        List.of("id_operation"),                   // PRIMARY KEY
+        List.of("event_date", "id_operation"),     // ORDER BY
+        List.of("toYYYYMM(event_date)")           // PARTITION BY
+);
+
+System.out.println(ddl);
+
+Sortie possible :
+
+CREATE TABLE IF NOT EXISTS mydb.fact_operations (
+  `id_operation` Int64,
+  `event_date` Date,
+  `amount` Nullable(Decimal(18,2)),
+  `status` Nullable(String)
+) ENGINE = MergeTree()
+PRIMARY KEY (`id_operation`)
+ORDER BY (`event_date`, `id_operation`)
+PARTITION BY (toYYYYMM(event_date));
+
+Si tu veux, on peut ajouter encore des paramètres optionnels (TTL, COMMENT, SETTINGS, override de type par colonne, etc.).
