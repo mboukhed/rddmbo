@@ -1,0 +1,185 @@
+Parfait, on rajoute tout ça par paramètres 👍
+
+Compression des String → via CODEC(...) sur les colonnes de type String
+
+Compression globale de la table → via SETTINGS compression_codec = '...'
+
+
+🔧 Version mise à jour
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public final class ClickHouseDdlGenerator {
+
+    private ClickHouseDdlGenerator() {
+        // util
+    }
+
+    public static String generateCreateTable(
+            Dataset<Row> dataset,
+            String fullTableName,
+            String engine,                  // ex: "MergeTree()"
+            List<String> primaryKeyCols,    // ex: List.of("id")
+            List<String> orderByCols,       // ex: List.of("event_date", "id")
+            List<String> partitionByCols,   // ex: List.of("toYYYYMM(event_date)")
+            String stringCodec,             // ex: "ZSTD(3)" ou "LZ4"  (pour les String)
+            String compressionCodec         // ex: "ZSTD(3)"          (table-wide)
+    ) {
+        StructType schema = dataset.schema();
+        List<String> columnDefs = new ArrayList<>();
+
+        for (StructField field : schema.fields()) {
+            String columnName = field.name();
+            DataType sparkType = field.dataType();
+            boolean nullable = field.nullable();
+
+            String chType = toClickHouseType(sparkType, nullable);
+
+            StringBuilder colDef = new StringBuilder();
+            colDef.append("  `").append(columnName).append("` ")
+                  .append(chType);
+
+            // compression spécifique aux String
+            if (sparkType instanceof StringType
+                    && stringCodec != null
+                    && !stringCodec.isBlank()) {
+                colDef.append(" CODEC(").append(stringCodec).append(")");
+            }
+
+            columnDefs.add(colDef.toString());
+        }
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE TABLE IF NOT EXISTS ")
+           .append(fullTableName)
+           .append(" (\n")
+           .append(String.join(",\n", columnDefs))
+           .append("\n)")
+           .append(" ENGINE = ")
+           .append(engine);
+
+        // PRIMARY KEY
+        if (primaryKeyCols != null && !primaryKeyCols.isEmpty()) {
+            ddl.append("\nPRIMARY KEY (")
+               .append(joinColumns(primaryKeyCols))
+               .append(")");
+        }
+
+        // ORDER BY
+        if (orderByCols != null && !orderByCols.isEmpty()) {
+            ddl.append("\nORDER BY (")
+               .append(joinColumns(orderByCols))
+               .append(")");
+        } else if (primaryKeyCols != null && !primaryKeyCols.isEmpty()) {
+            ddl.append("\nORDER BY (")
+               .append(joinColumns(primaryKeyCols))
+               .append(")");
+        } else if (schema.fields().length > 0) {
+            ddl.append("\nORDER BY (`")
+               .append(schema.fields()[0].name())
+               .append("`)");
+        }
+
+        // PARTITION BY
+        if (partitionByCols != null && !partitionByCols.isEmpty()) {
+            String partExpr = partitionByCols.stream()
+                    .map(String::trim)
+                    .collect(Collectors.joining(", "));
+            ddl.append("\nPARTITION BY (")
+               .append(partExpr)
+               .append(")");
+        }
+
+        // SETTINGS (compression globale, + extensible pour d'autres settings)
+        List<String> settings = new ArrayList<>();
+        if (compressionCodec != null && !compressionCodec.isBlank()) {
+            settings.add("compression_codec = '" + compressionCodec + "'");
+        }
+
+        if (!settings.isEmpty()) {
+            ddl.append("\nSETTINGS ")
+               .append(String.join(", ", settings));
+        }
+
+        ddl.append(";");
+        return ddl.toString();
+    }
+
+    private static String joinColumns(List<String> cols) {
+        return cols.stream()
+                .map(String::trim)
+                .map(c -> "`" + c + "`")
+                .collect(Collectors.joining(", "));
+    }
+
+    private static String toClickHouseType(DataType sparkType, boolean nullable) {
+        String baseType;
+
+        if (sparkType instanceof ByteType
+                || sparkType instanceof ShortType
+                || sparkType instanceof IntegerType) {
+            baseType = "Int32";
+        } else if (sparkType instanceof LongType) {
+            baseType = "Int64";
+        } else if (sparkType instanceof FloatType) {
+            baseType = "Float32";
+        } else if (sparkType instanceof DoubleType) {
+            baseType = "Float64";
+        } else if (sparkType instanceof BooleanType) {
+            baseType = "UInt8";
+        } else if (sparkType instanceof StringType) {
+            baseType = "String";
+        } else if (sparkType instanceof DateType) {
+            baseType = "Date";
+        } else if (sparkType instanceof TimestampType) {
+            baseType = "DateTime";
+        } else if (sparkType instanceof DecimalType) {
+            DecimalType dec = (DecimalType) sparkType;
+            baseType = "Decimal(" + dec.precision() + "," + dec.scale() + ")";
+        } else if (sparkType instanceof BinaryType) {
+            baseType = "String";
+        } else if (sparkType instanceof ArrayType) {
+            ArrayType at = (ArrayType) sparkType;
+            String elemType = toClickHouseType(at.elementType(), false);
+            baseType = "Array(" + elemType + ")";
+        } else if (sparkType instanceof MapType) {
+            MapType mt = (MapType) sparkType;
+            String keyType = toClickHouseType(mt.keyType(), false);
+            String valueType = toClickHouseType(mt.valueType(), false);
+            baseType = "Map(" + keyType + "," + valueType + ")";
+        } else if (sparkType instanceof StructType) {
+            baseType = "String";
+        } else {
+            baseType = "String";
+        }
+
+        if (nullable) {
+            return "Nullable(" + baseType + ")";
+        } else {
+            return baseType;
+        }
+    }
+}
+
+🧪 Exemple d’appel
+
+String ddl = ClickHouseDdlGenerator.generateCreateTable(
+        ds,
+        "mydb.fact_operations",
+        "MergeTree()",
+        List.of("id_operation"),
+        List.of("event_date", "id_operation"),
+        List.of("toYYYYMM(event_date)"),
+        "ZSTD(3)",   // codec pour les String
+        "ZSTD(3)"    // compression globale
+);
+
+System.out.println(ddl);
+
+Si tu veux, on peut encore ajouter un param Map<String, String> pour d’autres SETTINGS (index_granularity, storage_policy, etc.) ou un override de type/codec par colonne.
