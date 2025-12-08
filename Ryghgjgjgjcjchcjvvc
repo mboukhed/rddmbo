@@ -1,0 +1,214 @@
+Parfait, on simplifie à fond 👍
+
+✅ Une seule méthode generateCreateTable(...)
+
+✅ Pas de DdlOptions
+
+✅ Pas de float→double automatique
+
+✅ ORDER BY totalement indépendant de la PK
+
+✅ ORDER BY tuple() si tu ne passes rien
+
+✅ String (et assimilés) → String CODEC(ZSTD)
+
+✅ Pas de Date32 (on reste en Date)
+
+✅ SETTINGS compression_codec = 'ZSTD(3)' en bas
+
+
+Tu peux coller cette classe telle quelle :
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public final class ClickHouseDdlGenerator {
+
+    private ClickHouseDdlGenerator() {
+        // util
+    }
+
+    /**
+     * Génère un DDL ClickHouse CREATE TABLE à partir du schéma Spark.
+     *
+     * @param dataset          Dataset<Row> dont on lit le schéma
+     * @param database         nom de la base ClickHouse (ex : "cdm_trades")
+     * @param table            nom de la table ClickHouse (ex : "trades_eod")
+     * @param engine           engine ClickHouse (ex : "MergeTree()")
+     * @param primaryKeyCols   liste de colonnes pour PRIMARY KEY (peut être null/vide)
+     * @param orderByCols      liste de colonnes pour ORDER BY (peut être null/vide -> tuple())
+     * @param partitionByExprs expressions pour PARTITION BY (ex : "toYYYYMM(trade_date)")
+     */
+    public static String generateCreateTable(
+            Dataset<Row> dataset,
+            String database,
+            String table,
+            String engine,
+            List<String> primaryKeyCols,
+            List<String> orderByCols,
+            List<String> partitionByExprs
+    ) {
+        StructType schema = dataset.schema();
+        List<String> columnDefs = new ArrayList<>();
+
+        for (StructField field : schema.fields()) {
+            String colName = field.name();
+            DataType sparkType = field.dataType();
+            boolean nullable = field.nullable();
+
+            String chType = toClickHouseType(sparkType, nullable);
+            columnDefs.add("  `" + colName + "` " + chType);
+        }
+
+        String fullTableName = database + "." + table;
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE TABLE IF NOT EXISTS ")
+           .append(fullTableName)
+           .append(" (\n")
+           .append(String.join(",\n", columnDefs))
+           .append("\n)")
+           .append(" ENGINE = ")
+           .append(engine);
+
+        // PRIMARY KEY (indépendant)
+        if (primaryKeyCols != null && !primaryKeyCols.isEmpty()) {
+            ddl.append("\nPRIMARY KEY (")
+               .append(joinColumns(primaryKeyCols))
+               .append(")");
+        }
+
+        // ORDER BY (toujours présent, indépendant de la PK)
+        if (orderByCols != null && !orderByCols.isEmpty()) {
+            ddl.append("\nORDER BY (")
+               .append(joinColumns(orderByCols))
+               .append(")");
+        } else {
+            ddl.append("\nORDER BY tuple()");
+        }
+
+        // PARTITION BY (optionnel, expressions brutes)
+        if (partitionByExprs != null && !partitionByExprs.isEmpty()) {
+            ddl.append("\nPARTITION BY (")
+               .append(
+                   partitionByExprs.stream()
+                           .map(String::trim)
+                           .collect(Collectors.joining(", "))
+               )
+               .append(")");
+        }
+
+        // Compression globale ZSTD(3)
+        ddl.append("\nSETTINGS compression_codec = 'ZSTD(3)';");
+
+        return ddl.toString();
+    }
+
+    // backticks sur les noms de colonnes
+    private static String joinColumns(List<String> cols) {
+        return cols.stream()
+                .map(String::trim)
+                .map(c -> "`" + c + "`")
+                .collect(Collectors.joining(", "));
+    }
+
+    // Mapping Spark -> ClickHouse + compression sur String uniquement
+    private static String toClickHouseType(DataType sparkType, boolean nullable) {
+        String baseType;
+        boolean stringLike = false;
+
+        if (sparkType instanceof ByteType
+                || sparkType instanceof ShortType
+                || sparkType instanceof IntegerType) {
+
+            baseType = "Int32";
+
+        } else if (sparkType instanceof LongType) {
+
+            baseType = "Int64";
+
+        } else if (sparkType instanceof FloatType) {
+
+            baseType = "Float32"; // pas de float->double automatique
+
+        } else if (sparkType instanceof DoubleType) {
+
+            baseType = "Float64";
+
+        } else if (sparkType instanceof BooleanType) {
+
+            baseType = "UInt8";   // bool
+
+        } else if (sparkType instanceof StringType) {
+
+            baseType = "String";
+            stringLike = true;
+
+        } else if (sparkType instanceof DateType) {
+
+            baseType = "Date";    // pas de Date32
+
+        } else if (sparkType instanceof TimestampType) {
+
+            baseType = "DateTime64(3)";
+
+        } else if (sparkType instanceof DecimalType) {
+
+            DecimalType d = (DecimalType) sparkType;
+            baseType = "Decimal(" + d.precision() + "," + d.scale() + ")";
+
+        } else if (sparkType instanceof BinaryType
+                || sparkType instanceof MapType
+                || sparkType instanceof StructType) {
+
+            baseType = "String";
+            stringLike = true;
+
+        } else if (sparkType instanceof ArrayType) {
+
+            baseType = "Array(String)";
+
+        } else {
+            baseType = "String";
+            stringLike = true;
+        }
+
+        // Compression uniquement sur les colonnes texte / string-like
+        if (stringLike) {
+            baseType = baseType + " CODEC(ZSTD)";
+        }
+
+        return nullable ? "Nullable(" + baseType + ")" : baseType;
+    }
+}
+
+Exemple d’usage rapide
+
+Dataset<Row> ds = ...;
+
+String ddl = ClickHouseDdlGenerator.generateCreateTable(
+        ds,
+        "cdm_trades",
+        "trades_eod",
+        "MergeTree()",
+        List.of("trade_id"),                    // PK
+        List.of("trade_date", "trade_id"),      // ORDER BY
+        List.of("toYYYYMM(trade_date)")         // PARTITION BY
+);
+
+System.out.println(ddl);
+
+Si tu passes orderByCols = null ou List.of() → ça fera :
+
+ORDER BY tuple()
+
+Dis-moi si tu veux une deuxième méthode plus simple genre :
+
+generateCreateTable(dataset, "db", "table", "MergeTree()", null, null, null)
+
+avec tout par défaut.
