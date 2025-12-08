@@ -1,0 +1,201 @@
+OK, je vois 👍
+On dissocie totalement :
+
+PRIMARY KEY géré uniquement par primaryKeyCols
+
+ORDER BY géré uniquement par orderByCols
+
+Si orderByCols est vide ou null → ORDER BY tuple() même si une PK existe
+
+
+Voici la classe corrigée avec cette logique :
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public final class ClickHouseDdlGenerator {
+
+    private ClickHouseDdlGenerator() {}
+
+    public static class DdlOptions {
+        public boolean floatToDouble = true;          // Float → Float64
+        public boolean enableStringCompression = true;
+        public String stringCodec = "ZSTD";           // CODEC(ZSTD) sur String
+        public boolean enableTableCompression = true;
+        public String tableCompressionCodec = "ZSTD(3)";
+    }
+
+    public static String generateCreateTable(
+            Dataset<Row> dataset,
+            String fullTableName,
+            String engine,
+            List<String> primaryKeyCols,    // indépendant
+            List<String> orderByCols,       // indépendant
+            List<String> partitionByCols,
+            DdlOptions options
+    ) {
+        if (options == null) {
+            options = new DdlOptions();
+        }
+
+        StructType schema = dataset.schema();
+        List<String> columnDefs = new ArrayList<>();
+
+        for (StructField field : schema.fields()) {
+            String colName = field.name();
+            DataType sparkType = field.dataType();
+            boolean nullable = field.nullable();
+
+            String chType = toClickHouseType(sparkType, nullable, options);
+            columnDefs.add("  `" + colName + "` " + chType);
+        }
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE TABLE IF NOT EXISTS ")
+           .append(fullTableName)
+           .append(" (\n")
+           .append(String.join(",\n", columnDefs))
+           .append("\n)")
+           .append(" ENGINE = ")
+           .append(engine);
+
+        // PRIMARY KEY (indépendant)
+        if (primaryKeyCols != null && !primaryKeyCols.isEmpty()) {
+            ddl.append("\nPRIMARY KEY (")
+               .append(joinColumns(primaryKeyCols))
+               .append(")");
+        }
+
+        // ORDER BY (toujours présent, ne dépend PAS de la PK)
+        if (orderByCols != null && !orderByCols.isEmpty()) {
+            ddl.append("\nORDER BY (")
+               .append(joinColumns(orderByCols))
+               .append(")");
+        } else {
+            ddl.append("\nORDER BY tuple()");
+        }
+
+        // PARTITION BY (optionnel)
+        if (partitionByCols != null && !partitionByCols.isEmpty()) {
+            ddl.append("\nPARTITION BY (")
+               .append(
+                   partitionByCols.stream()
+                           .map(String::trim)
+                           .collect(Collectors.joining(", "))
+               )
+               .append(")");
+        }
+
+        // SETTINGS (compression globale)
+        if (options.enableTableCompression && options.tableCompressionCodec != null) {
+            ddl.append("\nSETTINGS compression_codec = '")
+               .append(options.tableCompressionCodec)
+               .append("'");
+        }
+
+        ddl.append(";");
+        return ddl.toString();
+    }
+
+    private static String joinColumns(List<String> cols) {
+        return cols.stream()
+                .map(String::trim)
+                .map(c -> "`" + c + "`")
+                .collect(Collectors.joining(", "));
+    }
+
+    private static String toClickHouseType(
+            DataType sparkType,
+            boolean nullable,
+            DdlOptions opt
+    ) {
+        String baseType;
+        boolean stringLike = false;
+
+        if (sparkType instanceof ByteType
+                || sparkType instanceof ShortType
+                || sparkType instanceof IntegerType) {
+
+            baseType = "Int32";
+
+        } else if (sparkType instanceof LongType) {
+
+            baseType = "Int64";
+
+        } else if (sparkType instanceof FloatType) {
+
+            baseType = opt.floatToDouble ? "Float64" : "Float32";
+
+        } else if (sparkType instanceof DoubleType) {
+
+            baseType = "Float64";
+
+        } else if (sparkType instanceof BooleanType) {
+
+            baseType = "UInt8";
+
+        } else if (sparkType instanceof StringType) {
+
+            baseType = "String";
+            stringLike = true;
+
+        } else if (sparkType instanceof DateType) {
+
+            baseType = "Date";
+
+        } else if (sparkType instanceof TimestampType) {
+
+            baseType = "DateTime64(3)";
+
+        } else if (sparkType instanceof DecimalType) {
+
+            DecimalType d = (DecimalType) sparkType;
+            baseType = "Decimal(" + d.precision() + "," + d.scale() + ")";
+
+        } else if (sparkType instanceof BinaryType
+                || sparkType instanceof MapType
+                || sparkType instanceof StructType) {
+
+            baseType = "String";
+            stringLike = true;
+
+        } else if (sparkType instanceof ArrayType) {
+
+            baseType = "Array(String)";
+
+        } else {
+            baseType = "String";
+            stringLike = true;
+        }
+
+        // Compression uniquement sur les colonnes texte
+        if (stringLike && opt.enableStringCompression && opt.stringCodec != null) {
+            baseType = baseType + " CODEC(" + opt.stringCodec + ")";
+        }
+
+        return nullable ? "Nullable(" + baseType + ")" : baseType;
+    }
+}
+
+Exemple d’appel
+
+Dataset<Row> ds = ...;
+
+ClickHouseDdlGenerator.DdlOptions opt = new ClickHouseDdlGenerator.DdlOptions();
+
+String ddl = ClickHouseDdlGenerator.generateCreateTable(
+        ds,
+        "cdm_trades.trades_eod",
+        "MergeTree()",
+        List.of("trade_id"),                    // PK
+        List.of("trade_date", "trade_id"),      // ORDER BY indépendant
+        List.of("toYYYYMM(trade_date)"),
+        opt
+);
+
+Si tu passes orderByCols = null ou List.of() → tu auras ORDER BY tuple(), même si la PK est définie.
