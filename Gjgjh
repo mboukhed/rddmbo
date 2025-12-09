@@ -1,0 +1,4 @@
+SELECT formatReadableSize(sum(bytes_on_disk))
+FROM system.parts
+WHERE database = 'ma_base'
+  AND table = 'ma_table';
