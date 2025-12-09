@@ -1,0 +1,2 @@
+spark.conf().set("spark.sql.files.maxPartitionBytes", 128L * 1024 * 1024); // 128 Mo
+spark.conf().set("spark.sql.files.openCostInBytes", 4L * 1024 * 1024);     // coût logique d’ouverture
