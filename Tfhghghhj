@@ -1,0 +1,110 @@
+Tu as l’erreur Spark classique sous Java 17+ :
+
+java.lang.IllegalAccessError: class org.apache.spark.sql.catalyst.util.DateTimeUtils 
+cannot access class sun.util.calendar.ZoneInfo
+because module java.base does not export sun.util.calendar
+
+🔥 Pourquoi ça arrive ?
+
+Parce que :
+
+Tu exécutes Spark 3.x
+
+Avec Java 17 ou Java 21
+
+Spark utilise encore des classes internes JDK 8 (sun.util.calendar.ZoneInfo)
+
+Mais Java 17/21 bloque l’accès à ces classes internes (module system)
+
+
+Résultat → boom au runtime dans toutes les fonctions Spark qui appellent toJavaDate, DateTimeUtils, etc.
+
+✔️ Les 3 solutions possibles (ordre recommandé)
+
+
+---
+
+✅ Solution 1 — Lancer Spark avec les flags d’ouverture des modules
+
+Ajoute ceci à ton spark-submit ou à tes JVM options dans ta pipeline Jenkins / AKS :
+
+--add-opens java.base/sun.util.calendar=ALL-UNNAMED
+--add-opens java.base/java.util=ALL-UNNAMED
+
+Ou en variable d’environnement :
+
+export JAVA_OPTS="$JAVA_OPTS --add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+export JAVA_OPTS="$JAVA_OPTS --add-opens=java.base/java.util=ALL-UNNAMED"
+
+Dans Spark :
+
+spark.driver.extraJavaOptions   --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+spark.executor.extraJavaOptions --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+
+C’est la vraie solution propre.
+
+
+---
+
+✅ Solution 2 — Utiliser Java 11 pour exécuter Spark
+
+Spark <= 3.5 n’est pas totalement compatible Java 17.
+
+Spark 4 sera full JDK17+.
+
+Donc souvent la solution :
+
+➡️ Mets Java 11 dans ton conteneur AKS pour exécuter les jobs Spark
+➡️ Garde Java 17 pour compiler si tu veux
+
+
+---
+
+✅ Solution 3 — Mettre Spark 3.5.1
+
+Spark améliore la compat mais le bug n’est pas totalement corrigé.
+
+Il faut quand même ajouter le --add-opens.
+
+
+---
+
+👍 La bonne solution pour toi (en pipeline Jenkins)
+
+Ajoute dans Maven Surefire plugin (pour les tests) :
+
+<argLine>
+ --add-opens java.base/sun.util.calendar=ALL-UNNAMED
+ --add-opens java.base/java.util=ALL-UNNAMED
+</argLine>
+
+Pour exécuter Spark dans AKS :
+
+Dans ton spark-submit :
+
+--conf spark.driver.extraJavaOptions="--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+--conf spark.executor.extraJavaOptions="--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+
+
+---
+
+🧨 Pourquoi le test casse ?
+
+Parce qu’un test Spark lit un champ date, et Spark déclenche DateTimeUtils.toJavaDate() → qui tente d’accéder à sun.util.calendar.ZoneInfo → JDK17 dit non.
+
+
+---
+
+📌 Résumé rapide
+
+Option	Résultat
+
+Ajouter --add-opens	✔️ Résout immédiatement le problème
+Revenir Java 11	✔️ 100% stable mais pas compatible avec ton pipeline si tu compiles Java 17
+Spark 3.5.1	🔧 Améliore mais ne corrige pas totalement
+
+
+
+---
+
+Si tu veux, je te génère le bloc complet Jenkinsfile + pom.xml + spark-submit avec les flags EXACTS pour ton environnement AKS.
