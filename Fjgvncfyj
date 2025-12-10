@@ -1,0 +1,279 @@
+OK, on attaque direct, version Spark/Parquet, sans blabla marketing 😅
+
+Je vais te faire un checklist concret pour accélérer la lecture des Parquet (sans forcément les réécrire), en supposant Spark (Scala/Java) + stockage distribué (ADLS/S3/HDFS).
+
+
+---
+
+1. Vérifier les options de lecture Parquet
+
+À mettre au niveau de la SparkSession :
+
+SparkSession spark = SparkSession.builder()
+    .appName("ParquetReadOptim")
+    // Vectorization + codegen => MUST
+    .config("spark.sql.parquet.enableVectorizedReader", "true")
+    .config("spark.sql.codegen.wholeStage", "true")
+    // Limiter le shuffle inutile pendant la lecture
+    .config("spark.sql.files.ignoreCorruptFiles", "true")
+    // Pushdown max
+    .config("spark.sql.parquet.filterPushdown", "true")
+    .config("spark.sql.parquet.recordLevelFilter.enabled", "true")
+    .config("spark.sql.parquet.useDataSourceApi", "true")
+    .getOrCreate();
+
+En gros :
+
+enableVectorizedReader : hyper important.
+
+filterPushdown : pour ne pas scanner tout le fichier quand le WHERE porte sur des colonnes filtrables.
+
+wholeStage : évite le code interprété lent.
+
+
+
+---
+
+2. Toujours faire column pruning (sélection de colonnes avant tout)
+
+Ne JAMAIS faire :
+
+Dataset<Row> df = spark.read().parquet(path);
+Dataset<Row> result = df.filter("date = '2025-12-10'");
+
+Mais plutôt :
+
+Dataset<Row> df = spark.read()
+    .schema(yourSchema)                     // ou laisser Spark inférer une fois
+    .parquet(path)
+    .select("col1", "col2", "date");        // ne lire que ce qui sert
+
+Dataset<Row> result = df.filter("date = '2025-12-10'");
+
+Pourquoi :
+
+Parquet est columnar → si tu ne demandes que 10 colonnes sur 200, tu lis 20× moins d’I/O.
+
+
+Même chose en SQL :
+
+Dataset<Row> df = spark.read().parquet(path);
+df.createOrReplaceTempView("t");
+
+Dataset<Row> res = spark.sql(
+    "SELECT col1, col2 FROM t WHERE date = '2025-12-10'"
+);
+
+
+---
+
+3. Exploiter au maximum la partition pruning
+
+Si tes données sont partitionnées par une ou plusieurs colonnes (ex: date / dt / country), tu dois absolument filer le filtre dès le début.
+
+Cas typique : dossier partitionné dt=YYYY-MM-DD
+
+Structure :
+
+/path/table/dt=2025-12-01/part-...
+
+/path/table/dt=2025-12-02/part-...
+
+etc.
+
+
+Lecture optimisée :
+
+Dataset<Row> df = spark.read().parquet("/path/table")
+    .where("dt = '2025-12-02'");
+
+ou encore mieux si tu connais le path :
+
+Dataset<Row> df = spark.read().parquet("/path/table/dt=2025-12-02");
+
+Le vrai gain se fait quand :
+
+dt est une partition physique
+
+tu utilises bien la même orthographe (nom exact de la colonne/partition + même type)
+
+
+
+---
+
+4. Gérer le problème des petits fichiers côté lecture
+
+Tu m’as déjà dit que tu ne veux pas réécrire les Parquet, mais tu as :
+
+une ou peu de partitions
+
+avec plein de petits fichiers → ça flingue les perfs, surtout sur le listing.
+
+
+Tu peux optimiser côté lecture même sans compacter physiquement :
+
+4.1. Augmenter le parallélisme logique sans exploser le driver
+
+spark.conf().set("spark.sql.files.maxPartitionBytes", 128L * 1024 * 1024); // 128 MB
+spark.conf().set("spark.sql.files.openCostInBytes", 4L * 1024 * 1024);     // 4 MB
+
+maxPartitionBytes : taille cible de données par partition logique.
+
+openCostInBytes : “coût” d’ouvrir un fichier → Spark regroupe plusieurs petits fichiers dans une même tâche.
+
+
+Avec beaucoup de petits fichiers, mettre openCostInBytes un peu plus haut permet à Spark de grouper plus agressivement.
+
+4.2. Limiter le nombre de partitions de sortie de la lecture
+
+Après lecture, tu peux faire :
+
+Dataset<Row> df = spark.read().parquet(path);
+
+// Si tu sais que tu vas juste push vers ClickHouse
+df = df.coalesce(200); // ex : 200 tasks max, à adapter
+
+coalesce sans shuffle → réduit le nombre de partitions si trop élevé (par ex. 10k partitions).
+
+Utile avant un .foreachPartition, un .write vers ClickHouse, etc.
+
+
+
+---
+
+5. Adapter le nombre d’executors / cores / mémoire
+
+Lecture lente Parquet = souvent :
+
+pas assez de parallelism
+
+ou trop → contention I/O, throttling ADLS/S3, GC.
+
+
+Quelques règles pragmatiques :
+
+Vise ~ 200–400 partitions utiles pour un gros job (ça dépend de la taille).
+
+Ne dépasse pas 4–5 cores par executor si le stockage est remote (ADLS/S3).
+
+Garde de la marge mémoire pour éviter le GC permanent.
+
+
+Exemple de conf (en SparkSubmit/YAML) :
+
+--conf spark.executor.instances=20
+--conf spark.executor.cores=4
+--conf spark.executor.memory=8g
+--conf spark.sql.shuffle.partitions=400
+
+
+---
+
+6. Cache uniquement si réutilisation réelle
+
+Si tu relis plusieurs fois le même parquet au sein du même job :
+
+Dataset<Row> base = spark.read()
+    .parquet(path)
+    .select("col1", "col2", "dt")
+    .where("dt >= '2025-12-01' AND dt <= '2025-12-10'")
+    .cache(); // ou .persist(StorageLevel.MEMORY_AND_DISK());
+
+base.count(); // materialise le cache
+
+Dataset<Row> a = base.filter("col1 = 'A'");
+Dataset<Row> b = base.filter("col2 = 'B'");
+
+Ça ne vaut le coup que si vraiment tu appliques plusieurs transformations lourdes sur la même base.
+
+
+
+---
+
+7. Filtrer le plus tôt possible (pushdown friendly)
+
+Évite ce genre de pattern :
+
+Dataset<Row> df = spark.read().parquet(path);
+Dataset<Row> filtered = df.filter("substring(col1, 1, 3) = 'ABC'");
+
+→ substring sur la colonne casse le pushdown possible.
+
+Si tu peux, préfère :
+
+filtres simples (=, >=, <=, IN, BETWEEN) sur colonnes natives.
+
+ou pré-calculer une colonne de filtrage au moment de l’ingestion / écriture.
+
+
+
+---
+
+8. Si tu pousses dans ClickHouse derrière
+
+Comme tu m’as dit que le but c’est souvent lecture Parquet → ClickHouse, combine :
+
+1. Lecture optimisée (pruning colonnes + partitions).
+
+
+2. coalesce/repartition pour adapter le débit vers ClickHouse :
+
+évite 10k petites partitions → 10k connexions INSERT.
+
+vise un nombre raisonnable de partitions (ex : 100–300).
+
+
+
+
+Ex :
+
+Dataset<Row> df = spark.read()
+    .parquet(path)
+    .select("col1", "col2", "dt")
+    .where("dt = '2025-12-10'");
+
+// Adapter le nombre de partitions au cluster ClickHouse
+df = df.coalesce(150);
+
+df.foreachPartition(partition -> {
+    // JDBC vers ClickHouse
+});
+
+
+---
+
+9. À vérifier dans ton cas concret
+
+Pour ton cas précis (une seule partition, plein de petits fichiers, lecture lente) je regarderais surtout :
+
+1. spark.sql.files.openCostInBytes et maxPartitionBytes correctement configurés.
+
+
+2. Si tu fais bien :
+
+select des colonnes utiles,
+
+where sur les colonnes partitionnées (si partition existe).
+
+
+
+3. Le nombre de partitions après lecture (df.rdd().getNumPartitions()).
+
+
+4. L’I/O côté stockage (ADLS/S3 throttling → souvent visible dans les logs + métriques).
+
+
+
+
+---
+
+Si tu veux, tu peux me coller :
+
+un df.explain(true) d’un job typique
+
+le df.rdd().getNumPartitions()
+
+et grosso modo la structure des paths Parquet
+
+
+et je te fais un plan d’attaque ultra ciblé pour ton cas (avec valeurs concrètes : nb partitions, options Spark, etc.).
