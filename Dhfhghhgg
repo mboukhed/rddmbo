@@ -1,0 +1,198 @@
+Voici la config minimale et la config “propre” pour lancer un job Spark Python en mode Standalone (clair, terrain, pas de théorie inutile).
+
+
+---
+
+1️⃣ Pré-requis obligatoires
+
+Sur tous les nœuds (master + workers)
+
+Java 8 / 11 / 17 (selon ta version Spark)
+
+Python 3.x (même version partout)
+
+Spark installé en standalone (pas YARN, pas K8s)
+
+
+java -version
+python3 --version
+spark-submit --version
+
+
+---
+
+2️⃣ Démarrer Spark Standalone
+
+Sur le master
+
+$SPARK_HOME/sbin/start-master.sh
+
+Tu obtiens :
+
+spark://MASTER_HOST:7077
+
+UI :
+
+http://MASTER_HOST:8080
+
+
+---
+
+Sur chaque worker
+
+$SPARK_HOME/sbin/start-worker.sh spark://MASTER_HOST:7077
+
+UI workers :
+
+http://WORKER_HOST:8081
+
+
+---
+
+3️⃣ Configuration environnement (ESSENTIEL)
+
+Python utilisé par Spark
+
+👉 obligatoire sinon bug à la con
+
+export PYSPARK_PYTHON=/usr/bin/python3
+export PYSPARK_DRIVER_PYTHON=/usr/bin/python3
+
+(si virtualenv → chemin du venv)
+
+
+---
+
+4️⃣ Job Spark Python minimal
+
+Exemple job.py
+
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder \
+    .appName("StandalonePythonJob") \
+    .getOrCreate()
+
+df = spark.range(0, 1000000)
+print(df.count())
+
+spark.stop()
+
+
+---
+
+5️⃣ spark-submit minimal (standalone)
+
+spark-submit \
+  --master spark://MASTER_HOST:7077 \
+  --deploy-mode client \
+  job.py
+
+✅ Client mode = le driver tourne là où tu lances la commande
+⚠️ Cluster mode possible mais plus chiant en standalone
+
+
+---
+
+6️⃣ spark-submit recommandé (réaliste prod)
+
+spark-submit \
+  --master spark://MASTER_HOST:7077 \
+  --deploy-mode client \
+  --name job-standalone-python \
+  --executor-memory 4g \
+  --executor-cores 2 \
+  --total-executor-cores 8 \
+  --conf spark.driver.memory=2g \
+  --conf spark.sql.shuffle.partitions=200 \
+  job.py
+
+
+---
+
+7️⃣ Cas classique : dépendances Python
+
+Option A — requirements.txt
+
+spark-submit \
+  --master spark://MASTER_HOST:7077 \
+  --py-files deps.zip \
+  job.py
+
+(deps.zip = site-packages packagés)
+
+
+---
+
+Option B — virtualenv (propre)
+
+Même venv copié sur tous les nœuds
+
+export PYSPARK_PYTHON=/opt/venv/bin/python
+
+
+---
+
+8️⃣ Ports à ouvrir (souvent oublié)
+
+Usage	Port
+
+Master	7077
+Master UI	8080
+Worker UI	8081
+Driver	dynamique (firewall permissif recommandé)
+
+
+
+---
+
+9️⃣ Problèmes fréquents (et solutions)
+
+❌ Job reste bloqué
+
+Workers non connectés au master
+
+Mauvais spark://host:port
+
+Firewall bloquant
+
+
+
+---
+
+❌ Python version mismatch
+
+➡️ Même Python partout
+
+which python3
+
+
+---
+
+❌ ImportError / ModuleNotFound
+
+➡️ Dépendances pas présentes sur les workers
+➡️ Utiliser --py-files ou venv partagé
+
+
+---
+
+10️⃣ TL;DR ultra court
+
+✔ Spark master + workers démarrés
+✔ PYSPARK_PYTHON défini
+✔ spark-submit --master spark://...
+✔ Même Python & libs sur tous les nœuds
+
+
+---
+
+Si tu veux, je peux te donner :
+
+une config spark-env.sh complète
+
+un template prod (logging, retry, exit code)
+
+une comparaison Standalone vs YARN vs K8s
+
+ou adapter ça à AKS / VM Azure / on-prem
