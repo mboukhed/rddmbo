@@ -1,0 +1,154 @@
+OK — avec Spark 3.3 / Scala 2.12 et le connecteur natif (DataSourceV2), voilà une base propre pour ajouter des tests d’intégration (Spark écrit dans ClickHouse, puis on vérifie). Le connecteur officiel supporte Spark 3.3 et se configure via un catalog spark.sql.catalog.<name> = com.clickhouse.spark.ClickHouseCatalog. �
+ClickHouse
+1) Dépendances Maven (tests)
+Connecteur Spark ClickHouse (runtime 3.3_2.12)
+La version 0.9.0 existe pour clickhouse-spark-runtime-3.3_2.12. �
+repo1.maven.org +1
+ClickHouse JDBC (pour DDL + assertions) + Testcontainers ClickHouse
+Le module Testcontainers ClickHouse est org.testcontainers:testcontainers-clickhouse (ex: 2.0.2). �
+Le JDBC officiel est com.clickhouse:clickhouse-jdbc (ex: 0.9.5 fin 2025). �
+Testcontainers for Java
+Maven Repository +1
+Copier le code
+Xml
+<dependencies>
+  <!-- Spark ClickHouse Connector (Spark 3.3 / Scala 2.12) -->
+  <dependency>
+    <groupId>com.clickhouse.spark</groupId>
+    <artifactId>clickhouse-spark-runtime-3.3_2.12</artifactId>
+    <version>0.9.0</version>
+    <scope>test</scope>
+  </dependency>
+
+  <!-- ClickHouse JDBC (recommandé en classifier all, sans transitif, comme dans la doc) -->
+  <dependency>
+    <groupId>com.clickhouse</groupId>
+    <artifactId>clickhouse-jdbc</artifactId>
+    <classifier>all</classifier>
+    <version>0.9.5</version>
+    <scope>test</scope>
+    <exclusions>
+      <exclusion>
+        <groupId>*</groupId>
+        <artifactId>*</artifactId>
+      </exclusion>
+    </exclusions>
+  </dependency>
+
+  <!-- Testcontainers -->
+  <dependency>
+    <groupId>org.testcontainers</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <version>2.0.2</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.testcontainers</groupId>
+    <artifactId>testcontainers-clickhouse</artifactId>
+    <version>2.0.2</version>
+    <scope>test</scope>
+  </dependency>
+
+  <!-- JUnit 5 -->
+  <dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <version>5.10.2</version>
+    <scope>test</scope>
+  </dependency>
+</dependencies>
+2) Test d’intégration JUnit 5 : Spark (catalog clickhouse) → ClickHouse (container)
+Le connecteur natif s’utilise comme ça : df.writeTo("clickhouse.<db>.<table>").append() après avoir enregistré le catalog. �
+ClickHouse
+Copier le code
+Java
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.*;
+import org.junit.jupiter.api.*;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.containers.ClickHouseContainer;
+
+import java.sql.*;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@Testcontainers
+class SparkClickHouseConnectorIT {
+
+  @Container
+  static final ClickHouseContainer ch =
+      new ClickHouseContainer("clickhouse/clickhouse-server:latest");
+
+  static SparkSession spark;
+
+  @BeforeAll
+  static void setup() throws Exception {
+    // 1) Spark session + catalog ClickHouse (obligatoire)
+    spark = SparkSession.builder()
+        .appName("spark-clickhouse-it")
+        .master("local[*]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.catalog.clickhouse", "com.clickhouse.spark.ClickHouseCatalog")
+        .config("spark.sql.catalog.clickhouse.host", ch.getHost())
+        .config("spark.sql.catalog.clickhouse.protocol", "http")
+        .config("spark.sql.catalog.clickhouse.http_port", String.valueOf(ch.getMappedPort(8123)))
+        .config("spark.sql.catalog.clickhouse.user", ch.getUsername())
+        .config("spark.sql.catalog.clickhouse.password", ch.getPassword())
+        .config("spark.sql.catalog.clickhouse.database", "default")
+        .config("spark.clickhouse.write.format", "arrow") // ou json; "arrow" est souvent le défaut
+        .getOrCreate();
+
+    // 2) DDL explicite côté ClickHouse (simple et fiable)
+    try (Connection c = DriverManager.getConnection(ch.getJdbcUrl(), ch.getUsername(), ch.getPassword());
+         Statement st = c.createStatement()) {
+      st.execute("""
+        CREATE TABLE IF NOT EXISTS default.t_person (
+          id UInt32,
+          name String
+        ) ENGINE = MergeTree ORDER BY id
+      """);
+      st.execute("TRUNCATE TABLE default.t_person");
+    }
+  }
+
+  @AfterAll
+  static void tearDown() {
+    if (spark != null) spark.stop();
+  }
+
+  @Test
+  void sparkWritesToClickHouse_andWeAssert() throws Exception {
+    // Arrange
+    StructType schema = new StructType()
+        .add("id", DataTypes.IntegerType, false)
+        .add("name", DataTypes.StringType, false);
+
+    Dataset<Row> df = spark.createDataFrame(
+        List.of(
+            RowFactory.create(1, "Alice"),
+            RowFactory.create(2, "Bob")
+        ),
+        schema
+    );
+
+    // Act (connecteur natif)
+    df.writeTo("clickhouse.default.t_person").append();
+
+    // Assert (vérité côté ClickHouse)
+    try (Connection c = DriverManager.getConnection(ch.getJdbcUrl(), ch.getUsername(), ch.getPassword());
+         PreparedStatement ps = c.prepareStatement("SELECT count() FROM default.t_person");
+         ResultSet rs = ps.executeQuery()) {
+      rs.next();
+      assertEquals(2, rs.getLong(1));
+    }
+  }
+}
+Les clés de config (spark.sql.catalog.clickhouse.*, spark.clickhouse.write.format, etc.) sont celles documentées par ClickHouse. �
+ClickHouse
+3) Conseils rapides (qui évitent les galères)
+Unit tests : transformations Spark en local[*] sans DB (rapide).
+IT : Testcontainers + vrai ClickHouse (comme ci-dessus).
+Si tu es en CI (GitLab/Jenkins), assure-toi que Docker est dispo (ou runner “Docker-in-Docker”).
+Si tu me colles ton code d’écriture actuel (la partie writeTo(...) / options / mode), je te l’adapte exactement à ta façon d’écrire (partitioning, engine, TTL, batch size, etc.).
