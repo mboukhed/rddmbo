@@ -1,0 +1,4 @@
+mvn sonar:sonar \
+  -Dsonar.issue.ignore.multicriteria=e1 \
+  -Dsonar.issue.ignore.multicriteria.e1.ruleKey=java:S3776 \
+  -Dsonar.issue.ignore.multicriteria.e1.resourceKey=**/*.java
