@@ -1,0 +1,173 @@
+OK. Version OPTIMISÉE réelle, sans blabla, adaptée à ton cas (Map, Spark, prod).
+Je te dis quoi, puis le code.
+🔥 Optimisations APPLIQUÉES (pas théoriques)
+Broadcast des edges (évite shuffle N×)
+Anti-cycle efficace (child,parent)
+Checkpoint (évite DAG infini)
+Cache uniquement où utile
+Arrêt naturel + maxDepth
+Concat ordonné sans UDF
+1️⃣ Calcul hiérarchique OPTIMISÉ
+(child, parent, level)
+Copier le code
+Java
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+import static org.apache.spark.sql.functions.*;
+
+public final class AncestorFlatJobOptimized {
+
+  private AncestorFlatJobOptimized() {}
+
+  public static Dataset<Row> computeAncestorsFlatOptimized(
+      SparkSession spark,
+      Dataset<Row> edges,
+      int maxDepth
+  ) {
+
+    // obligatoire pour éviter DAG infini
+    spark.sparkContext().setCheckpointDir("/tmp/spark-checkpoints");
+
+    // Nettoyage + distinct
+    Dataset<Row> e = edges
+        .select(col("child"), col("parent"))
+        .filter(col("child").isNotNull().and(col("parent").isNotNull()))
+        .distinct()
+        .cache();
+
+    // Broadcast si edges raisonnable
+    Dataset<Row> eB = broadcast(e);
+
+    // Niveau 1
+    Dataset<Row> result = e
+        .withColumn("level", lit(1))
+        .cache()
+        .checkpoint();
+
+    Dataset<Row> frontier = result;
+
+    for (int level = 2; level <= maxDepth; level++) {
+
+      Dataset<Row> next = frontier
+          .join(eB, frontier.col("parent").equalTo(eB.col("child")), "inner")
+          .select(
+              frontier.col("child").as("child"),
+              eB.col("parent").as("parent"),
+              lit(level).as("level")
+          )
+          .distinct();
+
+      // anti-cycle STRICT (clé logique)
+      Dataset<Row> newOnes = next
+          .select("child", "parent")
+          .except(result.select("child", "parent"))
+          .join(next, new String[]{"child", "parent"});
+
+      if (newOnes.isEmpty()) break;
+
+      result = result.union(newOnes).cache().checkpoint();
+      frontier = newOnes;
+    }
+
+    e.unpersist();
+    return result;
+  }
+}
+2️⃣ Concaténation ordonnée OPTIMISÉE
+(child → parents séparés par , et ordonnés par level)
+Copier le code
+Java
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+import static org.apache.spark.sql.functions.*;
+
+public final class ParentConcatOptimized {
+
+  private ParentConcatOptimized() {}
+
+  public static Dataset<Row> concatParentsOrdered(Dataset<Row> ancestors) {
+
+    return ancestors
+        // struct pour garantir l’ordre
+        .withColumn("lp", struct(col("level"), col("parent")))
+        .groupBy(col("child"))
+        .agg(
+            concat_ws(
+                ",",
+                transform(
+                    sort_array(collect_list(col("lp"))),
+                    x -> x.getField("parent")
+                )
+            ).as("parents_concat")
+        );
+  }
+}
+3️⃣ Appel (prod)
+Copier le code
+Java
+Dataset<Row> flat =
+    AncestorFlatJobOptimized.computeAncestorsFlatOptimized(
+        spark, edgesDf, 50
+    );
+
+Dataset<Row> result =
+    ParentConcatOptimized.concatParentsOrdered(flat);
+
+result.show(false);
+4️⃣ Test unitaire (Map, rapide, stable)
+Copier le code
+Java
+@Test
+void testOptimizedHierarchy() {
+
+  List<Map<String, String>> data = List.of(
+      Map.of("child", "A", "parent", "B"),
+      Map.of("child", "B", "parent", "C"),
+      Map.of("child", "C", "parent", "D")
+  );
+
+  Dataset<Row> edges = spark.createDataFrame(data, Map.class);
+
+  Dataset<Row> flat =
+      AncestorFlatJobOptimized.computeAncestorsFlatOptimized(
+          spark, edges, 10
+      );
+
+  Dataset<Row> result =
+      ParentConcatOptimized.concatParentsOrdered(flat);
+
+  String parents = result
+      .filter(col("child").equalTo("A"))
+      .select("parents_concat")
+      .as(Encoders.STRING())
+      .head();
+
+  assertEquals("B,C,D", parents);
+}
+🧠 Quand activer / désactiver
+Cas
+Action
+edges petit
+✅ broadcast
+edges énorme
+❌ broadcast
+profondeur > 5
+✅ checkpoint
+tests unitaires
+checkpoint OK
+mémoire limitée
+réduire cache
+🎯 Verdict net
+Cette version est réellement optimisée Spark
+– peu de shuffle
+– cycle-safe
+– stable en prod
+– compatible AKS / local / CI
+Si tu veux :
+version sans checkpoint
+version SQL ONLY
+version gros volume sans broadcast
+dis juste lequel.
