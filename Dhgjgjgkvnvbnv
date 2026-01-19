@@ -1,0 +1,81 @@
+// Ancien: Ariva_derivative_YYYYMMDD_HHMMSS.csv.gz
+  private static final Pattern OLD =
+      Pattern.compile("^Ariva_derivative_(\\d{8})_(\\d{6})\\.csv\\.gz$");
+
+  // Nouveau: Ariva_YYYYMMDDHHMMSS-UUID-derivative.csv.gz
+  private static final Pattern NEW =
+      Pattern.compile("^Ariva_(\\d{8})(\\d{6})-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-derivative\\.csv\\.gz$");
+
+  public static Map<String, FileDescribe> filterArivaByPrefixAndDate(
+      List<FileStatus> fileStatusList,
+      LocalDate inputDate
+  ) {
+
+    Map<String, FileDescribe> result = new HashMap<>();
+    ZoneId zoneId = ZoneId.systemDefault();
+
+    for (FileStatus fileStatus : fileStatusList) {
+      String fileName = fileStatus.getPath().getName();
+      String fullPath = fileStatus.getPath().toString();
+
+      String yyyymmdd = null;
+      String hhmmss = null;
+
+      Matcher mOld = OLD.matcher(fileName);
+      if (mOld.matches()) {
+        yyyymmdd = mOld.group(1);
+        hhmmss = mOld.group(2);
+      } else {
+        Matcher mNew = NEW.matcher(fileName);
+        if (mNew.matches()) {
+          yyyymmdd = mNew.group(1); // date
+          hhmmss = mNew.group(2);   // time
+        } else {
+          // pas un fichier Ariva attendu -> on skip
+          continue;
+        }
+      }
+
+      // Filtre date si demandé
+      if (inputDate != null) {
+        int y = Integer.parseInt(yyyymmdd.substring(0, 4));
+        int m = Integer.parseInt(yyyymmdd.substring(4, 6));
+        int d = Integer.parseInt(yyyymmdd.substring(6, 8));
+        LocalDate fileDate = LocalDate.of(y, m, d);
+        if (!fileDate.equals(inputDate)) continue;
+      }
+
+      // Construire les infos (en restant proche de ton style)
+      try {
+        // Date d'ingestion
+        SimpleDateFormat fileDateFormat = new SimpleDateFormat("yyyyMMdd");
+        Date parsedDate = fileDateFormat.parse(yyyymmdd);
+        LocalDate fileLocalDate = parsedDate.toInstant().atZone(zoneId).toLocalDate();
+
+        FileDescribe f1 = new FileDescribe();
+        f1.setFileName(fileName);
+        f1.setFilePath(fullPath);
+        f1.setIngestionDate(java.sql.Date.valueOf(fileLocalDate));
+
+        // Timestamp integrationDate depuis yyyymmdd + hhmmss
+        int hour = Integer.parseInt(hhmmss.substring(0, 2));
+        int min  = Integer.parseInt(hhmmss.substring(2, 4));
+        int sec  = Integer.parseInt(hhmmss.substring(4, 6));
+
+        Timestamp integrationDate = Timestamp.from(
+            fileLocalDate.atTime(hour, min, sec).atZone(zoneId).toInstant()
+        );
+
+        f1.setIntegrationDate(integrationDate);
+        f1.setIntegrationTime(hhmmss);
+
+        result.put(fullPath, f1);
+
+      } catch (Exception e) {
+        // logger.log(Level.WARNING, e.getMessage() + " - " + fullPath);
+      }
+    }
+
+    return result;
+  }
+}
