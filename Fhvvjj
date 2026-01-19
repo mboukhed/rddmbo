@@ -1,0 +1,78 @@
+public static Map<String, FileDescribe> filterArivaByPrefixAndDate(
+    List<FileStatus> fileStatusList,
+    LocalDate inputDate
+) {
+
+  String prefix1 = "Ariva_derivative_";
+  String prefix2 = "Ariva_";
+
+  Map<String, FileDescribe> result = new HashMap<>();
+
+  for (FileStatus fileStatus : fileStatusList) {
+
+    String fileName = fileStatus.getPath().getName();
+    String fullPath = fileStatus.getPath().toString();
+
+    String datePart;
+    String timePart;
+
+    if (fileName.startsWith(prefix1)) {
+
+      // OLD
+      // Ariva_derivative_YYYYMMDD_HHMMSS.csv.gz
+      String tmp = fileName
+          .replace(prefix1, "")
+          .replace(".csv", "")
+          .replace(".gz", "");
+
+      datePart = tmp.split("_")[0];
+      timePart = tmp.split("_")[1];
+
+    } else if (fileName.startsWith(prefix2)) {
+
+      // NEW
+      // Ariva_YYYYMMDDHHMMSS-UUID-derivative.csv.gz
+      String tmp = fileName
+          .replace(prefix2, "")
+          .replace("-derivative.csv", "")
+          .replace(".gz", "");
+
+      String yyyymmddhhmmss = tmp.split("-")[0];
+
+      datePart = yyyymmddhhmmss.substring(0, 8);
+      timePart = yyyymmddhhmmss.substring(8, 14);
+
+    } else {
+      // pas un fichier Ariva
+      continue;
+    }
+
+    try {
+      DateFormat fileDateFormat = new SimpleDateFormat("yyyyMMdd");
+      Date parsedDate = fileDateFormat.parse(datePart);
+      LocalDate fileLocalDate =
+          parsedDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+
+      if (inputDate == null || fileLocalDate.isEqual(inputDate)) {
+
+        FileDescribe f1 = new FileDescribe();
+        f1.setFileName(fileName);
+        f1.setFilePath(fullPath);
+        f1.setIngestionDate(java.sql.Date.valueOf(fileLocalDate));
+
+        Timestamp integrationDate =
+            DateUtils.toSqlTimestamp(datePart, timePart);
+
+        f1.setIntegrationDate(integrationDate);
+        f1.setIntegrationTime(timePart);
+
+        result.put(fullPath, f1);
+      }
+
+    } catch (Exception e) {
+      // logger.log(Level.WARNING, e.getMessage() + " - " + fullPath);
+    }
+  }
+
+  return result;
+}
