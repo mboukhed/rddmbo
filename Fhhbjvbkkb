@@ -1,0 +1,43 @@
+def uploadToAzureZip(String localZipPath) {
+
+  azure_login()
+
+  executeWithProxy {
+    sh """
+      set -euo pipefail
+
+      echo "📦 uploadToAzureZip() localZipPath=${localZipPath} container=${container} dir=${directoryPath}"
+
+      TMP_DIR="\$(mktemp -d)"
+      unzip -q "${localZipPath}" -d "\${TMP_DIR}"
+
+      # 1) Supprimer uniquement les fichiers présents dans le zip (côté Azure)
+      cd "\${TMP_DIR}"
+      while IFS= read -r f; do
+        # ignorer les dossiers
+        if [ -f "\$f" ]; then
+          echo "🗑️ delete blob: ${directoryPath}/\$f"
+          az storage blob delete \\
+            --account-name "${accountName}" \\
+            --container-name "${container}" \\
+            --name "${directoryPath}/\$f" \\
+            --auth-mode login \\
+            --only-show-errors || true
+        fi
+      done < <(find . -type f -print | sed 's|^\\./||')
+
+      # 2) Uploader les nouveaux fichiers (contenu du zip)
+      echo "⬆️ upload extracted content to ${container}/${directoryPath}"
+      az storage blob upload-batch \\
+        --account-name "${accountName}" \\
+        --destination "${container}/${directoryPath}" \\
+        --source "\${TMP_DIR}" \\
+        --auth-mode login \\
+        --overwrite true \\
+        --only-show-errors
+
+      rm -rf "\${TMP_DIR}"
+      echo "✅ Upload zip content done"
+    """
+  }
+}
