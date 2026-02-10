@@ -1,0 +1,106 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+public final class ClickHouseDdlGenerator {
+
+    private ClickHouseDdlGenerator() {}
+
+    public static String generateCreateTableDDL(
+            Dataset<Row> dataset,
+            String database,
+            String table,
+            List<String> partitionBy,
+            List<String> orderBy
+    ) {
+        Objects.requireNonNull(dataset, "dataset must not be null");
+        Objects.requireNonNull(table, "table must not be null");
+        Objects.requireNonNull(orderBy, "orderBy is mandatory for MergeTree");
+
+        StructType schema = dataset.schema();
+
+        String columns = Arrays.stream(schema.fields())
+                .map(ClickHouseDdlGenerator::columnDDL)
+                .collect(Collectors.joining(",\n    "));
+
+        StringBuilder ddl = new StringBuilder();
+
+        ddl.append("CREATE TABLE IF NOT EXISTS ");
+        if (database != null && !database.isEmpty()) {
+            ddl.append(database).append(".");
+        }
+        ddl.append(table).append("\n(\n    ")
+           .append(columns)
+           .append("\n)\n")
+           .append("ENGINE = MergeTree\n");
+
+        if (partitionBy != null && !partitionBy.isEmpty()) {
+            ddl.append("PARTITION BY ")
+               .append(expr(partitionBy))
+               .append("\n");
+        }
+
+        ddl.append("ORDER BY ")
+           .append(expr(orderBy))
+           .append(";");
+
+        return ddl.toString();
+    }
+
+    // ---------- helpers ----------
+
+    private static String columnDDL(StructField field) {
+        String type = toClickHouseType(field.dataType());
+
+        if (field.nullable()) {
+            type = "Nullable(" + type + ")";
+        }
+
+        return field.name() + " " + type;
+    }
+
+    private static String expr(List<String> cols) {
+        if (cols.size() == 1) return cols.get(0);
+        return "(" + String.join(", ", cols) + ")";
+    }
+
+    private static String toClickHouseType(DataType t) {
+
+        if (t instanceof StringType) return "String";
+        if (t instanceof IntegerType) return "Int32";
+        if (t instanceof LongType) return "Int64";
+        if (t instanceof ShortType) return "Int16";
+        if (t instanceof ByteType) return "Int8";
+        if (t instanceof BooleanType) return "UInt8";
+        if (t instanceof FloatType) return "Float32";
+        if (t instanceof DoubleType) return "Float64";
+
+        if (t instanceof DateType) return "Date";
+        if (t instanceof TimestampType) return "DateTime64(3)";
+
+        if (t instanceof DecimalType dt)
+            return "Decimal(" + dt.precision() + "," + dt.scale() + ")";
+
+        if (t instanceof ArrayType at)
+            return "Array(" + toClickHouseType(at.elementType()) + ")";
+
+        if (t instanceof MapType mt)
+            return "Map(" +
+                    toClickHouseType(mt.keyType()) + "," +
+                    toClickHouseType(mt.valueType()) + ")";
+
+        if (t instanceof StructType st)
+            return "Tuple(" +
+                    Arrays.stream(st.fields())
+                          .map(f -> f.name() + " " + toClickHouseType(f.dataType()))
+                          .collect(Collectors.joining(", ")) +
+                    ")";
+
+        throw new UnsupportedOperationException(
+                "Unsupported Spark type for ClickHouse: " + t.simpleString()
+        );
+    }
+}
