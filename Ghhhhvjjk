@@ -1,0 +1,79 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+public final class ClickHouseDdlSimple {
+
+  private ClickHouseDdlSimple() {}
+
+  public static String generate(
+      Dataset<Row> ds,
+      String database,
+      String table,
+      List<String> partitionBy,
+      List<String> orderBy
+  ) {
+
+    StructType schema = ds.schema();
+
+    String fullTable = (database == null || database.isEmpty())
+        ? table
+        : database + "." + table;
+
+    // Colonnes
+    String columns = java.util.Arrays.stream(schema.fields())
+        .map(f -> "  `" + f.name() + "` Nullable(" + toChType(f.dataType()) + ")")
+        .collect(Collectors.joining(",\n"));
+
+    // PARTITION BY
+    String partition =
+        (partitionBy == null || partitionBy.isEmpty())
+            ? ""
+            : "PARTITION BY (" + quote(partitionBy) + ")\n";
+
+    // ORDER BY
+    String order =
+        (orderBy == null || orderBy.isEmpty())
+            ? "ORDER BY tuple()\n"
+            : "ORDER BY (" + quote(orderBy) + ")\n";
+
+    // DDL final
+    return ""
+        + "CREATE TABLE " + fullTable + "\n"
+        + "(\n" + columns + "\n)\n"
+        + "ENGINE = MergeTree\n"
+        + partition
+        + order
+        + "SETTINGS index_granularity = 8192,\n"
+        + "         default_compression_codec = 'ZSTD',\n"
+        + "         allow_nullable_key = true;";
+  }
+
+  private static String quote(List<String> cols) {
+    return cols.stream()
+        .map(c -> "`" + c + "`")
+        .collect(Collectors.joining(", "));
+  }
+
+  private static String toChType(DataType t) {
+    if (t instanceof StringType) return "String";
+    if (t instanceof IntegerType) return "Int32";
+    if (t instanceof LongType) return "Int64";
+    if (t instanceof FloatType) return "Float32";
+    if (t instanceof DoubleType) return "Float64";
+    if (t instanceof BooleanType) return "Bool";
+    if (t instanceof DateType) return "Date";
+    if (t instanceof TimestampType) return "DateTime";
+
+    if (t instanceof DecimalType) {
+      DecimalType d = (DecimalType) t;
+      return "Decimal(" + d.precision() + "," + d.scale() + ")";
+    }
+
+    // Struct / Array / Map → JSON
+    return "JSON";
+  }
+}
