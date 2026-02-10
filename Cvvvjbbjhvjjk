@@ -1,0 +1,20 @@
+public static void executeClickHouseSql(SparkSession spark, String sql) {
+
+    String host = spark.conf().get("spark.clickhouse.host");
+    String port = spark.conf().get("spark.clickhouse.port", "8123");
+    String database = spark.conf().get("spark.clickhouse.database", "default");
+    String user = spark.conf().get("spark.clickhouse.user", "default");
+    String password = spark.conf().get("spark.clickhouse.password", "");
+
+    String url =
+        "jdbc:clickhouse://" + host + ":" + port + "/" + database;
+
+    try (Connection conn = DriverManager.getConnection(url, user, password);
+         Statement stmt = conn.createStatement()) {
+
+        stmt.execute(sql);
+
+    } catch (SQLException e) {
+        throw new RuntimeException("ClickHouse SQL execution failed", e);
+    }
+}
