@@ -1,0 +1,23 @@
+spark.conf().set(
+  "spark.sql.execution.arrow.pyspark.enabled",
+  "false"
+);
+
+spark.conf().set(
+  "spark.sql.execution.datasources.v2.enabled",
+  "true"
+);
+
+spark.conf().set(
+  "spark.sql.classLoaderIsolation.enabled",
+  "false"
+);
+
+
+
+try {
+  Class.forName("com.clickhouse.spark.CommitMessage");
+  LOGGER.info("OK: CommitMessage visible on DRIVER classpath");
+} catch (ClassNotFoundException e) {
+  throw new RuntimeException("KO: CommitMessage NOT on DRIVER classpath", e);
+}
