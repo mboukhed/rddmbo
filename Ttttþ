@@ -1,0 +1,4 @@
+spec:
+  sparkConf:
+    "spark.driver.extraClassPath": "/opt/spark/work-dir/*:/opt/spark/jars/*"
+    "spark.executor.extraClassPath": "/opt/spark/work-dir/*:/opt/spark/jars/*"
