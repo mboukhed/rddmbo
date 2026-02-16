@@ -1,0 +1,55 @@
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+
+public static List<LocalDate> datesBetweenStartInclusiveToTodayInclusiveExceptIfSame(LocalDate start) {
+
+    LocalDate today = LocalDate.now();
+    if (start == null || !start.isBefore(today)) { // start >= today
+        return new ArrayList<>();
+    }
+
+    List<LocalDate> dates = new ArrayList<>();
+    for (LocalDate d = start; !d.isAfter(today); d = d.plusDays(1)) {
+        dates.add(d);
+    }
+    return dates;
+}
+
+import org.apache.spark.sql.*;
+import java.sql.Date;
+import java.time.LocalDate;
+import java.util.Optional;
+
+public final class ClickHouseMaxDate {
+
+    public static Optional<LocalDate> getMaxLocalDate(
+            SparkSession spark,
+            String jdbcUrl,
+            String table,
+            String column
+    ) {
+
+        String query = "(SELECT max(" + column + ") AS max_date FROM " + table + ") t";
+
+        Row row = spark.read()
+                .format("jdbc")
+                .option("url", jdbcUrl)
+                .option("dbtable", query)
+                .option("driver", "com.clickhouse.jdbc.ClickHouseDriver")
+                .load()
+                .first();
+
+        if (row == null || row.isNullAt(0)) return Optional.empty();
+
+        return Optional.of(row.getDate(0).toLocalDate());
+    }
+
+    public static void main(String[] args) {
+        LocalDate maxDate = getMaxLocalDate(
+                spark, jdbcUrl, "my_table", "my_date_col"
+        ).orElse(LocalDate.of(1970, 1, 1));
+
+        System.out.println("Max date = " + maxDate);
+    }
+}
