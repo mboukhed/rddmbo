@@ -1,0 +1,120 @@
+Ok, là c’est clair 👍
+Ton screenshot montre un vrai problème ClickHouse côté serveur, pas un souci WebSSO ou Spark.
+💥 L’erreur clé (celle qui tue)
+Copier le code
+
+Code: 745. DB::Exception: CPU is overloaded
+CPU is waiting for execution
+(SERVER_OVERLOADED)
+👉 Ça veut dire ClickHouse refuse volontairement la requête
+👉 Mécanisme de protection interne, pas un crash
+🧠 Ce que ClickHouse te dit exactement
+ClickHouse surveille :
+le temps CPU réel
+le temps CPU en attente (scheduler, cgroups, VM, conteneur)
+Et il calcule un ratio :
+Copier le code
+
+os_cpu_wait_time_ratio
+Dans ton cas :
+Copier le code
+
+ratio mesuré ≈ 2.50
+seuil max ≈ 2
+➡️ Donc ClickHouse considère que :
+“Je passe trop de temps à attendre du CPU → je coupe”
+⚠️ Causes réelles (dans 90 % des cas)
+1️⃣ ClickHouse sous-dimensionné
+trop peu de CPU
+VM / pod bridé par cgroups
+node AKS surchargé
+👉 Ultra courant sur AKS / Kubernetes
+2️⃣ Trop de requêtes concurrentes
+Exemples :
+Spark lance plein de partitions
+Plusieurs jobs Spark en même temps
+Requêtes lourdes (INSERT SELECT, OPTIMIZE, FINAL, JOIN)
+3️⃣ ClickHouse tourne en conteneur sans CPU garanti
+Exemple AKS :
+Yaml
+Copier le code
+resources:
+  limits:
+    cpu: "2"
+  requests:
+    cpu: "500m"
+➡️ Le scheduler throttle → ClickHouse panique → 745
+4️⃣ Mauvaise affinité Spark ↔ ClickHouse
+trop de writers Spark
+batch trop petit
+inserts parallèles non maîtrisés
+✅ Solutions concrètes (pas du blabla)
+✔️ Solution 1 — augmenter la tolérance ClickHouse (rapide)
+Dans config.xml ou users.xml :
+Xml
+Copier le code
+<profiles>
+  <default>
+    <max_os_cpu_wait_time_ratio>4</max_os_cpu_wait_time_ratio>
+  </default>
+</profiles>
+⚠️ Ça masque le problème, mais débloque vite.
+✔️ Solution 2 — limiter la concurrence (propre)
+Xml
+Copier le code
+<max_concurrent_queries>50</max_concurrent_queries>
+<max_threads>8</max_threads>
+Et côté Spark :
+Scala
+Copier le code
+spark.sql.shuffle.partitions=8
+✔️ Solution 3 — corriger AKS (très important)
+Sur le pod ClickHouse :
+Yaml
+Copier le code
+resources:
+  requests:
+    cpu: "4"
+    memory: "16Gi"
+  limits:
+    cpu: "4"
+    memory: "16Gi"
+👉 requests = limits (obligatoire pour ClickHouse)
+✔️ Solution 4 — Spark : arrêter le carnage
+Si tu fais du write ClickHouse depuis Spark :
+réduire :
+numPartitions
+writers parallèles
+augmenter batch insert
+éviter foreachPartition mal contrôlé
+🔍 Commandes de debug immédiates
+Dans ClickHouse :
+Sql
+Copier le code
+SELECT *
+FROM system.processes
+ORDER BY elapsed DESC;
+Sql
+Copier le code
+SELECT *
+FROM system.metrics
+WHERE metric LIKE '%CPU%';
+Sql
+Copier le code
+SELECT *
+FROM system.events
+WHERE event LIKE '%Overload%';
+🧩 Conclusion nette
+❌ Ce n’est PAS :
+un bug JDBC
+un problème WebSSO
+un problème réseau
+✅ C’est :
+ClickHouse qui s’auto-protège
+CPU trop contraint (AKS + Spark)
+Si tu veux, dis-moi :
+AKS ou VM ?
+CPU / RAM du pod ClickHouse
+nb de writers Spark
+INSERT SELECT ou INSERT VALUES ?
+Je te donne la config exacte prod-safe pour Spark + ClickHouse 🔥
