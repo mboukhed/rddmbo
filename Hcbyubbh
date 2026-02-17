@@ -1,0 +1,29 @@
+import org.apache.spark.sql.SparkSession;
+
+public class ReadParquetSpn {
+
+  public static void main(String[] args) {
+
+    String tenantId = System.getenv("AZ_TENANT_ID");
+    String clientId = System.getenv("AZ_CLIENT_ID");
+    String clientSecret = System.getenv("AZ_CLIENT_SECRET");
+    String account = "mystorage";
+
+    SparkSession spark = SparkSession.builder()
+        .appName("spark-spn-parquet")
+        .config("spark.hadoop.fs.azure.account.auth.type." + account + ".dfs.core.windows.net", "OAuth")
+        .config("spark.hadoop.fs.azure.account.oauth.provider.type." + account + ".dfs.core.windows.net",
+                "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider")
+        .config("spark.hadoop.fs.azure.account.oauth2.client.id." + account + ".dfs.core.windows.net", clientId)
+        .config("spark.hadoop.fs.azure.account.oauth2.client.secret." + account + ".dfs.core.windows.net", clientSecret)
+        .config("spark.hadoop.fs.azure.account.oauth2.client.endpoint." + account + ".dfs.core.windows.net",
+                "https://login.microsoftonline.com/" + tenantId + "/oauth2/token")
+        .getOrCreate();
+
+    spark.read()
+        .parquet("abfss://data@" + account + ".dfs.core.windows.net/parquet/")
+        .show();
+
+    spark.stop();
+  }
+}
