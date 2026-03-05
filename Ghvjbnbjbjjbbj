@@ -1,0 +1,8 @@
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+
+public static String firstJanuaryTwoYearsAgo() {
+    int year = LocalDate.now().getYear() - 2;
+    LocalDate date = LocalDate.of(year, 1, 1);
+    return date.format(DateTimeFormatter.ISO_LOCAL_DATE);
+}
