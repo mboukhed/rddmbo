@@ -1,0 +1,9 @@
+spec:
+  executor:
+    volumeMounts:
+      - name: spark-local-dir
+        mountPath: /tmp/spark
+    volumes:
+      - name: spark-local-dir
+        emptyDir:
+          sizeLimit: 50Gi
