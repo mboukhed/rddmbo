@@ -1,0 +1,64 @@
+Oui, là c’est net : tu as toujours “No space left on device” → donc ce n’est plus un souci de réglage shuffle, c’est un souci de stockage local disponible sur les executors.
+Tes conf (400, maxRecordsPerFile, AQE) réduisent, mais si /tmp (ou le disque éphémère du pod) est petit, ça casse pareil.
+Ce qu’il faut comprendre
+Spark écrit les fichiers de shuffle / spill dans spark.local.dir (par défaut souvent /tmp dans le conteneur).
+Sur AKS, le filesystem du conteneur (overlay) peut être très limité, et partagé.
+➡️ Tant que tu ne donnes pas à Spark un vrai volume local, ça continuera.
+✅ Fix obligatoire AKS : volume local pour spark.local.dir
+1) Dans sparkConf
+YAML
+Copier le code
+sparkConf:
+  spark.local.dir: /var/data/spark
+2) Dans spec.executor + spec.driver : monter un emptyDir
+(la partie exacte dépend de ton opérateur Spark, mais l’idée est la même)
+Exemple SparkApplication (Spark Operator) :
+YAML
+Copier le code
+spec:
+  driver:
+    volumeMounts:
+      - name: spark-local-dir
+        mountPath: /var/data/spark
+    volumes:
+      - name: spark-local-dir
+        emptyDir:
+          sizeLimit: 100Gi
+
+  executor:
+    volumeMounts:
+      - name: spark-local-dir
+        mountPath: /var/data/spark
+    volumes:
+      - name: spark-local-dir
+        emptyDir:
+          sizeLimit: 100Gi
+✅ Résultat : shuffle/spill va sur un volume dédié et plus gros.
+Si tes nodes ont un disque éphémère limité, tu peux mettre 50Gi au lieu de 100Gi, mais il faut un ordre de grandeur correct.
+✅ Deuxième fix (important) : arrêter le “sur-pack” CPU
+Tu as :
+spark.executor.cores=2
+spark.kubernetes.executor.request.cores=0.25
+➡️ k8s peut mettre trop d’executors sur le même node → ils se battent pour le disque.
+Mets au moins :
+YAML
+Copier le code
+sparkConf:
+  spark.kubernetes.executor.request.cores: "2"
+  spark.kubernetes.executor.limit.cores: "2"
+(et idem driver si besoin)
+✅ Si tu ne peux pas toucher aux volumes (plan B)
+Réduis la concurrence pour réduire l’écriture disque :
+baisse les executors :
+YAML
+Copier le code
+spark.executor.instances: "10"
+ou limite le nombre de tâches shuffle :
+YAML
+Copier le code
+spark.sql.shuffle.partitions: "200"
+Ça ne règle pas la cause, mais ça peut passer.
+🔥 Le diagnostic final
+Tant que tu n’as pas :
+spark.local.dir sur un volume monté (emptyDir / ephemeral / PVC) tu auras toujours ce crash sur un gros join.
+Si tu me colles ici ton SparkApplication complet (au moins les blocs spec.driver et spec.executor), je te renvoie le YAML exact adapté à ta structure actuelle, sans inventer de champs.
