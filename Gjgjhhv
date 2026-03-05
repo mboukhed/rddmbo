@@ -1,0 +1,54 @@
+Ok, voici un bloc de conf “bref” à coller (AKS / shuffle / fetchfailed).
+Il y a 2 versions selon si tu peux monter un volume local.
+✅ Version recommandée (avec volume local)
+YAML
+Copier le code
+sparkConf:
+  spark.local.dir: "/var/data/spark"
+
+  spark.sql.shuffle.partitions: "200"
+  spark.sql.adaptive.enabled: "true"
+  spark.sql.adaptive.coalescePartitions.enabled: "true"
+  spark.sql.adaptive.skewJoin.enabled: "true"
+  spark.sql.files.maxRecordsPerFile: "500000"
+
+  spark.kubernetes.executor.request.cores: "2"
+  spark.kubernetes.executor.limit.cores: "2"
+
+  spark.task.maxFailures: "8"
+  spark.stage.maxConsecutiveAttempts: "8"
+  spark.shuffle.io.maxRetries: "20"
+  spark.shuffle.io.retryWait: "10s"
+  spark.network.timeout: "800s"
+  spark.executor.heartbeatInterval: "60s"
+Et à ajouter (SparkApplication) :
+YAML
+Copier le code
+spec:
+  executor:
+    volumeMounts:
+      - name: spark-local-dir
+        mountPath: /var/data/spark
+    volumes:
+      - name: spark-local-dir
+        emptyDir:
+          sizeLimit: 100Gi
+✅ Version “sans volume” (plan B)
+YAML
+Copier le code
+sparkConf:
+  spark.sql.shuffle.partitions: "200"
+  spark.sql.adaptive.enabled: "true"
+  spark.sql.files.maxRecordsPerFile: "500000"
+
+  spark.executor.instances: "10"
+  spark.kubernetes.executor.request.cores: "2"
+  spark.kubernetes.executor.limit.cores: "2"
+
+  spark.task.maxFailures: "8"
+  spark.stage.maxConsecutiveAttempts: "8"
+  spark.shuffle.io.maxRetries: "20"
+  spark.shuffle.io.retryWait: "10s"
+  spark.network.timeout: "800s"
+  spark.executor.heartbeatInterval: "60s"
+Si tu dois choisir 1 seul truc : request.cores = 2 + limit.cores = 2 (sinon k8s te sur-pack et tu retombes en FetchFailed).
