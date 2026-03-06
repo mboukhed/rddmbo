@@ -1,0 +1,164 @@
+Bonne remarque.
+Quand tu lis partition par partition, Spark ne reconstruit pas automatiquement la colonne de partition (ex: ingestion_date=2026-03-01).
+Il faut donc extraire la valeur depuis le path et ajouter la colonne.
+Je te donne une version améliorée de la fonction.
+Fonction Spark Java (Azure) avec ajout colonne partition
+Java
+Copier le code
+import org.apache.hadoop.fs.*;
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.*;
+import org.apache.spark.sql.functions;
+
+import java.net.URI;
+import java.util.*;
+
+public class AzurePartitionReader {
+
+    public static Dataset<Row> readPartitionedDataset(
+            SparkSession spark,
+            String rootPath,
+            StructType targetSchema
+    ) throws Exception {
+
+        List<String> partitions = listPartitions(spark, rootPath);
+
+        Dataset<Row> union = null;
+
+        for (String partitionPath : partitions) {
+
+            Map<String,String> partitionValues = extractPartitionValues(partitionPath);
+
+            Dataset<Row> df = spark.read()
+                    .format("parquet")
+                    .load(partitionPath);
+
+            // ajouter colonnes partition
+            for (Map.Entry<String,String> p : partitionValues.entrySet()) {
+                df = df.withColumn(p.getKey(), functions.lit(p.getValue()));
+            }
+
+            Dataset<Row> stringDf = castAllColumnsToString(df);
+
+            if (union == null)
+                union = stringDf;
+            else
+                union = union.unionByName(stringDf, true);
+        }
+
+        return applySchema(union, targetSchema);
+    }
+
+    /**
+     * Liste partitions
+     */
+    public static List<String> listPartitions(SparkSession spark, String path) throws Exception {
+
+        FileSystem fs = FileSystem.get(
+                new URI(path),
+                spark.sparkContext().hadoopConfiguration()
+        );
+
+        List<String> partitions = new ArrayList<>();
+
+        for (FileStatus status : fs.listStatus(new Path(path))) {
+
+            if (status.isDirectory())
+                partitions.add(status.getPath().toString());
+        }
+
+        return partitions;
+    }
+
+    /**
+     * extrait partition depuis le path
+     * ex :
+     * ingestion_date=2026-01-01
+     */
+    public static Map<String,String> extractPartitionValues(String path) {
+
+        Map<String,String> partitions = new HashMap<>();
+
+        String[] parts = path.split("/");
+
+        for (String part : parts) {
+
+            if (part.contains("=")) {
+
+                String[] kv = part.split("=");
+
+                if (kv.length == 2)
+                    partitions.put(kv[0], kv[1]);
+            }
+        }
+
+        return partitions;
+    }
+
+    /**
+     * cast tout en String
+     */
+    public static Dataset<Row> castAllColumnsToString(Dataset<Row> df) {
+
+        Column[] cols = new Column[df.columns().length];
+
+        for (int i = 0; i < df.columns().length; i++) {
+
+            cols[i] = functions.col(df.columns()[i])
+                    .cast(DataTypes.StringType)
+                    .alias(df.columns()[i]);
+        }
+
+        return df.select(cols);
+    }
+
+    /**
+     * applique schema final
+     */
+    public static Dataset<Row> applySchema(Dataset<Row> df, StructType schema) {
+
+        Column[] cols = new Column[schema.fields().length];
+
+        for (int i = 0; i < schema.fields().length; i++) {
+
+            StructField f = schema.fields()[i];
+
+            cols[i] = functions.col(f.name())
+                    .cast(f.dataType())
+                    .alias(f.name());
+        }
+
+        return df.select(cols);
+    }
+}
+Exemple
+Partitions Azure :
+Copier le code
+
+abfss://lake/trades/ingestion_date=2026-03-01
+abfss://lake/trades/ingestion_date=2026-03-02
+abfss://lake/trades/ingestion_date=2026-03-03
+Après lecture :
+Copier le code
+
++trade_id+amount+ingestion_date+
+|1       |100   |2026-03-01    |
+|2       |200   |2026-03-01    |
+|3       |150   |2026-03-02    |
+Support multi partitions
+marche aussi pour :
+Copier le code
+
+year=2026/month=03/day=06
+résultat :
+Copier le code
+
+year month day
+2026 03    06
+Si tu veux je peux aussi te donner une version beaucoup plus rapide pour Spark
+qui :
+✔ lit 1000 partitions en parallèle
+✔ évite union lent
+✔ reconstruit partitions automatiquement
+✔ supporte schema drift
+C'est celle utilisée pour data lake production (Spark / AKS / ADLS).
