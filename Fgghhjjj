@@ -1,0 +1,5 @@
+sparkConf:
+  spark.sql.adaptive.enabled: "true"
+  spark.sql.adaptive.coalescePartitions.enabled: "true"
+  spark.sql.adaptive.advisoryPartitionSizeInBytes: "64MB"
+  spark.sql.adaptive.coalescePartitions.minPartitionSize: "16MB"
