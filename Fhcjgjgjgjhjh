@@ -1,0 +1,142 @@
+Dans Azure (ADLS / Blob) il faut utiliser le FileSystem Hadoop ABFS / WASBS pour lister les partitions.
+Le principe reste le même mais il faut utiliser le bon FileSystem.
+Je te donne une version 100% compatible Azure + Spark Java.
+Fonction Java Spark pour Azure
+liste partitions ADLS
+lit partition par partition
+convertit tout en String
+union
+applique schema final
+Java
+Copier le code
+import org.apache.hadoop.fs.*;
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.*;
+import org.apache.spark.sql.functions;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class AzurePartitionReader {
+
+    public static Dataset<Row> readPartitionedDataset(
+            SparkSession spark,
+            String rootPath,
+            StructType targetSchema
+    ) throws Exception {
+
+        List<String> partitions = listPartitions(spark, rootPath);
+
+        Dataset<Row> union = null;
+
+        for (String partition : partitions) {
+
+            Dataset<Row> df = spark.read()
+                    .format("parquet")
+                    .load(partition);
+
+            Dataset<Row> stringDf = castAllColumnsToString(df);
+
+            if (union == null)
+                union = stringDf;
+            else
+                union = union.unionByName(stringDf, true);
+        }
+
+        return applySchema(union, targetSchema);
+    }
+
+    /**
+     * Liste les partitions dans ADLS
+     */
+    public static List<String> listPartitions(SparkSession spark, String path) throws Exception {
+
+        FileSystem fs = FileSystem.get(
+                new java.net.URI(path),
+                spark.sparkContext().hadoopConfiguration()
+        );
+
+        List<String> partitions = new ArrayList<>();
+
+        for (FileStatus status : fs.listStatus(new Path(path))) {
+
+            if (status.isDirectory())
+                partitions.add(status.getPath().toString());
+        }
+
+        return partitions;
+    }
+
+    /**
+     * Cast toutes les colonnes en String
+     */
+    public static Dataset<Row> castAllColumnsToString(Dataset<Row> df) {
+
+        Column[] cols = new Column[df.columns().length];
+
+        for (int i = 0; i < df.columns().length; i++) {
+
+            cols[i] = functions.col(df.columns()[i])
+                    .cast(DataTypes.StringType)
+                    .alias(df.columns()[i]);
+        }
+
+        return df.select(cols);
+    }
+
+    /**
+     * Applique le schema final
+     */
+    public static Dataset<Row> applySchema(Dataset<Row> df, StructType schema) {
+
+        Column[] cols = new Column[schema.fields().length];
+
+        for (int i = 0; i < schema.fields().length; i++) {
+
+            StructField f = schema.fields()[i];
+
+            cols[i] = functions.col(f.name())
+                    .cast(f.dataType())
+                    .alias(f.name());
+        }
+
+        return df.select(cols);
+    }
+}
+Exemple d'appel dans Azure
+Java
+Copier le code
+StructType schema = new StructType()
+        .add("trade_id", DataTypes.StringType)
+        .add("amount", DataTypes.DoubleType)
+        .add("book", DataTypes.StringType)
+        .add("ingestion_date", DataTypes.DateType);
+
+Dataset<Row> df = AzurePartitionReader.readPartitionedDataset(
+        spark,
+        "abfss://datalake@storage.dfs.core.windows.net/trades/",
+        schema
+);
+Supporte ces paths Azure
+Copier le code
+
+abfss://container@storage.dfs.core.windows.net/path
+abfs://container@storage.dfs.core.windows.net/path
+wasbs://container@storage.blob.core.windows.net/path
+Pourquoi cette approche est robuste
+Très utile quand :
+certaines partitions ont un schema différent
+certaines colonnes changent de type
+ex
+Copier le code
+
+partition1 : price double
+partition2 : price string
+Sans ça Spark crash.
+Si tu veux je peux aussi te donner une version ULTRA ROBUSTE PRODUCTION :
+✔ scan récursif partitions
+✔ multi-level partition (year/month/day)
+✔ lecture parallèle
+✔ correction automatique des types
+✔ logging partitions corrompues
+C'est celle qu'on utilise souvent pour Spark sur AKS + ADLS.
