@@ -1,0 +1,112 @@
+Oui, je vois exactement ton problème dans le log.
+L’erreur clé
+Copier le code
+
+Exit code 137 (SIGKILL)
+Reason: Evicted
+The node was low on resource: ephemeral-storage
+Donc ce n’est pas la RAM ❗
+C’est le disque temporaire du node Kubernetes.
+Spark écrit des fichiers temporaires (shuffle / spill / parquet staging) et le node AKS manque de disque, donc Kubernetes évince le container executor.
+Ce qui se passe exactement
+Pendant l’écriture finale :
+Copier le code
+
+write parquet
+→ shuffle
+→ spill disk
+→ temporary files
+Spark écrit dans :
+Copier le code
+
+/tmp
+/local
+/spark-local
+et Kubernetes voit :
+Copier le code
+
+ephemeral-storage > threshold
+Donc :
+Copier le code
+
+Evicted
+exit code 137
+Pourquoi ça arrive à la fin
+Parce que :
+toutes les partitions sont calculées
+Spark fait le commit final
+beaucoup de shuffle spill disk
+Donc ça explose à la fin du job.
+Solutions (les vraies)
+1️⃣ Donner du disque aux executors (meilleur fix)
+Dans ton SparkApplication YAML :
+YAML
+Copier le code
+sparkConf:
+  spark.kubernetes.executor.request.ephemeral-storage: 10Gi
+  spark.kubernetes.executor.limit.ephemeral-storage: 20Gi
+2️⃣ Changer le dossier de spill Spark
+Monte un volume :
+YAML
+Copier le code
+spark.local.dir=/mnt/spark
+et dans Kubernetes :
+YAML
+Copier le code
+volumeMounts:
+- mountPath: /mnt/spark
+  name: spark-local-dir
+
+volumes:
+- name: spark-local-dir
+  emptyDir:
+    sizeLimit: 50Gi
+3️⃣ Réduire le spill disk
+Réduire partitions shuffle :
+Java
+Copier le code
+spark.conf().set("spark.sql.shuffle.partitions", "200");
+ou même :
+Copier le code
+
+100
+si dataset petit.
+4️⃣ Forcer compression spill
+Java
+Copier le code
+spark.conf().set("spark.shuffle.compress", "true");
+spark.conf().set("spark.shuffle.spill.compress", "true");
+5️⃣ Le problème possible dans ton code
+Si tu fais :
+Copier le code
+
+union partition par partition
+tu crées un gros shuffle à la fin.
+Meilleure approche :
+Copier le code
+
+Dataset<Row> df = spark.read().parquet(allPartitions)
+ou
+Copier le code
+
+spark.read().option("basePath", root).parquet(partitions...)
+Comment vérifier
+Dans AKS :
+Copier le code
+
+kubectl describe pod spark-executor-19
+tu verras :
+Copier le code
+
+Reason: Evicted
+Message: node was low on ephemeral storage
+La vraie solution utilisée en production
+Ajouter :
+Copier le code
+
+spark.kubernetes.executor.request.ephemeral-storage
+spark.local.dir
+Sinon Spark sur AKS crash souvent à la fin des writes.
+💡 Vu ton niveau Spark (AKS + ADLS + parquet), je peux aussi te montrer le vrai problème derrière ton job :
+je pense que ton union partition par partition crée un shuffle monstrueux, ce qui explique le spill disque.
+Si tu veux, montre-moi le code du write parquet et je te dirai exactement où ça casse.
