@@ -1,0 +1,35 @@
+driver:
+  volumeMounts:
+    - name: spark-local-dir
+      mountPath: /var/data/spark
+  volumes:
+    - name: spark-local-dir
+      emptyDir:
+        sizeLimit: 200Gi
+
+  resources:
+    requests:
+      cpu: "2"
+      memory: "62Gi"
+      ephemeral-storage: "10Gi"
+    limits:
+      memory: "62Gi"
+      ephemeral-storage: "30Gi"
+
+executor:
+  volumeMounts:
+    - name: spark-local-dir
+      mountPath: /var/data/spark
+  volumes:
+    - name: spark-local-dir
+      emptyDir:
+        sizeLimit: 400Gi
+
+  resources:
+    requests:
+      cpu: "2"
+      memory: "6Gi"
+      ephemeral-storage: "50Gi"
+    limits:
+      memory: "6Gi"
+      ephemeral-storage: "100Gi"
