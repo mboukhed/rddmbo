@@ -1,0 +1,170 @@
+Oui. Sur AKS / Kubernetes, les 3 pièges les plus fréquents qui font exploser le ephemeral-storage dans Spark sont ceux-là :
+1) Trop de shuffle / trop de spill disque
+C’est le plus gros classique.
+Quand Spark n’a pas assez de mémoire pour traiter :
+join
+sort
+agrégation
+repartition
+écriture avec gros shuffle
+il fait du spill sur disque local → donc ephemeral-storage.
+Signes
+Dans les logs UI / stages :
+shuffle write énorme
+spill (memory) puis spill (disk)
+executors evicted
+Shuffle files lost
+Causes typiques
+repartition() trop tôt ou trop souvent
+join sur colonnes très peu sélectives
+skew énorme
+trop peu de partitions ou partitions déséquilibrées
+tri global inutile
+Ce qu’il faut faire
+éviter les repartition() inutiles
+préférer repartition(col) seulement si nécessaire
+filtrer avant le join
+sélectionner seulement les colonnes utiles avant shuffle
+traiter le skew
+2) spark.local.dir sur le disque local du conteneur
+Par défaut, Spark écrit les fichiers temporaires dans le stockage éphémère du pod / node.
+Donc :
+shuffle files
+spill files
+temp sort files
+finissent dans le local ephemeral storage.
+Effet
+Même si ta RAM est correcte, ton pod meurt car :
+le disque local du node se remplit
+Kubernetes évince le pod
+Ce qu’il faut faire
+Déclarer explicitement un volume local Spark.
+Exemple simple :
+YAML
+Copier le code
+spark.local.dir: "/tmp/spark"
+spark.kubernetes.executor.volumes.emptyDir.spark-local-dir-1.mount.path: "/tmp/spark"
+spark.kubernetes.executor.volumes.emptyDir.spark-local-dir-1.mount.readOnly: "false"
+spark.kubernetes.executor.volumes.emptyDir.spark-local-dir-1.options.sizeLimit: "20Gi"
+Et pareil côté driver si besoin.
+Ça ne supprime pas le problème de fond, mais au moins :
+tu contrôles mieux l’espace
+tu rends le comportement prévisible
+3) Pas de ephemeral-storage request/limit
+C’est exactement ce qu’on voit dans ton log avec :
+request is 0
+Donc Kubernetes considère que ton pod ne réserve rien en disque éphémère.
+Résultat : dès que le node est sous pression, Spark saute en premier.
+Ce qu’il faut mettre
+YAML
+Copier le code
+spark.kubernetes.executor.request.ephemeral-storage: "10Gi"
+spark.kubernetes.executor.limit.ephemeral-storage: "20Gi"
+
+spark.kubernetes.driver.request.ephemeral-storage: "5Gi"
+spark.kubernetes.driver.limit.ephemeral-storage: "10Gi"
+Pour un job lourd, 10/20 Gi par executor peut même être trop bas.
+Si gros shuffle, vise plutôt :
+YAML
+Copier le code
+spark.kubernetes.executor.request.ephemeral-storage: "20Gi"
+spark.kubernetes.executor.limit.ephemeral-storage: "40Gi"
+Dans ton cas précis
+Avec ce que tu as montré :
+20 executors
+15g par executor
+gros shuffle
+perte de shuffle files
+eviction Kubernetes disque
+le problème n’est pas “4m petit ou grand”, ni d’abord Kryo.
+Le vrai problème est plutôt :
+A. Trop d’executors pour le stockage local dispo
+20 executors qui spillent tous en même temps = explosion disque node.
+B. Tu écris / lis / rejoins avec beaucoup de données intermédiaires
+Donc gros shuffle write.
+C. Tu n’as pas réservé d’ephemeral-storage
+Donc K8s t’évince vite.
+Ce que je te conseille de changer tout de suite
+Bloc Kubernetes
+YAML
+Copier le code
+spark.kubernetes.executor.request.ephemeral-storage: "20Gi"
+spark.kubernetes.executor.limit.ephemeral-storage: "40Gi"
+spark.kubernetes.driver.request.ephemeral-storage: "5Gi"
+spark.kubernetes.driver.limit.ephemeral-storage: "10Gi"
+Bloc local dir
+YAML
+Copier le code
+spark.local.dir: "/tmp/spark"
+spark.kubernetes.executor.volumes.emptyDir.spark-local-dir-1.mount.path: "/tmp/spark"
+spark.kubernetes.executor.volumes.emptyDir.spark-local-dir-1.mount.readOnly: "false"
+spark.kubernetes.executor.volumes.emptyDir.spark-local-dir-1.options.sizeLimit: "40Gi"
+Réduire la pression
+Au lieu de :
+YAML
+Copier le code
+spark.executor.instances: "20"
+spark.executor.cores: "2"
+spark.executor.memory: "15g"
+teste :
+YAML
+Copier le code
+spark.executor.instances: "10"
+spark.executor.cores: "3"
+spark.executor.memory: "15g"
+Pourquoi :
+moins de pods
+moins de fichiers shuffle dispersés
+moins de concurrence sur le disque local des nodes
+Les 3 erreurs Spark qui gonflent le disque x10
+En pratique, celles qui font très mal sont :
+1. repartition() sans besoin réel
+Exemple :
+Java
+Copier le code
+df.repartition(200)
+avant un join ou avant une write, souvent ça crée un énorme shuffle inutile.
+2. Join avant filtrage / projection
+Si tu joins des DataFrames larges avec toutes les colonnes, Spark shuffle beaucoup plus.
+Mieux :
+Java
+Copier le code
+left.select("k1","k2","c1")
+    .filter(...)
+    .join(
+        right.select("k1","k2","c2").filter(...),
+        joinExpr,
+        "inner"
+    );
+3. Écriture avec trop peu ou trop de partitions
+trop peu → partitions géantes → spill disque
+trop de partitions → plein de petits fichiers + overhead
+Réglages Spark utiles dans ton cas
+Je testerais cette base :
+YAML
+Copier le code
+spark.sql.adaptive.enabled: "true"
+spark.sql.adaptive.coalescePartitions.enabled: "true"
+spark.sql.adaptive.skewJoin.enabled: "true"
+spark.sql.shuffle.partitions: "200"
+spark.sql.files.maxPartitionBytes: "134217728"
+spark.broadcast.blockSize: "16m"
+spark.sql.broadcastTimeout: "1200"
+spark.sql.autoBroadcastJoinThreshold: "-1"   # seulement si le broadcast te pose problème
+Pourquoi maxPartitionBytes à 128MB
+Tu avais 268435456 = 256MB.
+256MB peut créer des partitions de lecture trop grosses, puis plus de spill sur join / sort.
+128MB est souvent plus stable sur AKS.
+Ma reco la plus pragmatique
+Commence par ça, dans cet ordre :
+Étape 1
+Ajoute les request/limit ephemeral-storage.
+Étape 2
+Déclare spark.local.dir avec emptyDir + sizeLimit.
+Étape 3
+Réduis executor.instances de 20 à 8–10 pour test.
+Étape 4
+Passe spark.sql.files.maxPartitionBytes à 128MB.
+Étape 5
+Vérifie le code pour enlever les repartition() inutiles avant join / write.
+Si tu veux, je peux maintenant te proposer un YAML corrigé complet pour ton job AKS Spark 3.3, prêt à tester.
