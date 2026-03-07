@@ -1,0 +1,88 @@
+Oui, le 196/200 est très important 👍
+Ça veut dire que le job est quasiment terminé et que ce n’est pas un problème de code ou de plan Spark.
+Regarde les lignes clés dans ton écran :
+Copier le code
+
+Executor lost: 16
+Shuffle files lost for executor: 16
+Executor lost: 15
+exit code -1 (unexpected)
+et surtout :
+Copier le code
+
+Shuffle files lost
+Ce que ça signifie vraiment
+Ton job arrive à 196 tasks sur 200, donc :
+les transformations Spark fonctionnent
+le plan Spark est correct
+les joins passent
+le shuffle est déjà fait
+Mais un executor disparaît juste avant la fin.
+Quand un executor disparaît :
+Copier le code
+
+shuffle files lost
+Spark doit recalculer des partitions shuffle.
+Et si plusieurs executors disparaissent, Spark peut boucler ou échouer.
+Pourquoi l’executor disparaît ?
+Avec tes logs précédents on a déjà vu :
+Copier le code
+
+Evicted
+node was low on resource: ephemeral-storage
+Donc ce qui se passe :
+1️⃣ ton job fait un gros shuffle
+2️⃣ Spark écrit les fichiers shuffle sur /var/data/spark
+3️⃣ le disque du node AKS se remplit
+4️⃣ Kubernetes tue un executor
+5️⃣ Spark perd les fichiers shuffle
+6️⃣ Spark doit recalculer → parfois ça plante à la fin
+Pourquoi ça arrive à 196/200
+Parce que :
+le shuffle est déjà écrit
+les dernières tasks lisent les fichiers shuffle
+si un executor disparaît → les fichiers shuffle disparaissent
+Donc Spark panique.
+La vraie solution (celle utilisée en prod)
+Ajouter shuffle tracking pour Kubernetes :
+Copier le code
+
+spark.dynamicAllocation.shuffleTracking.enabled=true
+ou
+Copier le code
+
+spark.storage.decommission.enabled=true
+spark.storage.decommission.shuffleBlocks.enabled=true
+Mais surtout :
+Augmenter le disque shuffle
+Passe à :
+Copier le code
+
+spark.kubernetes.executor.request.ephemeral-storage=50Gi
+spark.kubernetes.executor.limit.ephemeral-storage=100Gi
+et garde :
+Copier le code
+
+spark.local.dir=/var/data/spark
+Le résumé ultra clair
+Ton problème n’est pas :
+❌ join
+❌ plan Spark
+❌ memory
+❌ Kryo
+❌ parquet
+C’est simplement :
+Copier le code
+
+Shuffle files + disque node AKS plein
+→ executor tué
+→ shuffle files lost
+→ job plante à 196/200
+Si tu veux, montre-moi juste une chose
+Dans Spark UI :
+Stage 44 (celui de ton screenshot)
+et surtout :
+Shuffle Read
+Shuffle Write
+Spill (disk)
+Je peux te dire en 5 secondes pourquoi ton shuffle est si gros.
