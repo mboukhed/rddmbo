@@ -1,0 +1,36 @@
+Mets ça :
+YAML
+Copier le code
+sparkConf:
+  spark.sql.autoBroadcastJoinThreshold: "10485760"
+  spark.sql.adaptive.enabled: "true"
+  spark.sql.adaptive.coalescePartitions.enabled: "true"
+  spark.sql.adaptive.skewJoin.enabled: "true"
+  spark.sql.shuffle.partitions: "100"
+  spark.sql.adaptive.shuffle.targetPostShuffleInputSize: "128MB"
+  spark.sql.files.maxPartitionBytes: "134217728"
+  spark.shuffle.compress: "true"
+  spark.shuffle.spill.compress: "true"
+  spark.io.compression.codec: "lz4"
+Et surtout enlève / corrige ça si tu l’as encore :
+YAML
+Copier le code
+spark.sql.autoBroadcastJoinThreshold: "-1"
+spark.sql.adaptive.enabled: "false"
+spark.sql.adaptive.coalescePartitions.enabled: "false"
+spark.sql.adaptive.skewJoin.enabled: "false"
+Ordre de test :
+remettre AQE à true
+remettre le broadcast
+baisser spark.sql.shuffle.partitions de 200 à 100
+Si ça shuffle encore trop, teste même :
+YAML
+Copier le code
+spark.sql.shuffle.partitions: "64"
+Le vrai piège chez toi, c’était :
+broadcast désactivé
+AQE désactivé
+200 partitions fixes
+disque node petit
+Ça force Spark à écrire beaucoup trop sur /var/data/spark.
+Si tu veux, envoie-moi ton bloc sparkConf complet et je te le nettoie ligne par ligne.
