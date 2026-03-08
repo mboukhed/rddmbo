@@ -1,0 +1,7 @@
+spark.kubernetes.client.watchReconnectInterval=5s
+spark.kubernetes.client.watchReconnectLimit=100
+2️⃣ augmenter timeout network
+Copier le code
+
+spark.network.timeout=800s
+spark.executor.heartbeatInterval=60s
