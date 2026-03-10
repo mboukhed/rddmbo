@@ -1,0 +1,18 @@
+import static org.apache.spark.sql.functions.col;
+
+long totalRows = dsJoin.count();
+long maxRecordsPerFile = 2_000_000L;
+
+long targetNumFiles =
+        Math.max(1L, (long) Math.ceil((double) totalRows / maxRecordsPerFile));
+
+dsJoin = dsJoin.repartition(
+        (int) targetNumFiles,
+        partitionCols.stream().map(c -> col(c)).toArray(org.apache.spark.sql.Column[]::new)
+);
+
+dsJoin.write()
+        .mode(SaveMode.Overwrite)
+        .option("maxRecordsPerFile", maxRecordsPerFile)
+        .partitionBy(partitionCols.toArray(new String[0]))
+        .parquet(pathFolderOutput);
