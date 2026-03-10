@@ -1,0 +1,10 @@
+long totalRows = df.count();
+long maxRecordsPerFile = 2_000_000L;
+long targetNumFiles = Math.max(1L, (long) Math.ceil((double) totalRows / maxRecordsPerFile));
+
+df.repartition((int) targetNumFiles)
+  .write()
+  .mode(SaveMode.Overwrite)
+  .option("maxRecordsPerFile", maxRecordsPerFile)
+  .partitionBy(partitionCols)
+  .parquet(outputPath);
