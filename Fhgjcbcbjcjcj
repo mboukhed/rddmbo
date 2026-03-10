@@ -1,0 +1,59 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SaveMode;
+
+public class ParquetSizer {
+
+    public static void writeParquet256MB(
+            Dataset<Row> df,
+            String outputPath,
+            String[] partitionCols) {
+
+        final long targetFileBytes = 256L * 1024 * 1024; // 256 MiB
+        final int sampleSize = 10000;
+
+        long totalRows = df.count();
+
+        if (totalRows == 0) {
+            df.write()
+              .mode(SaveMode.Overwrite)
+              .partitionBy(partitionCols)
+              .parquet(outputPath);
+            return;
+        }
+
+        // Échantillon léger pour estimer la taille moyenne d'une ligne
+        Dataset<Row> sampleDf = df.limit(sampleSize);
+
+        long sampleRows = sampleDf.count();
+        long sampleBytes = sampleDf.toJSON()
+                                  .javaRDD()
+                                  .map(s -> (long) s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
+                                  .reduce(Long::sum);
+
+        long avgRowBytes = Math.max(1L, sampleBytes / Math.max(1L, sampleRows));
+
+        // JSON > parquet en général, donc facteur de correction empirique
+        double parquetCompressionFactor = 0.35d;
+
+        long estimatedParquetRowBytes = Math.max(1L, (long) (avgRowBytes * parquetCompressionFactor));
+
+        long maxRecordsPerFile = Math.max(100_000L, targetFileBytes / estimatedParquetRowBytes);
+
+        long targetNumFiles = Math.max(1L, (long) Math.ceil((double) totalRows / maxRecordsPerFile));
+
+        Dataset<Row> out = df.repartition((int) targetNumFiles);
+
+        out.write()
+           .mode(SaveMode.Overwrite)
+           .option("maxRecordsPerFile", maxRecordsPerFile)
+           .partitionBy(partitionCols)
+           .parquet(outputPath);
+
+        System.out.println("totalRows=" + totalRows);
+        System.out.println("avgRowBytes(json)=" + avgRowBytes);
+        System.out.println("estimatedParquetRowBytes=" + estimatedParquetRowBytes);
+        System.out.println("maxRecordsPerFile=" + maxRecordsPerFile);
+        System.out.println("targetNumFiles=" + targetNumFiles);
+    }
+}
