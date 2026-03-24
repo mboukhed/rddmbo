@@ -1,0 +1,13 @@
+package it.steps;
+
+import org.apache.spark.sql.connector.catalog.DelegatingCatalogExtension;
+import org.apache.spark.sql.connector.catalog.CatalogExtension;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+
+public class FakeClickHouseCatalog extends DelegatingCatalogExtension implements CatalogExtension {
+
+    @Override
+    public void initialize(String name, CaseInsensitiveStringMap options) {
+        super.initialize(name, options);
+    }
+}
