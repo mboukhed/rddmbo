@@ -1,0 +1,15 @@
+public static Dataset<Row> createTestDataset(SparkSession spark) {
+
+    StructType schema = new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("name", DataTypes.StringType, true)
+            .add("amount", DataTypes.DoubleType, true);
+
+    List<Row> rows = List.of(
+            RowFactory.create(1, "A", 10.5),
+            RowFactory.create(2, "B", 20.0),
+            RowFactory.create(3, "C", 30.2)
+    );
+
+    return spark.createDataFrame(rows, schema);
+}
