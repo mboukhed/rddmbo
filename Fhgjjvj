@@ -1,0 +1,10 @@
+@Override
+public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
+    return new WriteBuilder() {
+
+        @Override
+        public BatchWrite buildForBatch() {
+            return new FakeBatchWrite(rows);
+        }
+    };
+}
