@@ -1,0 +1,127 @@
+Oui.
+Voici exactement ce qu’il faut mettre.
+1. Classe Java à ajouter en src/test/java
+com/acme/test/FakeClickHouseCatalog.java
+Java
+package com.acme.test;
+
+import org.apache.spark.sql.connector.catalog.DelegatingCatalogExtension;
+
+public class FakeClickHouseCatalog extends DelegatingCatalogExtension {
+}
+2. Exemple de test JUnit 5 avec spark.sql(...)
+com/acme/test/ClickHouseSqlTest.java
+Java
+package com.acme.test;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+public class ClickHouseSqlTest {
+
+    private SparkSession spark;
+
+    @AfterEach
+    void tearDown() {
+        if (spark != null) {
+            spark.stop();
+        }
+    }
+
+    @Test
+    void should_query_fake_clickhouse_catalog_with_sql() {
+        spark = SparkSession.builder()
+                .master("local[*]")
+                .appName("test-clickhouse-sql")
+                .config("spark.ui.enabled", "false")
+                .config("spark.sql.catalog.clickhouse", "com.acme.test.FakeClickHouseCatalog")
+                .getOrCreate();
+
+        spark.sql("CREATE NAMESPACE IF NOT EXISTS clickhouse.mydb");
+
+        spark.sql("DROP TABLE IF EXISTS clickhouse.mydb.users");
+
+        spark.sql(
+                "CREATE TABLE clickhouse.mydb.users (" +
+                        "id INT, " +
+                        "name STRING" +
+                        ") USING parquet"
+        );
+
+        spark.sql(
+                "INSERT INTO clickhouse.mydb.users VALUES " +
+                        "(1, 'a'), " +
+                        "(2, 'b')"
+        );
+
+        Dataset<Row> df = spark.sql("SELECT * FROM clickhouse.mydb.users");
+
+        Assertions.assertEquals(2, df.count());
+    }
+}
+3. Ce que tu dois ajouter dans ton pom.xml
+Ajoute seulement ça dans <dependencies> :
+XML
+<dependency>
+    <groupId>org.apache.spark</groupId>
+    <artifactId>spark-sql_2.12</artifactId>
+    <version>3.3.3</version>
+    <scope>test</scope>
+</dependency>
+
+<dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter-api</artifactId>
+    <version>5.10.2</version>
+    <scope>test</scope>
+</dependency>
+
+<dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter-engine</artifactId>
+    <version>5.10.2</version>
+    <scope>test</scope>
+</dependency>
+Et dans <build><plugins> ajoute ou complète surefire :
+XML
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <version>3.2.5</version>
+    <configuration>
+        <useModulePath>false</useModulePath>
+        <forkCount>1</forkCount>
+        <reuseForks>true</reuseForks>
+        <argLine>-Xms512m -Xmx2g</argLine>
+    </configuration>
+</plugin>
+Si tu n’as pas encore le compiler plugin Java 11 :
+XML
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-compiler-plugin</artifactId>
+    <version>3.11.0</version>
+    <configuration>
+        <source>11</source>
+        <target>11</target>
+    </configuration>
+</plugin>
+4. Résumé ultra direct
+Tu ajoutes :
+FakeClickHouseCatalog.java en test
+spark-sql_2.12:3.3.3 en scope test
+JUnit 5
+le test utilise :
+Java
+.config("spark.sql.catalog.clickhouse", "com.acme.test.FakeClickHouseCatalog")
+et ensuite :
+Java
+spark.sql("SELECT * FROM clickhouse.mydb.users")
+5. Point important
+Cette solution marche pour tester ton SQL Spark, pas pour reproduire le vrai comportement ClickHouse V2 complet.
+C’est un bouchon de catalog, pas un vrai backend ClickHouse.
+Envoie ton pom.xml actuel et je te dis exactement où insérer chaque bloc, sans toucher le reste.
