@@ -1,0 +1,21 @@
+@Override
+public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+    return new DataWriterFactory() {
+
+        @Override
+        public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+
+            return new DataWriter<>() {
+
+                @Override
+                public void write(InternalRow record) {
+                    storage.add(record);
+                }
+
+                @Override public WriterCommitMessage commit() { return null; }
+                @Override public void abort() {}
+                @Override public void close() {}
+            };
+        }
+    };
+}
