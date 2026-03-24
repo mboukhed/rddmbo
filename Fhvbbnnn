@@ -1,0 +1,12 @@
+@Override
+public Table createTable(Identifier ident, StructType schema, Transform[] partitions, Map<String, String> props) {
+
+    String k = key(ident);
+
+    SCHEMAS.put(k, schema);
+
+    // ⚠️ NE PAS recréer si existe déjà
+    DATA.computeIfAbsent(k, x -> new ArrayList<>());
+
+    return new FakeTable(ident, schema, DATA.get(k));
+}
