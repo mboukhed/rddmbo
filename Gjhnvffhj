@@ -1,0 +1,141 @@
+Voici les correctifs.
+1) createTable
+Java
+@Override
+public Table createTable(
+        Identifier ident,
+        StructType schema,
+        Transform[] partitions,
+        Map<String, String> props) {
+
+    String k = key(ident);
+
+    SCHEMAS.put(k, schema);
+
+    List<InternalRow> data = DATA.computeIfAbsent(k, x -> new ArrayList<>());
+
+    return new FakeTable(ident, schema, data);
+}
+2) loadTable
+Java
+import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+
+@Override
+public Table loadTable(Identifier ident) throws NoSuchTableException {
+    String k = key(ident);
+
+    if (!SCHEMAS.containsKey(k)) {
+        throw new NoSuchTableException(ident);
+    }
+
+    return new FakeTable(ident, SCHEMAS.get(k), DATA.get(k));
+}
+3) alterTable
+Java
+@Override
+public Table alterTable(Identifier ident, TableChange... changes) throws NoSuchTableException {
+    return loadTable(ident);
+}
+4) renameTable
+Java
+@Override
+public void renameTable(Identifier oldIdent, Identifier newIdent) throws NoSuchTableException {
+    String oldKey = key(oldIdent);
+    String newKey = key(newIdent);
+
+    if (!SCHEMAS.containsKey(oldKey)) {
+        throw new NoSuchTableException(oldIdent);
+    }
+
+    SCHEMAS.put(newKey, SCHEMAS.remove(oldKey));
+    DATA.put(newKey, DATA.remove(oldKey));
+}
+5) FakeTable.capabilities
+Java
+@Override
+public Set<TableCapability> capabilities() {
+    return Set.of(
+            TableCapability.BATCH_READ,
+            TableCapability.BATCH_WRITE
+    );
+}
+6) newWriteBuilder
+Java
+@Override
+public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
+    return new WriteBuilder() {
+        @Override
+        public BatchWrite buildForBatch() {
+            return new FakeBatchWrite(rows);
+        }
+    };
+}
+7) createBatchWriterFactory
+Java
+@Override
+public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+    return new DataWriterFactory() {
+        @Override
+        public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+            return new DataWriter<>() {
+                @Override
+                public void write(InternalRow record) {
+                    storage.add(record.copy());
+                }
+
+                @Override
+                public WriterCommitMessage commit() {
+                    return null;
+                }
+
+                @Override
+                public void abort() {
+                }
+
+                @Override
+                public void close() {
+                }
+            };
+        }
+    };
+}
+8) Test
+Java
+Dataset<Row> dfParquet = spark.createDataFrame(rows, schema);
+
+CreateTableWriter<Row> writer = dfParquet.coalesce(2)
+        .writeTo("clickhouse.mydb.user");
+
+writer.create();
+
+Dataset<Row> df = spark.sql("SELECT * FROM clickhouse.mydb.user");
+Assertions.assertEquals(3, df.count());
+9) Imports utiles
+Java
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
+import org.apache.spark.sql.connector.catalog.SupportsRead;
+import org.apache.spark.sql.connector.catalog.SupportsWrite;
+import org.apache.spark.sql.connector.catalog.Table;
+import org.apache.spark.sql.connector.catalog.TableCapability;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.connector.read.Batch;
+import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.connector.read.PartitionReaderFactory;
+import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.read.ScanBuilder;
+import org.apache.spark.sql.connector.write.BatchWrite;
+import org.apache.spark.sql.connector.write.DataWriter;
+import org.apache.spark.sql.connector.write.DataWriterFactory;
+import org.apache.spark.sql.connector.write.LogicalWriteInfo;
+import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
+import org.apache.spark.sql.connector.write.WriteBuilder;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+Si ça renvoie encore 0, le prochain truc à afficher c’est ta classe complète FakeBatchWrite.
