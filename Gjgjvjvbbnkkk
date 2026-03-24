@@ -1,0 +1,36 @@
+Java
+@Override
+public Table createTable(Identifier ident, StructType schema, Transform[] partitions, Map<String, String> props) {
+
+    String k = key(ident);
+
+    // ⚠️ important
+    SCHEMAS.put(k, schema);
+    DATA.put(k, new ArrayList<>());
+
+    return new FakeTable(ident, schema, DATA.get(k));
+}
+🔥 Et surtout ajoute ça dans WRITE
+Dans FakeBatchWrite :
+Java
+@Override
+public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+    return new DataWriterFactory() {
+
+        @Override
+        public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+
+            return new DataWriter<>() {
+
+                @Override
+                public void write(InternalRow record) {
+                    storage.add(record); // ⚠️ ici ça remplit
+                }
+
+                @Override public WriterCommitMessage commit() { return null; }
+                @Override public void abort() {}
+                @Override public void close() {}
+            };
+        }
+    };
+}
