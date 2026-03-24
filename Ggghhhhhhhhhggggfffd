@@ -1,0 +1,80 @@
+Voilà le vrai bug :
+❌ Problème
+Ton write() est bien appelé, mais il écrit dans une copie sérialisée de storage côté task.
+Donc :
+write() affiche 3 lignes ✅
+mais DATA côté driver reste vide ❌
+✅ Fix propre
+Il faut retourner les lignes dans commit() du DataWriter, puis les fusionner dans BatchWrite.commit(...).
+Correctif
+1. FakeBatchWrite
+Java
+static class FakeBatchWrite implements BatchWrite, Serializable {
+
+    private final List<InternalRow> storage;
+
+    FakeBatchWrite(List<InternalRow> storage) {
+        this.storage = storage;
+    }
+
+    @Override
+    public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+        return new DataWriterFactory() {
+            @Override
+            public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+                return new DataWriter<>() {
+
+                    private final List<InternalRow> buffer = new ArrayList<>();
+
+                    @Override
+                    public void write(InternalRow record) {
+                        buffer.add(record.copy());
+                    }
+
+                    @Override
+                    public WriterCommitMessage commit() {
+                        return new FakeWriterCommitMessage(buffer);
+                    }
+
+                    @Override
+                    public void abort() {
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                };
+            }
+        };
+    }
+
+    @Override
+    public void commit(WriterCommitMessage[] messages) {
+        for (WriterCommitMessage message : messages) {
+            FakeWriterCommitMessage m = (FakeWriterCommitMessage) message;
+            storage.addAll(m.rows);
+        }
+    }
+
+    @Override
+    public void abort(WriterCommitMessage[] messages) {
+    }
+}
+2. FakeWriterCommitMessage
+Java
+static class FakeWriterCommitMessage implements WriterCommitMessage, Serializable {
+    final List<InternalRow> rows;
+
+    FakeWriterCommitMessage(List<InternalRow> rows) {
+        this.rows = rows;
+    }
+}
+✅ Résultat
+Après ça :
+Java
+writer.create();
+Dataset<Row> df = spark.sql("SELECT * FROM clickhouse.mydb.user");
+Assertions.assertEquals(3, df.count());
+va marcher.
+Le bug n’était pas create() ici.
+Le bug, c’était écriture côté executor sans remontée au driver.
