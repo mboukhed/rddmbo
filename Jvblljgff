@@ -1,0 +1,81 @@
+Oui, normal : ça bloque sur ton DELETE.
+Sur ta capture on voit :
+Java
+@Override
+public void deleteWhere(Filter[] filters) {
+}
+👉 méthode vide
+Donc Spark arrive sur :
+SQL
+DELETE FROM clickhouse.mydb.user WHERE (id = '3')
+et ton fake catalog annonce qu’il supporte le delete, mais ne fait rien.
+Correctif direct
+1. canDeleteWhere : ne retourne true que si tu sais gérer
+Java
+@Override
+public boolean canDeleteWhere(Filter[] filters) {
+    return filters != null && filters.length == 1 && filters[0] instanceof org.apache.spark.sql.sources.EqualTo;
+}
+2. Implémente vraiment deleteWhere
+Exemple simple :
+Java
+@Override
+public void deleteWhere(Filter[] filters) {
+    if (filters == null || filters.length != 1) {
+        throw new UnsupportedOperationException("Only single EqualTo filter is supported");
+    }
+
+    Filter filter = filters[0];
+    if (!(filter instanceof org.apache.spark.sql.sources.EqualTo)) {
+        throw new UnsupportedOperationException("Only EqualTo filter is supported");
+    }
+
+    org.apache.spark.sql.sources.EqualTo eq = (org.apache.spark.sql.sources.EqualTo) filter;
+
+    String column = eq.attribute();
+    Object value = eq.value();
+
+    List<InternalRow> rows = DATA.get(tableKey);
+    StructType schema = SCHEMAS.get(tableKey);
+
+    int fieldIndex = schema.fieldIndex(column);
+
+    List<InternalRow> filtered = new ArrayList<>();
+    for (InternalRow row : rows) {
+        Object currentValue = row.get(fieldIndex, schema.fields()[fieldIndex].dataType());
+        if (!Objects.equals(currentValue, value)) {
+            filtered.add(row);
+        }
+    }
+
+    DATA.put(tableKey, filtered);
+}
+3. Très important : copie la liste avant modif
+Si tu modifies la même liste pendant lecture, tu peux avoir un comportement pourri.
+Donc dans ton scan / write / delete :
+lis une copie
+remplace ensuite la Map
+Exemple :
+Java
+List<InternalRow> rows = new ArrayList<>(DATA.getOrDefault(tableKey, Collections.emptyList()));
+4. Le vrai souci mental
+Ton fake catalog doit faire une vraie mutation de DATA.
+Là actuellement :
+DELETE SQL est bien parsé
+Spark appelle ton provider
+mais deleteWhere() est vide
+donc ça reste incohérent / peut sembler bloqué
+5. Si tu veux juste débloquer maintenant
+Mets au minimum :
+Java
+@Override
+public boolean canDeleteWhere(Filter[] filters) {
+    return false;
+}
+👉 comme ça Spark arrête de croire que le delete est supporté.
+Le plus probable ici
+Le blocage vient de deleteWhere() vide.
+En pratique :
+soit tu implémentes vraiment le delete
+soit tu désactives le support delete
+Envoie-moi juste la classe FakeTable complète et je te la corrige proprement, sans blabla.
