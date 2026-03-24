@@ -1,0 +1,49 @@
+@Override
+public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
+
+    return new WriteBuilder() {
+
+        private boolean overwrite = false;
+
+        @Override
+        public WriteBuilder truncate() {
+            overwrite = true;
+            return this;
+        }
+
+        @Override
+        public WriteBuilder overwrite(Filter[] filters) {
+            overwrite = true;
+            return this;
+        }
+
+        @Override
+        public BatchWrite buildForBatch() {
+
+            return new BatchWrite() {
+
+                @Override
+                public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+                    throw new UnsupportedOperationException("Not used");
+                }
+
+                @Override
+                public void commit(WriterCommitMessage[] messages) {
+
+                    Dataset<Row> df = spark.createDataFrame(
+                            java.util.Collections.emptyList(),
+                            info.schema()
+                    );
+
+                    df.write()
+                      .mode(overwrite ? SaveMode.Overwrite : SaveMode.Append)
+                      .parquet(path);
+                }
+
+                @Override
+                public void abort(WriterCommitMessage[] messages) {
+                }
+            };
+        }
+    };
+}
