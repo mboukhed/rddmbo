@@ -1,0 +1,10 @@
+@Override
+public Table loadTable(Identifier ident) throws NoSuchTableException {
+    String k = key(ident);
+
+    if (!SCHEMAS.containsKey(k)) {
+        throw new NoSuchTableException(ident);
+    }
+
+    return new FakeTable(ident, SCHEMAS.get(k), DATA.getOrDefault(k, new ArrayList<>()));
+}
