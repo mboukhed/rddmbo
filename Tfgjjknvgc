@@ -1,0 +1,33 @@
+Modifie FakeTable
+Java
+@Override
+public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
+
+    return new WriteBuilder() {
+
+        @Override
+        public BatchWrite buildForBatch() {
+            return new FakeBatchWrite(rows);
+        }
+    };
+}
+🔥 ET surtout dans createTable
+👉 CRUCIAL :
+Java
+@Override
+public Table createTable(
+        Identifier ident,
+        StructType schema,
+        Transform[] partitions,
+        Map<String, String> props) {
+
+    String k = key(ident);
+
+    SCHEMAS.put(k, schema);
+
+    // ⚠️ NE JAMAIS recréer après
+    List<InternalRow> data = new ArrayList<>();
+    DATA.put(k, data);
+
+    return new FakeTable(ident, schema, data);
+}
