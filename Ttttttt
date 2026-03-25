@@ -1,0 +1,48 @@
+Voici la méthode createTable finale avec création auto du namespace :
+Java
+@Override
+public Table createTable(
+        Identifier ident,
+        StructType schema,
+        Transform[] partitions,
+        Map<String, String> properties) {
+
+    // création auto du namespace
+    createNamespace(ident.namespace(), new HashMap<String, String>());
+
+    String path = tablePath(ident);
+
+    if (exists(path)) {
+        throw new RuntimeException("Table already exists: " + ident);
+    }
+
+    ensureParent(path);
+
+    spark().createDataFrame(Collections.<Row>emptyList(), schema)
+            .write()
+            .mode(SaveMode.Overwrite)
+            .parquet(path);
+
+    return new ParquetBackedTable(path, schema);
+}
+Et garde bien aussi ces 2 méthodes :
+Java
+@Override
+public boolean namespaceExists(String[] namespace) {
+    String ns = namespaceOf(namespace);
+    Path p = Paths.get(basePath, ns);
+    return Files.exists(p);
+}
+
+@Override
+public void createNamespace(String[] namespace, Map<String, String> metadata) {
+    String ns = namespaceOf(namespace);
+    try {
+        Files.createDirectories(Paths.get(basePath, ns));
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    }
+}
+Après ça, tu peux supprimer du test :
+Java
+spark.sql("CREATE NAMESPACE IF NOT EXISTS clickhouse.mydb");
