@@ -1,0 +1,45 @@
+@Override
+public void deleteWhere(Filter[] filters) {
+
+    Dataset<Row> df = spark().read().parquet(path);
+
+    String tmpView = "tmp_" + UUID.randomUUID().toString().replace("-", "");
+    String tmpOut = path + "_tmp_" + UUID.randomUUID().toString().replace("-", "");
+
+    df.createOrReplaceTempView(tmpView);
+
+    // ton WHERE ici
+    spark().sql("SELECT * FROM " + tmpView + " WHERE NOT (...)")
+            .write()
+            .mode(SaveMode.Overwrite)
+            .parquet(tmpOut);
+
+    // 👉 CORRECTIF ICI
+    Path target = Paths.get(path);
+    Path tmp = Paths.get(tmpOut);
+
+    spark().catalog().clearCache();
+    deleteRecursively(target);
+    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+
+    spark().catalog().dropTempView(tmpView);
+}
+
+private static void deleteRecursively(Path root) {
+    if (!Files.exists(root)) {
+        return;
+    }
+    try {
+        Files.walk(root)
+                .sorted(Comparator.reverseOrder())
+                .forEach(p -> {
+                    try {
+                        Files.deleteIfExists(p);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    }
+}
