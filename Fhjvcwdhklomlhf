@@ -1,0 +1,25 @@
+@Override
+public Table loadTable(Identifier ident) throws NoSuchTableException {
+
+    String path = tablePath(ident);
+
+    if (!exists(path)) {
+        throw new NoSuchTableException(ident);
+    }
+
+    SparkSession spark = spark();
+
+    // 🔥 CRITIQUE : éviter bug cache
+    spark.catalog().clearCache();
+
+    StructType schema;
+
+    try {
+        schema = spark.read().parquet(path).schema();
+    } catch (Exception e) {
+        // 👉 fallback si dossier vide
+        schema = new StructType(); // schema vide
+    }
+
+    return new ParquetBackedTable(path, schema);
+}
