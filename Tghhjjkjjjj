@@ -1,0 +1,905 @@
+Voici la classe complète finale avec :
+SupportsRead
+SupportsWrite
+SupportsDelete
+lecture sans collect()
+reader parquet par fichier via AvroParquetReader
+support :
+types plats
+struct
+array
+map
+decimal
+date
+timestamp
+⚠️ prévue pour test / embedded, pas pour gros volume prod.
+Java
+package it.steps;
+
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.util.Utf8;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.hadoop.ParquetReader;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
+import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.NamespaceChange;
+import org.apache.spark.sql.connector.catalog.SupportsDelete;
+import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
+import org.apache.spark.sql.connector.catalog.SupportsRead;
+import org.apache.spark.sql.connector.catalog.SupportsWrite;
+import org.apache.spark.sql.connector.catalog.Table;
+import org.apache.spark.sql.connector.catalog.TableCapability;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.connector.read.Batch;
+import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.connector.read.PartitionReaderFactory;
+import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.read.ScanBuilder;
+import org.apache.spark.sql.connector.write.BatchWrite;
+import org.apache.spark.sql.connector.write.DataWriter;
+import org.apache.spark.sql.connector.write.DataWriterFactory;
+import org.apache.spark.sql.connector.write.LogicalWriteInfo;
+import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
+import org.apache.spark.sql.connector.write.SupportsOverwrite;
+import org.apache.spark.sql.connector.write.SupportsTruncate;
+import org.apache.spark.sql.connector.write.WriteBuilder;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
+import org.apache.spark.sql.sources.And;
+import org.apache.spark.sql.sources.EqualTo;
+import org.apache.spark.sql.sources.Filter;
+import org.apache.spark.sql.sources.GreaterThan;
+import org.apache.spark.sql.sources.GreaterThanOrEqual;
+import org.apache.spark.sql.sources.In;
+import org.apache.spark.sql.sources.IsNotNull;
+import org.apache.spark.sql.sources.IsNull;
+import org.apache.spark.sql.sources.LessThan;
+import org.apache.spark.sql.sources.LessThanOrEqual;
+import org.apache.spark.sql.sources.Not;
+import org.apache.spark.sql.sources.Or;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.DecimalType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.unsafe.types.UTF8String;
+import scala.collection.JavaConverters;
+import scala.collection.Seq;
+
+import java.io.IOException;
+import java.io.Serializable;
+import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.PathMatcher;
+import java.nio.file.StandardCopyOption;
+import java.sql.Date;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+public class EmbeddedClickHouseCatalog implements TableCatalog, SupportsNamespaces, Serializable {
+
+    private String catalogName;
+    private String basePath;
+
+    @Override
+    public void initialize(String name, CaseInsensitiveStringMap options) {
+        this.catalogName = name;
+        this.basePath = options.getOrDefault("path", "src/test/resources/data/clickhouse");
+    }
+
+    @Override
+    public String name() {
+        return catalogName;
+    }
+
+    @Override
+    public String[] defaultNamespace() {
+        return new String[]{"default"};
+    }
+
+    private static SparkSession spark() {
+        return SparkSession.active();
+    }
+
+    private String namespaceOf(String[] namespace) {
+        return (namespace == null || namespace.length == 0) ? null : String.join(".", namespace);
+    }
+
+    private String tablePath(Identifier ident) {
+        if (ident.namespace() == null || ident.namespace().length == 0) {
+            return basePath + "/" + ident.name();
+        }
+        return basePath + "/" + String.join(".", ident.namespace()) + "." + ident.name();
+    }
+
+    private static boolean exists(String path) {
+        return Files.exists(Paths.get(path));
+    }
+
+    private static void ensureParent(String path) {
+        try {
+            java.nio.file.Path parent = Paths.get(path).getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static void deleteRecursively(java.nio.file.Path root) {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try {
+            Files.walk(root)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public Identifier[] listTables(String[] namespace) {
+        return new Identifier[0];
+    }
+
+    @Override
+    public Table loadTable(Identifier ident) {
+        String path = tablePath(ident);
+
+        if (!exists(path)) {
+            throw new RuntimeException("Table not found: " + ident);
+        }
+
+        spark().catalog().clearCache();
+        StructType schema = spark().read().parquet(path).schema();
+        return new ParquetBackedTable(path, schema);
+    }
+
+    @Override
+    public Table loadTable(Identifier ident, String version) {
+        return loadTable(ident);
+    }
+
+    @Override
+    public Table loadTable(Identifier ident, long timestamp) {
+        return loadTable(ident);
+    }
+
+    @Override
+    public void invalidateTable(Identifier ident) {
+        // no-op
+    }
+
+    @Override
+    public boolean tableExists(Identifier ident) {
+        return exists(tablePath(ident));
+    }
+
+    @Override
+    public Table createTable(
+            Identifier ident,
+            StructType schema,
+            Transform[] partitions,
+            Map<String, String> properties) {
+
+        createNamespace(ident.namespace(), new HashMap<String, String>());
+
+        String path = tablePath(ident);
+
+        if (exists(path)) {
+            throw new RuntimeException("Table already exists: " + ident);
+        }
+
+        ensureParent(path);
+
+        spark().createDataFrame(Collections.<Row>emptyList(), schema)
+                .write()
+                .mode(SaveMode.Overwrite)
+                .parquet(path);
+
+        return new ParquetBackedTable(path, schema);
+    }
+
+    @Override
+    public Table alterTable(Identifier ident, TableChange... changes) {
+        return loadTable(ident);
+    }
+
+    @Override
+    public boolean dropTable(Identifier ident) {
+        java.nio.file.Path p = Paths.get(tablePath(ident));
+        if (!Files.exists(p)) {
+            return false;
+        }
+        deleteRecursively(p);
+        return true;
+    }
+
+    @Override
+    public boolean purgeTable(Identifier ident) {
+        return dropTable(ident);
+    }
+
+    @Override
+    public void renameTable(Identifier oldIdent, Identifier newIdent) {
+        java.nio.file.Path oldPath = Paths.get(tablePath(oldIdent));
+        java.nio.file.Path newPath = Paths.get(tablePath(newIdent));
+        try {
+            Files.createDirectories(newPath.getParent());
+            Files.move(oldPath, newPath, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public String[][] listNamespaces() {
+        return new String[][]{{"default"}};
+    }
+
+    @Override
+    public String[][] listNamespaces(String[] namespace) {
+        return new String[0][];
+    }
+
+    @Override
+    public boolean namespaceExists(String[] namespace) {
+        if (namespace == null || namespace.length == 0) {
+            return true;
+        }
+        String ns = String.join(".", namespace);
+        return Files.exists(Paths.get(basePath, ns));
+    }
+
+    @Override
+    public void createNamespace(String[] namespace, Map<String, String> metadata) {
+        String ns = (namespace == null || namespace.length == 0) ? null : String.join(".", namespace);
+        if (ns == null) {
+            return;
+        }
+        try {
+            Files.createDirectories(Paths.get(basePath, ns));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void alterNamespace(String[] namespace, NamespaceChange... changes) {
+        // no-op
+    }
+
+    @Override
+    public boolean dropNamespace(String[] namespace) {
+        return dropNamespace(namespace, true);
+    }
+
+    @Override
+    public boolean dropNamespace(String[] namespace, boolean cascade) {
+        String ns = namespaceOf(namespace);
+        if (ns == null) {
+            return false;
+        }
+
+        java.nio.file.Path p = Paths.get(basePath, ns);
+        if (!Files.exists(p)) {
+            return false;
+        }
+
+        if (!cascade) {
+            try {
+                if (Files.list(p).findAny().isPresent()) {
+                    throw new RuntimeException("Namespace not empty: " + ns);
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        deleteRecursively(p);
+        return true;
+    }
+
+    @Override
+    public Map<String, String> loadNamespaceMetadata(String[] namespace) {
+        return new HashMap<String, String>();
+    }
+
+    static final class ParquetBackedTable implements Table, SupportsRead, SupportsWrite, SupportsDelete, Serializable {
+
+        private final String path;
+        private final StructType schema;
+
+        ParquetBackedTable(String path, StructType schema) {
+            this.path = path;
+            this.schema = schema;
+        }
+
+        @Override
+        public String name() {
+            return path;
+        }
+
+        @Override
+        public StructType schema() {
+            return schema;
+        }
+
+        @Override
+        public Transform[] partitioning() {
+            return new Transform[0];
+        }
+
+        @Override
+        public Map<String, String> properties() {
+            Map<String, String> props = new HashMap<String, String>();
+            props.put("path", path);
+            return props;
+        }
+
+        @Override
+        public Set<TableCapability> capabilities() {
+            Set<TableCapability> caps = new HashSet<TableCapability>();
+            caps.add(TableCapability.BATCH_READ);
+            caps.add(TableCapability.BATCH_WRITE);
+            caps.add(TableCapability.TRUNCATE);
+            caps.add(TableCapability.OVERWRITE_BY_FILTER);
+            return caps;
+        }
+
+        @Override
+        public ScanBuilder newScanBuilder(CaseInsensitiveStringMap options) {
+            return new FakeScanBuilder(path, schema);
+        }
+
+        @Override
+        public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
+            return new FakeWriteBuilder(path, info.schema());
+        }
+
+        @Override
+        public boolean canDeleteWhere(Filter[] filters) {
+            return filters == null || Arrays.stream(filters).allMatch(ParquetBackedTable::isSupportedFilter);
+        }
+
+        @Override
+        public void deleteWhere(Filter[] filters) {
+            Dataset<Row> df = spark().read().parquet(path);
+
+            if (filters == null || filters.length == 0) {
+                deleteRecursively(Paths.get(path));
+                spark().createDataFrame(Collections.<Row>emptyList(), schema())
+                        .write()
+                        .mode(SaveMode.Overwrite)
+                        .parquet(path);
+                return;
+            }
+
+            String where = Arrays.stream(filters)
+                    .map(ParquetBackedTable::toSqlCondition)
+                    .filter(s -> s != null && !s.trim().isEmpty())
+                    .collect(Collectors.joining(" AND "));
+
+            if (where.trim().isEmpty()) {
+                throw new IllegalArgumentException("Unsupported filters for deleteWhere");
+            }
+
+            String tmpView = "tmp_" + UUID.randomUUID().toString().replace("-", "");
+            String tmpOut = path + "_tmp_" + UUID.randomUUID().toString().replace("-", "");
+
+            try {
+                df.createOrReplaceTempView(tmpView);
+
+                spark().sql("SELECT * FROM " + tmpView + " WHERE NOT (" + where + ")")
+                        .write()
+                        .mode(SaveMode.Overwrite)
+                        .parquet(tmpOut);
+
+                java.nio.file.Path target = Paths.get(path);
+                java.nio.file.Path tmp = Paths.get(tmpOut);
+
+                spark().catalog().clearCache();
+                deleteRecursively(target);
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            } finally {
+                try {
+                    spark().catalog().dropTempView(tmpView);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        private static boolean isSupportedFilter(Filter f) {
+            if (f instanceof EqualTo
+                    || f instanceof GreaterThan
+                    || f instanceof GreaterThanOrEqual
+                    || f instanceof LessThan
+                    || f instanceof LessThanOrEqual
+                    || f instanceof In
+                    || f instanceof IsNull
+                    || f instanceof IsNotNull) {
+                return true;
+            }
+            if (f instanceof And) {
+                And and = (And) f;
+                return isSupportedFilter(and.left()) && isSupportedFilter(and.right());
+            }
+            if (f instanceof Or) {
+                Or or = (Or) f;
+                return isSupportedFilter(or.left()) && isSupportedFilter(or.right());
+            }
+            if (f instanceof Not) {
+                Not not = (Not) f;
+                return isSupportedFilter(not.child());
+            }
+            return false;
+        }
+
+        private static String toSqlCondition(Filter f) {
+            if (f instanceof EqualTo) {
+                EqualTo eq = (EqualTo) f;
+                return eq.attribute() + " = " + sqlValue(eq.value());
+            }
+            if (f instanceof GreaterThan) {
+                GreaterThan gt = (GreaterThan) f;
+                return gt.attribute() + " > " + sqlValue(gt.value());
+            }
+            if (f instanceof GreaterThanOrEqual) {
+                GreaterThanOrEqual ge = (GreaterThanOrEqual) f;
+                return ge.attribute() + " >= " + sqlValue(ge.value());
+            }
+            if (f instanceof LessThan) {
+                LessThan lt = (LessThan) f;
+                return lt.attribute() + " < " + sqlValue(lt.value());
+            }
+            if (f instanceof LessThanOrEqual) {
+                LessThanOrEqual le = (LessThanOrEqual) f;
+                return le.attribute() + " <= " + sqlValue(le.value());
+            }
+            if (f instanceof In) {
+                In in = (In) f;
+                return in.attribute() + " IN (" +
+                        Arrays.stream(in.values())
+                                .map(ParquetBackedTable::sqlValue)
+                                .collect(Collectors.joining(", ")) +
+                        ")";
+            }
+            if (f instanceof IsNull) {
+                IsNull isNull = (IsNull) f;
+                return isNull.attribute() + " IS NULL";
+            }
+            if (f instanceof IsNotNull) {
+                IsNotNull isNotNull = (IsNotNull) f;
+                return isNotNull.attribute() + " IS NOT NULL";
+            }
+            if (f instanceof And) {
+                And and = (And) f;
+                return "(" + toSqlCondition(and.left()) + " AND " + toSqlCondition(and.right()) + ")";
+            }
+            if (f instanceof Or) {
+                Or or = (Or) f;
+                return "(" + toSqlCondition(or.left()) + " OR " + toSqlCondition(or.right()) + ")";
+            }
+            if (f instanceof Not) {
+                Not not = (Not) f;
+                return "(NOT " + toSqlCondition(not.child()) + ")";
+            }
+            return null;
+        }
+
+        private static String sqlValue(Object v) {
+            if (v == null) {
+                return "NULL";
+            }
+            if (v instanceof String) {
+                return "'" + ((String) v).replace("'", "''") + "'";
+            }
+            if (v instanceof Date || v instanceof Timestamp) {
+                return "'" + v.toString() + "'";
+            }
+            if (v instanceof Boolean) {
+                return ((Boolean) v).booleanValue() ? "true" : "false";
+            }
+            return String.valueOf(v);
+        }
+    }
+
+    static final class FakeScanBuilder implements ScanBuilder, Scan, Batch, Serializable {
+
+        private final String path;
+        private final StructType schema;
+
+        FakeScanBuilder(String path, StructType schema) {
+            this.path = path;
+            this.schema = schema;
+        }
+
+        @Override
+        public Scan build() {
+            return this;
+        }
+
+        @Override
+        public StructType readSchema() {
+            return schema;
+        }
+
+        @Override
+        public Batch toBatch() {
+            return this;
+        }
+
+        @Override
+        public InputPartition[] planInputPartitions() {
+            try {
+                List<InputPartition> partitions = Files.walk(Paths.get(path))
+                        .filter(Files::isRegularFile)
+                        .filter(p -> p.toString().endsWith(".parquet"))
+                        .map(p -> (InputPartition) new FakeInputPartition(p.toString(), schema))
+                        .collect(Collectors.toList());
+
+                return partitions.toArray(new InputPartition[0]);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public PartitionReaderFactory createReaderFactory() {
+            return new FakePartitionReaderFactory();
+        }
+    }
+
+    static final class FakeInputPartition implements InputPartition, Serializable {
+        final String filePath;
+        final StructType schema;
+
+        FakeInputPartition(String filePath, StructType schema) {
+            this.filePath = filePath;
+            this.schema = schema;
+        }
+    }
+
+    static final class FakePartitionReaderFactory implements PartitionReaderFactory, Serializable {
+        @Override
+        public PartitionReader<InternalRow> createReader(InputPartition partition) {
+            FakeInputPartition p = (FakeInputPartition) partition;
+            return new FakePartitionReader(p.filePath, p.schema);
+        }
+    }
+
+    static final class FakePartitionReader implements PartitionReader<InternalRow> {
+
+        private final StructType schema;
+        private final ParquetReader<GenericRecord> reader;
+        private InternalRow current;
+
+        FakePartitionReader(String filePath, StructType schema) {
+            this.schema = schema;
+            try {
+                Configuration conf = new Configuration();
+                Path path = new Path("file:///" + filePath.replace("\\", "/"));
+
+                this.reader = AvroParquetReader
+                        .<GenericRecord>builder(path)
+                        .withConf(conf)
+                        .build();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public boolean next() {
+            try {
+                GenericRecord record = reader.read();
+                if (record == null) {
+                    return false;
+                }
+
+                StructField[] fields = schema.fields();
+                Object[] values = new Object[fields.length];
+
+                for (int i = 0; i < fields.length; i++) {
+                    StructField field = fields[i];
+                    Object raw = record.get(field.name());
+                    values[i] = toCatalyst(raw, field.dataType());
+                }
+
+                current = new GenericInternalRow(values);
+                return true;
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public InternalRow get() {
+            return current;
+        }
+
+        @Override
+        public void close() {
+            try {
+                reader.close();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        private static Object toCatalyst(Object v, DataType dataType) {
+            if (v == null) {
+                return null;
+            }
+
+            if (v instanceof Utf8) {
+                v = v.toString();
+            }
+
+            if (dataType instanceof StructType) {
+                StructType st = (StructType) dataType;
+                GenericRecord record = (GenericRecord) v;
+
+                Object[] values = new Object[st.fields().length];
+                StructField[] fields = st.fields();
+
+                for (int i = 0; i < fields.length; i++) {
+                    Object child = record.get(fields[i].name());
+                    values[i] = toCatalyst(child, fields[i].dataType());
+                }
+
+                return new GenericInternalRow(values);
+            }
+
+            if (dataType instanceof ArrayType) {
+                ArrayType at = (ArrayType) dataType;
+                List<?> input;
+
+                if (v instanceof GenericData.Array) {
+                    input = (List<?>) v;
+                } else if (v instanceof List) {
+                    input = (List<?>) v;
+                } else {
+                    throw new IllegalArgumentException("Unsupported array value: " + v.getClass());
+                }
+
+                Object[] values = new Object[input.size()];
+                for (int i = 0; i < input.size(); i++) {
+                    values[i] = toCatalyst(input.get(i), at.elementType());
+                }
+
+                return new GenericArrayData(values);
+            }
+
+            if (dataType instanceof MapType) {
+                MapType mt = (MapType) dataType;
+                Map<?, ?> input = (Map<?, ?>) v;
+
+                List<Object> keys = new ArrayList<Object>();
+                List<Object> values = new ArrayList<Object>();
+
+                for (Map.Entry<?, ?> e : input.entrySet()) {
+                    keys.add(toCatalyst(e.getKey(), mt.keyType()));
+                    values.add(toCatalyst(e.getValue(), mt.valueType()));
+                }
+
+                return new ArrayBasedMapData(
+                        new GenericArrayData(keys.toArray()),
+                        new GenericArrayData(values.toArray())
+                );
+            }
+
+            if (v instanceof CharSequence) {
+                return UTF8String.fromString(v.toString());
+            }
+
+            if (v instanceof Integer || v instanceof Long || v instanceof Double
+                    || v instanceof Float || v instanceof Boolean || v instanceof Short
+                    || v instanceof Byte) {
+                return v;
+            }
+
+            if (dataType instanceof DecimalType) {
+                DecimalType dt = (DecimalType) dataType;
+
+                if (v instanceof BigDecimal) {
+                    return Decimal.apply((BigDecimal) v, dt.precision(), dt.scale());
+                }
+
+                if (v instanceof java.math.BigInteger) {
+                    return Decimal.apply(new BigDecimal((java.math.BigInteger) v), dt.precision(), dt.scale());
+                }
+
+                if (v instanceof Number) {
+                    return Decimal.apply(BigDecimal.valueOf(((Number) v).doubleValue()), dt.precision(), dt.scale());
+                }
+            }
+
+            if (v instanceof java.sql.Date) {
+                return (int) ((java.sql.Date) v).toLocalDate().toEpochDay();
+            }
+
+            if (v instanceof LocalDate) {
+                return (int) ((LocalDate) v).toEpochDay();
+            }
+
+            if (v instanceof java.sql.Timestamp) {
+                Instant instant = ((java.sql.Timestamp) v).toInstant();
+                return instant.getEpochSecond() * 1000000L + instant.getNano() / 1000L;
+            }
+
+            if (v instanceof Instant) {
+                Instant instant = (Instant) v;
+                return instant.getEpochSecond() * 1000000L + instant.getNano() / 1000L;
+            }
+
+            if (v instanceof java.util.Date) {
+                Instant instant = ((java.util.Date) v).toInstant();
+                return instant.getEpochSecond() * 1000000L + instant.getNano() / 1000L;
+            }
+
+            return v;
+        }
+    }
+
+    static final class FakeWriteBuilder implements WriteBuilder, SupportsOverwrite, SupportsTruncate, Serializable {
+
+        private final String path;
+        private final StructType schema;
+        private boolean overwrite;
+
+        FakeWriteBuilder(String path, StructType schema) {
+            this.path = path;
+            this.schema = schema;
+        }
+
+        @Override
+        public WriteBuilder overwrite(Filter[] filters) {
+            this.overwrite = true;
+            return this;
+        }
+
+        @Override
+        public WriteBuilder truncate() {
+            this.overwrite = true;
+            return this;
+        }
+
+        @Override
+        public BatchWrite buildForBatch() {
+            return new FakeBatchWrite(path, schema, overwrite);
+        }
+    }
+
+    static final class FakeBatchWrite implements BatchWrite, Serializable {
+
+        private final String path;
+        private final StructType schema;
+        private final boolean overwrite;
+
+        FakeBatchWrite(String path, StructType schema, boolean overwrite) {
+            this.path = path;
+            this.schema = schema;
+            this.overwrite = overwrite;
+        }
+
+        @Override
+        public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+            return new FakeDataWriterFactory();
+        }
+
+        @Override
+        public void commit(WriterCommitMessage[] messages) {
+            List<Row> rows = new ArrayList<Row>();
+
+            for (WriterCommitMessage msg : messages) {
+                FakeWriterCommitMessage m = (FakeWriterCommitMessage) msg;
+                for (InternalRow r : m.rows) {
+                    Seq<Object> seq = r.toSeq(schema);
+                    List<Object> values = JavaConverters.seqAsJavaList(seq);
+                    rows.add(RowFactory.create(values.toArray()));
+                }
+            }
+
+            spark().createDataFrame(rows, schema)
+                    .write()
+                    .mode(overwrite ? SaveMode.Overwrite : SaveMode.Append)
+                    .parquet(path);
+        }
+
+        @Override
+        public void abort(WriterCommitMessage[] messages) {
+        }
+    }
+
+    static final class FakeDataWriterFactory implements DataWriterFactory, Serializable {
+        @Override
+        public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+            return new FakeDataWriter();
+        }
+    }
+
+    static final class FakeDataWriter implements DataWriter<InternalRow>, Serializable {
+
+        private final List<InternalRow> buffer = new ArrayList<InternalRow>();
+
+        @Override
+        public void write(InternalRow record) {
+            buffer.add(record.copy());
+        }
+
+        @Override
+        public WriterCommitMessage commit() {
+            return new FakeWriterCommitMessage(buffer);
+        }
+
+        @Override
+        public void abort() {
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    static final class FakeWriterCommitMessage implements WriterCommitMessage, Serializable {
+        final List<InternalRow> rows;
+
+        FakeWriterCommitMessage(List<InternalRow> rows) {
+            this.rows = rows;
+        }
+    }
+}
+Dépendance utile
+Si tu ne l’as pas :
+XML
+<dependency>
+    <groupId>org.apache.parquet</groupId>
+    <artifactId>parquet-avro</artifactId>
+    <version>1.12.3</version>
+    <scope>test</scope>
+</dependency>
+Honnêtement
+Le point encore fragile ici, c’est l’écriture : elle garde les InternalRow en mémoire dans FakeWriterCommitMessage.
+Pour de gros volumes, ça replantera. Pour test intégré, ça passe.
+Si tu veux, la prochaine étape utile est de te corriger uniquement la partie write pour qu’elle n’empile plus les lignes en mémoire.
