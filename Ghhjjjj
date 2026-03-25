@@ -1,0 +1,5 @@
+private static SparkSession spark() {
+    return SparkSession.getActiveSession().isDefined()
+            ? SparkSession.getActiveSession().get()
+            : SparkSession.getDefaultSession().get();
+}
