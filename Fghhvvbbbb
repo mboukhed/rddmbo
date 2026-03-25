@@ -1,0 +1,40 @@
+@Override
+public void commit(WriterCommitMessage[] messages) {
+    List<String> chunkPaths = new ArrayList<>();
+    for (WriterCommitMessage msg : messages) {
+        if (msg == null) continue;
+        FakeWriterCommitMessage m = (FakeWriterCommitMessage) msg;
+        if (m.tempPaths != null) chunkPaths.addAll(m.tempPaths);
+    }
+
+    if (chunkPaths.isEmpty()) return;
+
+    Path target = Paths.get(path);
+
+    try {
+        if (overwrite || !Files.exists(target)) {
+            deleteRecursively(target);
+        }
+        Files.createDirectories(target);
+
+        // ✅ Copie directe des fichiers Avro/Parquet — pas de merge Spark
+        for (String chunkPath : chunkPaths) {
+            java.io.File chunkFile = new java.io.File(chunkPath);
+            java.io.File[] parts = chunkFile.isDirectory()
+                ? chunkFile.listFiles(f -> f.getName().endsWith(".parquet"))
+                : new java.io.File[]{chunkFile};
+
+            if (parts != null) {
+                for (java.io.File part : parts) {
+                    Path dest = target.resolve(part.getName());
+                    Files.copy(part.toPath(), dest,
+                        StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+            deleteRecursively(Paths.get(chunkPath));
+        }
+
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    }
+}
