@@ -1,0 +1,80 @@
+Parfait — les fichiers sont bien là dans l'arborescence :
+data.clickhouse.mydb.user/
+  _SUCCESS
+  part-00000-17f55280...snappy.parquet
+  part-00000-95619385...snappy.parquet
+Donc l'écriture fonctionne. Le problème est dans FakePartitionReader — il utilise encore spark() qui plante silencieusement, ou lit le mauvais chemin.
+Regardons FakePartitionReader
+FakePartitionReader(String path, StructType schema) {
+    this.schema = schema;
+    Dataset<Row> df = spark()  // ← même problème qu'avant !
+            .read()
+            .schema(schema)
+            .parquet(path);
+    this.it = df.toLocalIterator();
+}
+Le reader aussi s'exécute dans un thread DSv2 — spark() retourne null ou lève une exception catchée silencieusement, et it reste vide.
+Fix : même approche Avro natif pour la lecture
+static final class FakePartitionReader implements PartitionReader<InternalRow> {
+
+    private final Iterator<GenericRecord> avroIt;
+    private final StructType schema;
+    private final Schema avroSchema;
+    private InternalRow current;
+
+    FakePartitionReader(String path, StructType schema) {
+        this.schema = schema;
+        this.avroSchema = SchemaConverters.toAvroType(
+                schema, false, "record", "it.steps");
+
+        try {
+            // Lire tous les fichiers .parquet du dossier
+            List<GenericRecord> records = new ArrayList<>();
+            java.io.File dir = new java.io.File(path);
+            java.io.File[] files = dir.listFiles(
+                f -> f.getName().endsWith(".parquet"));
+
+            if (files != null) {
+                for (java.io.File f : files) {
+                    org.apache.hadoop.fs.Path p =
+                        new org.apache.hadoop.fs.Path(f.getAbsolutePath());
+                    try (org.apache.parquet.hadoop.ParquetReader<GenericRecord> reader =
+                            org.apache.parquet.avro.AvroParquetReader
+                                .<GenericRecord>builder(p)
+                                .withConf(new org.apache.hadoop.conf.Configuration())
+                                .build()) {
+                        GenericRecord rec;
+                        while ((rec = reader.read()) != null) {
+                            records.add(rec);
+                        }
+                    }
+                }
+            }
+            this.avroIt = records.iterator();
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public boolean next() {
+        if (!avroIt.hasNext()) return false;
+        GenericRecord rec = avroIt.next();
+        Object[] values = new Object[schema.fields().length];
+        for (int i = 0; i < schema.fields().length; i++) {
+            values[i] = toCatalyst(
+                rec.get(schema.fields()[i].name()),
+                schema.fields()[i].dataType());
+        }
+        current = new GenericInternalRow(values);
+        return true;
+    }
+
+    @Override
+    public InternalRow get() { return current; }
+
+    @Override
+    public void close() {}
+}
+Plus aucun appel spark() — lecture 100% native Parquet/Avro. Essayez !
