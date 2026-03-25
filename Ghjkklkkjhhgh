@@ -1,0 +1,92 @@
+Deux erreurs de compilation visibles :
+Cannot resolve symbol 'SchemaConverters' — la classe vient de spark-avro qui est un module séparé, pas dans spark-core
+Cannot resolve method 'rowToAvro' — la méthode n'existe pas encore, c'est à nous de l'écrire
+Fix 1 : import correct pour SchemaConverters
+SchemaConverters est dans spark-avro. Vérifiez d'abord que vous avez la dépendance dans votre pom.xml :
+<dependency>
+    <groupId>org.apache.spark</groupId>
+    <artifactId>spark-avro_2.12</artifactId>
+    <version>${spark.version}</version>
+    <scope>test</scope>
+</dependency>
+Puis l'import :
+import org.apache.spark.sql.avro.SchemaConverters;
+Fix 2 : implémenter rowToAvro
+private static GenericRecord rowToAvro(Row row, StructType schema, Schema avroSchema) {
+    GenericRecord record = new GenericData.Record(avroSchema);
+    StructField[] fields = schema.fields();
+
+    for (int i = 0; i < fields.length; i++) {
+        String fieldName = fields[i].name();
+        Object value = row.get(i);
+        record.put(fieldName, convertToAvro(value, fields[i].dataType(),
+                avroSchema.getField(fieldName).schema()));
+    }
+    return record;
+}
+
+private static Object convertToAvro(Object value, DataType sparkType, Schema avroSchema) {
+    if (value == null) return null;
+
+    // Unwrap UNION null (Avro nullable = ["null", "type"])
+    Schema actual = avroSchema;
+    if (avroSchema.getType() == Schema.Type.UNION) {
+        actual = avroSchema.getTypes().stream()
+                .filter(s -> s.getType() != Schema.Type.NULL)
+                .findFirst().orElse(avroSchema);
+    }
+
+    if (value instanceof String) return value; // Avro String = Java String
+    if (value instanceof byte[]) return java.nio.ByteBuffer.wrap((byte[]) value);
+    if (value instanceof Date) return (int) ((Date) value).toLocalDate().toEpochDay();
+    if (value instanceof Timestamp) {
+        Instant i = ((Timestamp) value).toInstant();
+        return i.getEpochSecond() * 1_000_000L + i.getNano() / 1000L;
+    }
+
+    if (sparkType instanceof StructType && value instanceof Row) {
+        GenericRecord nested = new GenericData.Record(actual);
+        Row nestedRow = (Row) value;
+        StructField[] nestedFields = ((StructType) sparkType).fields();
+        for (int i = 0; i < nestedFields.length; i++) {
+            nested.put(nestedFields[i].name(),
+                    convertToAvro(nestedRow.get(i), nestedFields[i].dataType(),
+                            actual.getField(nestedFields[i].name()).schema()));
+        }
+        return nested;
+    }
+
+    if (sparkType instanceof ArrayType && value instanceof List) {
+        List<?> list = (List<?>) value;
+        List<Object> result = new ArrayList<>();
+        DataType elemType = ((ArrayType) sparkType).elementType();
+        Schema elemSchema = actual.getElementType();
+        for (Object item : list) {
+            result.add(convertToAvro(item, elemType, elemSchema));
+        }
+        return result;
+    }
+
+    if (sparkType instanceof MapType && value instanceof Map) {
+        Map<?, ?> map = (Map<?, ?>) value;
+        Map<String, Object> result = new HashMap<>();
+        DataType valType = ((MapType) sparkType).valueType();
+        Schema valSchema = actual.getValueType();
+        for (Map.Entry<?, ?> e : map.entrySet()) {
+            result.put(e.getKey().toString(),
+                    convertToAvro(e.getValue(), valType, valSchema));
+        }
+        return result;
+    }
+
+    // int, long, float, double, boolean, BigDecimal → passthrough
+    return value;
+}
+Ajoutez les imports manquants en tête de fichier :
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.parquet.avro.AvroParquetWriter;
+import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.spark.sql.avro.SchemaConverters;
+Essayez la compilation et dites-moi si SchemaConverters reste non résolu (ça dépendra de si spark-avro est dans votre classpath de test).
