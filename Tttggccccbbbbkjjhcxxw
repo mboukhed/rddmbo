@@ -1,0 +1,167 @@
+package it.steps;
+
+import org.apache.spark.sql.connector.catalog.DelegatingCatalogExtension;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.NamespaceChange;
+import org.apache.spark.sql.connector.catalog.Table;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
+
+public class FakeClickHouseCatalog extends DelegatingCatalogExtension {
+
+    private String catalogName;
+    private String basePath;
+
+    @Override
+    public void initialize(String name, CaseInsensitiveStringMap options) {
+        super.initialize(name, options);
+        this.catalogName = name;
+        this.basePath = options.getOrDefault("path", "src/test/resources/data/clickhouse");
+    }
+
+    @Override
+    public String name() {
+        return catalogName;
+    }
+
+    private String namespacePath(String[] namespace) {
+        if (namespace == null || namespace.length == 0) {
+            return "default";
+        }
+        return String.join(".", namespace);
+    }
+
+    private String tablePath(Identifier ident) {
+        return basePath + "/" + namespacePath(ident.namespace()) + "." + ident.name();
+    }
+
+    private Map<String, String> enrichAsParquet(Identifier ident, Map<String, String> properties) {
+        Map<String, String> props = new HashMap<String, String>();
+        if (properties != null) {
+            props.putAll(properties);
+        }
+
+        props.put(TableCatalog.PROP_PROVIDER, "parquet");
+        props.put(TableCatalog.PROP_LOCATION, tablePath(ident));
+
+        return props;
+    }
+
+    @Override
+    public Table createTable(
+            Identifier ident,
+            StructType schema,
+            Transform[] partitions,
+            Map<String, String> properties) {
+
+        ensureParent(tablePath(ident));
+        return super.createTable(ident, schema, partitions, enrichAsParquet(ident, properties));
+    }
+
+    @Override
+    public Table loadTable(Identifier ident) {
+        return super.loadTable(ident);
+    }
+
+    @Override
+    public Table loadTable(Identifier ident, String version) {
+        return super.loadTable(ident, version);
+    }
+
+    @Override
+    public Table loadTable(Identifier ident, long timestamp) {
+        return super.loadTable(ident, timestamp);
+    }
+
+    @Override
+    public Table alterTable(Identifier ident, TableChange... changes) {
+        return super.alterTable(ident, changes);
+    }
+
+    @Override
+    public boolean dropTable(Identifier ident) {
+        boolean dropped = super.dropTable(ident);
+
+        Path p = Paths.get(tablePath(ident));
+        if (Files.exists(p)) {
+            deleteRecursively(p);
+        }
+
+        return dropped;
+    }
+
+    @Override
+    public boolean purgeTable(Identifier ident) {
+        return dropTable(ident);
+    }
+
+    @Override
+    public void renameTable(Identifier oldIdent, Identifier newIdent) {
+        super.renameTable(oldIdent, newIdent);
+
+        Path oldPath = Paths.get(tablePath(oldIdent));
+        Path newPath = Paths.get(tablePath(newIdent));
+
+        try {
+            if (Files.exists(oldPath)) {
+                Files.createDirectories(newPath.getParent());
+                Files.move(oldPath, newPath);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public String[] defaultNamespace() {
+        return new String[] { "default" };
+    }
+
+    @Override
+    public void alterNamespace(String[] namespace, NamespaceChange... changes) {
+        super.alterNamespace(namespace, changes);
+    }
+
+    @Override
+    public boolean dropNamespace(String[] namespace, boolean cascade) {
+        return super.dropNamespace(namespace, cascade);
+    }
+
+    private void ensureParent(String path) {
+        try {
+            Path parent = Paths.get(path).getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void deleteRecursively(Path root) {
+        try {
+            Files.walk(root)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
