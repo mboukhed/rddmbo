@@ -1,0 +1,108 @@
+👉 Là ton erreur est claire :
+
+No active or default Spark session found
+at SparkSession.active()
+👉 Donc ton code :
+Java
+private static SparkSession spark() {
+    return SparkSession.active();
+}
+❌ ne marche PAS côté executor
+🔴 Pourquoi
+SparkSession.active() = dispo uniquement côté driver
+Ton FakePartitionReader tourne côté executor
+Donc → crash
+✅ Fix propre (obligatoire)
+👉 Tu ne dois JAMAIS utiliser SparkSession dans :
+PartitionReader
+DataWriter
+code exécuté côté executor
+🔥 Solution simple (rapide)
+❌ Mauvais (actuel)
+Java
+FakePartitionReader(String path, StructType schema) {
+    List<Row> rows = spark().read().schema(schema).parquet(path).collectAsList();
+}
+✅ Correct
+👉 Charge les données côté driver et passe-les
+1. Modifie FakeScan
+Java
+@Override
+public InputPartition[] planInputPartitions() {
+    List<Row> rows = SparkSession.active()
+            .read()
+            .schema(schema)
+            .parquet(path)
+            .collectAsList();
+
+    return new InputPartition[]{
+            new FakeInputPartition(rows, schema)
+    };
+}
+2. Modifie FakeInputPartition
+Java
+static final class FakeInputPartition implements InputPartition, Serializable {
+    final List<Row> rows;
+    final StructType schema;
+
+    FakeInputPartition(List<Row> rows, StructType schema) {
+        this.rows = rows;
+        this.schema = schema;
+    }
+}
+3. Modifie FakePartitionReader
+Java
+static final class FakePartitionReader implements PartitionReader<InternalRow> {
+
+    private final Iterator<Row> it;
+    private Row current;
+    private final StructType schema;
+
+    FakePartitionReader(List<Row> rows, StructType schema) {
+        this.it = rows.iterator();
+        this.schema = schema;
+    }
+
+    @Override
+    public boolean next() {
+        if (it.hasNext()) {
+            current = it.next();
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public InternalRow get() {
+        StructField[] fields = schema.fields();
+        Object[] values = new Object[fields.length];
+
+        for (int i = 0; i < fields.length; i++) {
+            values[i] = current.get(i);
+        }
+
+        return new GenericInternalRow(values);
+    }
+
+    @Override
+    public void close() {}
+}
+4. Modifie Factory
+Java
+static final class FakePartitionReaderFactory implements PartitionReaderFactory, Serializable {
+    @Override
+    public PartitionReader<InternalRow> createReader(InputPartition partition) {
+        FakeInputPartition p = (FakeInputPartition) partition;
+        return new FakePartitionReader(p.rows, p.schema);
+    }
+}
+🧠 TLDR
+👉 Ton bug = usage de SparkSession côté executor
+👉 Fix = charger les données côté driver
+👉 Et les passer via InputPartition
+⚠️ Important
+Cette solution :
+✔ parfaite pour test / fake catalog
+❌ pas scalable (collect)
+Si tu veux, je peux te faire une version : 👉 100% propre style Spark (sans collect, distribué)
+👉 mais un peu plus complexe.
