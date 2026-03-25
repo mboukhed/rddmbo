@@ -1,0 +1,27 @@
+@Override
+public boolean dropNamespace(String[] namespace, boolean cascade) {
+    String ns = (namespace == null || namespace.length == 0)
+            ? "default"
+            : String.join("_", namespace);
+
+    Path p = Paths.get(basePath, ns);
+
+    if (!Files.exists(p)) {
+        return false;
+    }
+
+    // si pas cascade → refuser si non vide
+    if (!cascade) {
+        try {
+            boolean notEmpty = Files.list(p).findAny().isPresent();
+            if (notEmpty) {
+                throw new RuntimeException("Namespace not empty: " + ns);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    deleteRecursively(p);
+    return true;
+}
