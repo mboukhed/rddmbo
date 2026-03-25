@@ -1,0 +1,34 @@
+@Override
+public InternalRow get() {
+    StructField[] fields = schema.fields();
+    Object[] values = new Object[fields.length];
+
+    for (int i = 0; i < fields.length; i++) {
+        Object v = current.get(i);
+
+        if (v == null) {
+            values[i] = null;
+            continue;
+        }
+
+        // 🔥 FIX CRITIQUE
+        if (v instanceof String) {
+            values[i] = UTF8String.fromString((String) v);
+        } else if (v instanceof Integer
+                || v instanceof Long
+                || v instanceof Double
+                || v instanceof Float
+                || v instanceof Boolean) {
+            values[i] = v;
+        } else if (v instanceof java.sql.Date) {
+            values[i] = (int) ((java.sql.Date) v).toLocalDate().toEpochDay();
+        } else if (v instanceof java.sql.Timestamp) {
+            java.sql.Timestamp ts = (java.sql.Timestamp) v;
+            values[i] = ts.getTime() * 1000L;
+        } else {
+            values[i] = v;
+        }
+    }
+
+    return new GenericInternalRow(values);
+}
