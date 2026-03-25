@@ -1,0 +1,47 @@
+👍 OK c’est presque bon.
+👉 Il te manque juste un point critique : gérer le namespace "default" correctement.
+🔥 Correctif bref
+1. Ne crée PAS de dossier "default"
+Remplace createNamespace par :
+Java
+@Override
+public void createNamespace(String[] namespace, Map<String, String> metadata) {
+    String ns = (namespace == null || namespace.length == 0)
+            ? null
+            : String.join(".", namespace);
+
+    if (ns == null) {
+        return; // default → rien à créer
+    }
+
+    try {
+        Files.createDirectories(Paths.get(basePath, ns));
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    }
+}
+2. Corrige namespaceExists
+Java
+@Override
+public boolean namespaceExists(String[] namespace) {
+    if (namespace == null || namespace.length == 0) {
+        return true; // default existe toujours
+    }
+    String ns = String.join(".", namespace);
+    return Files.exists(Paths.get(basePath, ns));
+}
+3. (Important) tablePath
+Assure-toi que tu n’as PAS "default" dans le path :
+Java
+private String tablePath(Identifier ident) {
+    if (ident.namespace() == null || ident.namespace().length == 0) {
+        return basePath + "/" + ident.name();
+    }
+    return basePath + "/" + String.join(".", ident.namespace()) + "." + ident.name();
+}
+🎯 Résultat
+❌ plus de dossier default
+✅ namespace auto créé
+✅ compatible avec ton SQL existant
+✅ plus de bugs chelous Spark
+Si tu veux je peux te donner la classe complète clean finale (sans erreurs Spark V2) en une fois.
