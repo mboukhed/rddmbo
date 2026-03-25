@@ -1,0 +1,227 @@
+package it.steps;
+
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.catalog.*;
+import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.connector.read.ScanBuilder;
+import org.apache.spark.sql.connector.write.*;
+import org.apache.spark.sql.types.StructType;
+
+import java.io.Serializable;
+import java.util.*;
+
+import scala.collection.JavaConverters;
+import scala.collection.Seq;
+
+public class FakeClickHouseCatalog implements TableCatalog, SupportsNamespaces {
+
+    private String basePath;
+    private SparkSession spark;
+
+    @Override
+    public void initialize(String name, CaseInsensitiveStringMap options) {
+        this.basePath = options.get("path"); // ex: test/resources/data/clickhouse
+        this.spark = SparkSession.active();
+    }
+
+    private String path(Identifier ident) {
+        return basePath + "/" + String.join("_", ident.namespace()) + "_" + ident.name();
+    }
+
+    // ================= TABLE =================
+
+    @Override
+    public Table loadTable(Identifier ident) {
+        return new ParquetBackedTable(path(ident));
+    }
+
+    // ================= TABLE IMPL =================
+
+    class ParquetBackedTable implements Table, SupportsWrite, SupportsDelete {
+
+        private final String path;
+
+        ParquetBackedTable(String path) {
+            this.path = path;
+        }
+
+        @Override
+        public String name() {
+            return path;
+        }
+
+        @Override
+        public StructType schema() {
+            return spark.read().parquet(path).schema();
+        }
+
+        @Override
+        public Set<TableCapability> capabilities() {
+            return new HashSet<>(Arrays.asList(
+                    TableCapability.BATCH_READ,
+                    TableCapability.BATCH_WRITE,
+                    TableCapability.OVERWRITE_BY_FILTER,
+                    TableCapability.TRUNCATE
+            ));
+        }
+
+        // ================= WRITE =================
+
+        @Override
+        public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
+            return new WriteBuilder() {
+
+                @Override
+                public BatchWrite buildForBatch() {
+                    return new FakeBatchWrite(path, info.schema());
+                }
+            };
+        }
+
+        // ================= DELETE =================
+
+        @Override
+        public boolean canDeleteWhere(org.apache.spark.sql.connector.expressions.filter.Predicate[] filters) {
+            return true;
+        }
+
+        @Override
+        public void deleteWhere(org.apache.spark.sql.connector.expressions.filter.Predicate[] filters) {
+
+            String tmpView = "tmp_" + UUID.randomUUID().toString().replace("-", "");
+
+            Dataset<Row> df = spark.read().parquet(path);
+            df.createOrReplaceTempView(tmpView);
+
+            // ⚠️ simplifié: delete tout
+            spark.sql("DROP VIEW IF EXISTS " + tmpView);
+
+            // overwrite vide
+            spark.createDataFrame(new ArrayList<Row>(), df.schema())
+                    .write()
+                    .mode(SaveMode.Overwrite)
+                    .parquet(path);
+        }
+    }
+
+    // ================= WRITE IMPL =================
+
+    static class FakeBatchWrite implements BatchWrite {
+
+        private final String path;
+        private final StructType schema;
+
+        FakeBatchWrite(String path, StructType schema) {
+            this.path = path;
+            this.schema = schema;
+        }
+
+        @Override
+        public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+            return new FakeDataWriterFactory();
+        }
+
+        @Override
+        public void commit(WriterCommitMessage[] messages) {
+
+            SparkSession spark = SparkSession.active();
+
+            List<Row> rows = new ArrayList<>();
+
+            for (WriterCommitMessage msg : messages) {
+                FakeWriterCommitMessage m = (FakeWriterCommitMessage) msg;
+
+                for (InternalRow r : m.rows) {
+                    Seq<Object> seq = r.toSeq(schema);
+                    List<Object> values = JavaConverters.seqAsJavaList(seq);
+                    rows.add(RowFactory.create(values.toArray()));
+                }
+            }
+
+            Dataset<Row> df = spark.createDataFrame(rows, schema);
+
+            df.write()
+              .mode(SaveMode.Append)
+              .parquet(path);
+        }
+
+        @Override
+        public void abort(WriterCommitMessage[] messages) {
+        }
+    }
+
+    // ================= FACTORY =================
+
+    static class FakeDataWriterFactory implements DataWriterFactory, Serializable {
+        @Override
+        public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+            return new FakeDataWriter();
+        }
+    }
+
+    // ================= WRITER =================
+
+    static class FakeDataWriter implements DataWriter<InternalRow> {
+
+        private final List<InternalRow> buffer = new ArrayList<>();
+
+        @Override
+        public void write(InternalRow record) {
+            buffer.add(record.copy());
+        }
+
+        @Override
+        public WriterCommitMessage commit() {
+            return new FakeWriterCommitMessage(buffer);
+        }
+
+        @Override
+        public void abort() {
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    // ================= MESSAGE =================
+
+    static class FakeWriterCommitMessage implements WriterCommitMessage, Serializable {
+        final List<InternalRow> rows;
+
+        FakeWriterCommitMessage(List<InternalRow> rows) {
+            this.rows = rows;
+        }
+    }
+
+    // ================= NAMESPACE =================
+
+    @Override
+    public String[][] listNamespaces() {
+        return new String[0][];
+    }
+
+    @Override
+    public String[][] listNamespaces(String[] namespace) {
+        return new String[0][];
+    }
+
+    @Override
+    public boolean namespaceExists(String[] namespace) {
+        return true;
+    }
+
+    @Override
+    public void createNamespace(String[] namespace, Map<String, String> metadata) {
+    }
+
+    @Override
+    public void dropNamespace(String[] namespace) {
+    }
+
+    @Override
+    public Map<String, String> loadNamespaceMetadata(String[] namespace) {
+        return new HashMap<>();
+    }
+}
