@@ -1,0 +1,133 @@
+Oui. Normal.
+👉 Tant que tu fais spark() dans FakePartitionReader ou FakeDataWriter, tu resteras bloqué.
+Passer SparkSession dans InputPartition ne règle pas ça.
+Verdict
+Le vrai correctif = zéro SparkSession dans le read custom.
+Fais ça
+1. planInputPartitions()
+Crée une partition par fichier part-*.parquet :
+Java
+@Override
+public InputPartition[] planInputPartitions() {
+    try {
+        List<InputPartition> parts = Files.walk(Paths.get(path))
+                .filter(Files::isRegularFile)
+                .filter(p -> p.getFileName().toString().startsWith("part-"))
+                .filter(p -> p.getFileName().toString().endsWith(".parquet"))
+                .map(p -> (InputPartition) new FakeInputPartition(p.toString(), schema))
+                .collect(Collectors.toList());
+
+        return parts.toArray(new InputPartition[0]);
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    }
+}
+2. FakeInputPartition
+Java
+static final class FakeInputPartition implements InputPartition, Serializable {
+    final String filePath;
+    final StructType schema;
+
+    FakeInputPartition(String filePath, StructType schema) {
+        this.filePath = filePath;
+        this.schema = schema;
+    }
+}
+3. FakePartitionReaderFactory
+Java
+static final class FakePartitionReaderFactory implements PartitionReaderFactory, Serializable {
+    @Override
+    public PartitionReader<InternalRow> createReader(InputPartition partition) {
+        FakeInputPartition p = (FakeInputPartition) partition;
+        return new FakePartitionReader(p.filePath, p.schema);
+    }
+}
+4. FakePartitionReader
+Java
+static final class FakePartitionReader implements PartitionReader<InternalRow> {
+
+    private final StructType schema;
+    private final org.apache.parquet.hadoop.ParquetReader<org.apache.avro.generic.GenericRecord> reader;
+    private InternalRow current;
+
+    FakePartitionReader(String filePath, StructType schema) {
+        this.schema = schema;
+        try {
+            org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+            org.apache.hadoop.fs.Path p = new org.apache.hadoop.fs.Path("file:///" + filePath.replace("\\", "/"));
+
+            this.reader = org.apache.parquet.avro.AvroParquetReader
+                    .<org.apache.avro.generic.GenericRecord>builder(p)
+                    .withConf(conf)
+                    .build();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public boolean next() {
+        try {
+            org.apache.avro.generic.GenericRecord record = reader.read();
+            if (record == null) {
+                return false;
+            }
+
+            StructField[] fields = schema.fields();
+            Object[] values = new Object[fields.length];
+
+            for (int i = 0; i < fields.length; i++) {
+                values[i] = toCatalyst(record.get(fields[i].name()), fields[i].dataType());
+            }
+
+            current = new GenericInternalRow(values);
+            return true;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public InternalRow get() {
+        return current;
+    }
+
+    @Override
+    public void close() {
+        try {
+            reader.close();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+5. toCatalyst(...)
+Garde au minimum ça :
+Java
+private static Object toCatalyst(Object v, DataType dataType) {
+    if (v == null) return null;
+
+    if (v instanceof org.apache.avro.util.Utf8) {
+        return UTF8String.fromString(v.toString());
+    }
+
+    if (v instanceof String) {
+        return UTF8String.fromString((String) v);
+    }
+
+    if (v instanceof Integer || v instanceof Long || v instanceof Double
+            || v instanceof Float || v instanceof Boolean || v instanceof Short
+            || v instanceof Byte) {
+        return v;
+    }
+
+    return v;
+}
+Important
+Ne lis plus le dossier table dans le reader
+lis chaque fichier part-*.parquet
+aucun spark() dans le reader
+Et si tu as encore un NPE
+Alors il ne viendra plus du read.
+Il viendra du write. Dans ce cas, le plus propre est d’abandonner le write DSv2 fake.
+Envoie juste la prochaine stacktrace.
