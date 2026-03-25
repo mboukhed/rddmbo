@@ -1,0 +1,69 @@
+La stacktrace confirme que ni getActiveSession() ni getDefaultSession() ne retournent quoi que ce soit dans le thread executor DSv2. Les deux sont None.
+Le vrai problème
+Spark DSv2 exécute les writers dans des threads séparés via son propre executor (Executor.scala:548, TaskRunner). Dans ces threads, Spark ne propage pas la SparkSession — ni active, ni default. C'est un comportement connu et documenté de DSv2.
+La solution : passer le SparkContext explicitement à la construction
+SparkContext lui est un singleton statique accessible via SparkContext.getOrCreate() ou SparkContext$.MODULE$. On peut reconstruire une session depuis lui :
+static final class FakeDataWriterFactory implements DataWriterFactory, Serializable {
+    private final String basePath;
+    private final StructType schema;
+    // ✅ On capture l'URL maître côté driver
+    private final String sparkMaster;
+    private final String sparkAppName;
+
+    FakeDataWriterFactory(String basePath, StructType schema) {
+        this.basePath = basePath;
+        this.schema = schema;
+        SparkSession s = spark(); // safe ici, on est côté driver
+        this.sparkMaster = s.sparkContext().master();
+        this.sparkAppName = s.sparkContext().appName();
+    }
+
+    @Override
+    public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+        return new FakeDataWriter(basePath, schema, partitionId, taskId, sparkMaster, sparkAppName);
+    }
+}
+static final class FakeDataWriter implements DataWriter<InternalRow>, Serializable {
+
+    private final String tempBasePath;
+    private final StructType schema;
+    private final String sparkMaster;
+    private final String sparkAppName;
+    private final List<Row> buffer = new ArrayList<>();
+    private final List<String> chunkPaths = new ArrayList<>();
+    private int chunkIndex = 0;
+
+    FakeDataWriter(String basePath, StructType schema,
+                   int partitionId, long taskId,
+                   String sparkMaster, String sparkAppName) {
+        this.schema = schema;
+        this.sparkMaster = sparkMaster;
+        this.sparkAppName = sparkAppName;
+        this.tempBasePath = basePath + ".__writer_tmp__" + partitionId + "_" + taskId + "_" +
+                UUID.randomUUID().toString().replace("-", "");
+    }
+
+    // ✅ Reconstruit ou récupère la session depuis le SparkContext singleton
+    private SparkSession resolveSession() {
+        return SparkSession.builder()
+                .master(sparkMaster)
+                .appName(sparkAppName)
+                .getOrCreate(); // retourne l'existante si déjà créée dans ce JVM
+    }
+
+    private void flushBuffer() {
+        if (buffer.isEmpty()) return;
+        String chunkPath = tempBasePath + "_chunk_" + (chunkIndex++);
+        resolveSession()
+            .createDataFrame(buffer, schema)
+            .write()
+            .mode(SaveMode.Overwrite)
+            .parquet(chunkPath);
+        chunkPaths.add(chunkPath);
+        buffer.clear();
+    }
+    // ... reste inchangé
+}
+Pourquoi ça marche
+SparkSession.builder().getOrCreate() cherche d'abord dans le registre statique interne de Spark (SessionState), indépendamment du thread courant. En local mode, la session de test y est toujours enregistrée — donc il la retrouve sans en créer une nouvelle.
+Essayez ça et dites-moi ce que ça donne !
