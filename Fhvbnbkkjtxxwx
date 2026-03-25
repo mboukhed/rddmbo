@@ -1,0 +1,71 @@
+Ok je vois direct ton problème 👇
+👉 Dans ton code :
+Java
+@Override
+public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+    throw new UnsupportedOperationException("Not used");
+}
+👉 Et dans les logs en bas :
+
+UnsupportedOperationException: Not used
+🔴 Problème réel
+👉 Spark APPELLE quand même createBatchWriterFactory(), même si toi tu penses ne pas l’utiliser.
+➡️ Donc ton throw fait planter tout le write.
+⚠️ Règle Spark (important)
+Même si tu veux faire un fake / parquet backend :
+👉 Tu DOIS fournir :
+DataWriterFactory
+DataWriter
+commit
+Sinon Spark ne peut pas écrire.
+✅ Solution simple (propre)
+👉 Remplace ton throw par un vrai writer minimal :
+Java
+@Override
+public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+    return new DataWriterFactory() {
+        @Override
+        public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+            return new DataWriter<InternalRow>() {
+
+                private final List<InternalRow> buffer = new ArrayList<>();
+
+                @Override
+                public void write(InternalRow record) {
+                    buffer.add(record);
+                }
+
+                @Override
+                public WriterCommitMessage commit() {
+                    return () -> buffer;
+                }
+
+                @Override
+                public void abort() {}
+            };
+        }
+    };
+}
+⚙️ Et dans ton commit(...)
+👉 Tu récupères les données :
+Java
+@Override
+public void commit(WriterCommitMessage[] messages) {
+    List<InternalRow> all = new ArrayList<>();
+
+    for (WriterCommitMessage msg : messages) {
+        all.addAll((List<InternalRow>) msg);
+    }
+
+    Dataset<Row> df = spark.createDataFrame(all, schema);
+
+    df.write()
+      .mode("append")
+      .parquet(path);
+}
+🔥 Résultat
+👉 Tu gardes ton FakeClickHouseCatalog 👉 MAIS stockage réel en Parquet disque 👉 Et Spark ne plante plus
+🧠 TLDR
+👉 Ton erreur = tu bloques un call obligatoire Spark
+👉 Fix = implémenter un writer minimal (même simple)
+Si tu veux, je te fais la classe complète propre FakeClickHouseCatalog parquet + delete SQL + read en une fois (clean, sans bidouillage).
