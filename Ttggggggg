@@ -1,0 +1,40 @@
+static final class FakeDataWriter implements DataWriter<InternalRow>, Serializable {
+
+    private final String tempBasePath;
+    private final StructType schema;
+    private final List<Row> buffer = new ArrayList<>();
+    private final List<String> chunkPaths = new ArrayList<>();
+    private int chunkIndex = 0;
+
+    FakeDataWriter(String basePath, StructType schema, int partitionId, long taskId) {
+        this.schema = schema;
+        this.tempBasePath = basePath + ".__writer_tmp__" + partitionId + "_" + taskId + "_" +
+                UUID.randomUUID().toString().replace("-", "");
+    }
+
+    // ✅ Résolution dynamique — pas de stockage, pas de transient
+    private static SparkSession resolveSession() {
+        // 1. Essai : session active du thread courant
+        Option<SparkSession> active = SparkSession.getActiveSession();
+        if (active.isDefined()) return active.get();
+
+        // 2. Fallback : session par défaut (toujours accessible en local mode)
+        Option<SparkSession> def = SparkSession.getDefaultSession();
+        if (def.isDefined()) return def.get();
+
+        throw new RuntimeException("FakeDataWriter: aucune SparkSession disponible");
+    }
+
+    private void flushBuffer() {
+        if (buffer.isEmpty()) return;
+
+        String chunkPath = tempBasePath + "_chunk_" + (chunkIndex++);
+        resolveSession()
+            .createDataFrame(buffer, schema)
+            .write()
+            .mode(SaveMode.Overwrite)
+            .parquet(chunkPath);
+
+        chunkPaths.add(chunkPath);
+        buffer.clear();
+    }
