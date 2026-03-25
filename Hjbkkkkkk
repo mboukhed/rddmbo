@@ -1,0 +1,200 @@
+Oui.
+👉 Le mieux pour ton cas = un seul Dataset<Row> global, puis toLocalIterator() une seule fois.
+Pas un reader Spark par fichier.
+Correctif
+1. planInputPartitions()
+Remplace par :
+Java
+@Override
+public InputPartition[] planInputPartitions() {
+    return new InputPartition[]{
+            new FakeInputPartition(path, schema)
+    };
+}
+2. FakeInputPartition
+Remplace par :
+Java
+static final class FakeInputPartition implements InputPartition, Serializable {
+    final String path;
+    final StructType schema;
+
+    FakeInputPartition(String path, StructType schema) {
+        this.path = path;
+        this.schema = schema;
+    }
+}
+3. FakePartitionReaderFactory
+Remplace par :
+Java
+static final class FakePartitionReaderFactory implements PartitionReaderFactory, Serializable {
+    @Override
+    public PartitionReader<InternalRow> createReader(InputPartition partition) {
+        FakeInputPartition p = (FakeInputPartition) partition;
+        return new FakePartitionReader(p.path, p.schema);
+    }
+}
+4. FakePartitionReader
+Remplace toute la classe par :
+Java
+static final class FakePartitionReader implements PartitionReader<InternalRow> {
+
+    private final StructType schema;
+    private final java.util.Iterator<Row> it;
+    private InternalRow current;
+
+    FakePartitionReader(String path, StructType schema) {
+        this.schema = schema;
+
+        Dataset<Row> df = SparkSession.active()
+                .read()
+                .schema(schema)
+                .parquet(path);
+
+        this.it = df.toLocalIterator();
+    }
+
+    @Override
+    public boolean next() {
+        if (!it.hasNext()) {
+            return false;
+        }
+
+        Row r = it.next();
+        StructField[] fields = schema.fields();
+        Object[] values = new Object[fields.length];
+
+        for (int i = 0; i < fields.length; i++) {
+            values[i] = toCatalyst(r.get(i), fields[i].dataType());
+        }
+
+        current = new GenericInternalRow(values);
+        return true;
+    }
+
+    @Override
+    public InternalRow get() {
+        return current;
+    }
+
+    @Override
+    public void close() {
+    }
+
+    private static Object toCatalyst(Object v, DataType dataType) {
+        if (v == null) {
+            return null;
+        }
+
+        if (dataType instanceof StructType) {
+            StructType st = (StructType) dataType;
+            Row row = (Row) v;
+            Object[] values = new Object[st.fields().length];
+
+            for (int i = 0; i < st.fields().length; i++) {
+                values[i] = toCatalyst(row.get(i), st.fields()[i].dataType());
+            }
+
+            return new GenericInternalRow(values);
+        }
+
+        if (dataType instanceof ArrayType) {
+            ArrayType at = (ArrayType) dataType;
+            java.util.List<?> list = (java.util.List<?>) v;
+            Object[] values = new Object[list.size()];
+
+            for (int i = 0; i < list.size(); i++) {
+                values[i] = toCatalyst(list.get(i), at.elementType());
+            }
+
+            return new GenericArrayData(values);
+        }
+
+        if (dataType instanceof MapType) {
+            MapType mt = (MapType) dataType;
+            Map<?, ?> input = (Map<?, ?>) v;
+
+            Object[] keys = new Object[input.size()];
+            Object[] vals = new Object[input.size()];
+
+            int i = 0;
+            for (Map.Entry<?, ?> e : input.entrySet()) {
+                keys[i] = toCatalyst(e.getKey(), mt.keyType());
+                vals[i] = toCatalyst(e.getValue(), mt.valueType());
+                i++;
+            }
+
+            return new ArrayBasedMapData(
+                    new GenericArrayData(keys),
+                    new GenericArrayData(vals)
+            );
+        }
+
+        if (v instanceof String) {
+            return UTF8String.fromString((String) v);
+        }
+
+        if (dataType instanceof DecimalType) {
+            DecimalType dt = (DecimalType) dataType;
+
+            if (v instanceof BigDecimal) {
+                return Decimal.apply((BigDecimal) v, dt.precision(), dt.scale());
+            }
+            if (v instanceof Number) {
+                return Decimal.apply(
+                        BigDecimal.valueOf(((Number) v).doubleValue()),
+                        dt.precision(),
+                        dt.scale()
+                );
+            }
+        }
+
+        if (v instanceof java.sql.Date) {
+            return (int) ((java.sql.Date) v).toLocalDate().toEpochDay();
+        }
+
+        if (v instanceof LocalDate) {
+            return (int) ((LocalDate) v).toEpochDay();
+        }
+
+        if (v instanceof java.sql.Timestamp) {
+            Instant instant = ((java.sql.Timestamp) v).toInstant();
+            return instant.getEpochSecond() * 1000000L + instant.getNano() / 1000L;
+        }
+
+        if (v instanceof Instant) {
+            Instant instant = (Instant) v;
+            return instant.getEpochSecond() * 1000000L + instant.getNano() / 1000L;
+        }
+
+        return v;
+    }
+}
+5. Imports à avoir
+Java
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
+import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.DecimalType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.unsafe.types.UTF8String;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.Map;
+Pourquoi c’est mieux
+plus d’Avro
+plus de collect()
+un seul flux de lecture
+lit le vrai parquet Spark
+garde ton SQL inchangé
+⚠️ Ça reste du test/fake catalog. Ce n’est pas un reader DSv2 parfait pour prod.
