@@ -1,0 +1,115 @@
+Oui. Fais comme ça.
+1. FakeInputPartition
+Remplace par :
+Java
+static final class FakeInputPartition implements InputPartition, Serializable {
+    final String filePath;
+    final StructType schema;
+
+    FakeInputPartition(String filePath, StructType schema) {
+        this.filePath = filePath;
+        this.schema = schema;
+    }
+}
+2. planInputPartitions()
+Remplace par :
+Java
+@Override
+public InputPartition[] planInputPartitions() {
+    try {
+        List<InputPartition> partitions = Files.walk(Paths.get(path))
+                .filter(Files::isRegularFile)
+                .filter(p -> p.toString().endsWith(".parquet"))
+                .map(p -> (InputPartition) new FakeInputPartition(p.toString(), schema))
+                .collect(Collectors.toList());
+
+        return partitions.toArray(new InputPartition[0]);
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    }
+}
+3. FakePartitionReaderFactory
+Remplace par :
+Java
+static final class FakePartitionReaderFactory implements PartitionReaderFactory, Serializable {
+    @Override
+    public PartitionReader<InternalRow> createReader(InputPartition partition) {
+        FakeInputPartition p = (FakeInputPartition) partition;
+        return new FakePartitionReader(p.filePath, p.schema);
+    }
+}
+4. FakePartitionReader
+Mets ce squelette :
+Java
+static final class FakePartitionReader implements PartitionReader<InternalRow> {
+
+    private final String filePath;
+    private final StructType schema;
+    private Iterator<Row> it;
+    private Row current;
+
+    FakePartitionReader(String filePath, StructType schema) {
+        this.filePath = filePath;
+        this.schema = schema;
+
+        // provisoire
+        this.it = Collections.<Row>emptyList().iterator();
+    }
+
+    @Override
+    public boolean next() {
+        if (it.hasNext()) {
+            current = it.next();
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public InternalRow get() {
+        StructField[] fields = schema.fields();
+        Object[] values = new Object[fields.length];
+
+        for (int i = 0; i < fields.length; i++) {
+            Object v = current.get(i);
+            values[i] = toCatalyst(v, fields[i].dataType());
+        }
+
+        return new GenericInternalRow(values);
+    }
+
+    @Override
+    public void close() {
+    }
+
+    private static Object toCatalyst(Object v, DataType dataType) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof String) {
+            return UTF8String.fromString((String) v);
+        }
+        return v;
+    }
+}
+5. Imports à ajouter
+Java
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.stream.Collectors;
+
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.unsafe.types.UTF8String;
+Important
+Là, ça corrige la structure :
+plus de collectAsList()
+plus de Dataset<Row> dans le reader
+plus d’OOM à cause de ça
+Mais it = Collections.emptyList().iterator() est juste un placeholder.
+Il faudra ensuite brancher un vrai lecteur de filePath.
+La prochaine brique, c’est le reader réel du fichier parquet.
