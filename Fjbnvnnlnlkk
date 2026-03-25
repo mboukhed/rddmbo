@@ -1,0 +1,19 @@
+@Override
+public void commit(WriterCommitMessage[] messages) {
+
+    List<Row> rows = new ArrayList<>();
+
+    for (WriterCommitMessage msg : messages) {
+        FakeWriterCommitMessage m = (FakeWriterCommitMessage) msg;
+
+        for (InternalRow r : m.rows) {
+            rows.add(RowFactory.create((Object[]) r.toSeq(info.schema()).toArray()));
+        }
+    }
+
+    Dataset<Row> df = spark.createDataFrame(rows, info.schema());
+
+    df.write()
+      .mode(overwrite ? SaveMode.Overwrite : SaveMode.Append)
+      .parquet(path);
+}
