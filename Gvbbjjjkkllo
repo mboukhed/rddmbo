@@ -1,0 +1,32 @@
+import org.apache.spark.sql.avro.SchemaConverters;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.parquet.avro.AvroParquetWriter;
+
+private void flushBuffer() {
+    if (buffer.isEmpty()) return;
+
+    String chunkPath = tempBasePath + "_chunk_" + (chunkIndex++);
+    ensureParent(chunkPath + "/x");
+
+    Schema avroSchema = SchemaConverters.toAvroType(schema, false, "record", "it.steps");
+    org.apache.hadoop.fs.Path outPath = 
+        new org.apache.hadoop.fs.Path(chunkPath + "/part-0.parquet");
+
+    try (org.apache.parquet.hadoop.ParquetWriter<GenericRecord> writer =
+            AvroParquetWriter.<GenericRecord>builder(outPath)
+                .withSchema(avroSchema)
+                .withConf(new org.apache.hadoop.conf.Configuration())
+                .withCompressionCodec(CompressionCodecName.SNAPPY)
+                .build()) {
+
+        for (Row row : buffer) {
+            writer.write(rowToAvro(row, schema, avroSchema));
+        }
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    } finally {
+        buffer.clear();
+    }
+}
