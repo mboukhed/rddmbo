@@ -1,0 +1,51 @@
+@Override
+public void deleteWhere(Filter[] filters) {
+    Dataset<Row> df = spark().read().parquet(path);
+
+    if (filters == null || filters.length == 0) {
+        deleteRecursively(Paths.get(path));
+        spark().createDataFrame(Collections.<Row>emptyList(), schema())
+                .write()
+                .mode(SaveMode.Overwrite)
+                .parquet(path);
+        return;
+    }
+
+    String where = Arrays.stream(filters)
+            .map(ParquetBackedTable::toSqlCondition)
+            .filter(s -> s != null && !s.trim().isEmpty())
+            .collect(Collectors.joining(" AND "));
+
+    if (where.trim().isEmpty()) {
+        throw new IllegalArgumentException("Unsupported filters for deleteWhere");
+    }
+
+    String tmpView = "tmp_" + UUID.randomUUID().toString().replace("-", "");
+    String tmpOut = path + ".__delete_tmp__" + UUID.randomUUID().toString().replace("-", "");
+
+    try {
+        df.createOrReplaceTempView(tmpView);
+
+        spark().sql("SELECT * FROM " + tmpView + " WHERE NOT (" + where + ")")
+                .write()
+                .mode(SaveMode.Overwrite)
+                .parquet(tmpOut);
+
+        spark().catalog().dropTempView(tmpView);
+        spark().catalog().clearCache();
+
+        Path target = Paths.get(path);
+        Path tmp = Paths.get(tmpOut);
+
+        deleteRecursively(target);
+
+        Files.move(tmp, target);
+    } catch (IOException e) {
+        throw new RuntimeException(e);
+    } finally {
+        try {
+            spark().catalog().dropTempView(tmpView);
+        } catch (Exception ignored) {
+        }
+    }
+}
