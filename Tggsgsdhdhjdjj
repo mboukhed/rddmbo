@@ -1,0 +1,15 @@
+@Override
+public void setDelegateCatalog(CatalogPlugin delegate) {
+    super.setDelegateCatalog(delegate);
+
+    this.catalogName = delegate.name();
+
+    // récupère conf Spark proprement
+    String path = SparkSession.active()
+            .conf()
+            .get("spark.sql.catalog." + catalogName + ".path", null);
+
+    this.basePath = (path != null)
+            ? path
+            : "src/test/resources/data/clickhouse";
+}
