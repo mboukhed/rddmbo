@@ -1,0 +1,59 @@
+Parfait, erreur claire 👇
+
+Invalid view name: clickhouse.mydb.user_tmp_...
+👉 Spark n’accepte PAS les . dans les noms de temp view
+✅ FIX SIMPLE (1 ligne)
+❌ actuel (cassé)
+Java
+df.createOrReplaceTempView(sqlViewName(ident));
+✅ remplace par
+Java
+String view = sqlViewName(ident).replace(".", "_");
+df.createOrReplaceTempView(view);
+🔥 MAIS ATTENTION
+Ton SQL fait :
+SQL
+SELECT * FROM clickhouse.mydb.user
+👉 donc Spark va chercher :
+
+clickhouse.mydb.user
+👉 PAS clickhouse_mydb_user
+✅ SOLUTION CORRECTE (la vraie)
+👉 tu dois créer la vue AVEC SQL (pas DataFrame API)
+🔥 remplace par ça (IMPORTANT)
+Java
+String view = sqlViewName(ident);
+spark().sql(
+    "CREATE OR REPLACE TEMP VIEW `" + view + "` AS SELECT * FROM parquet.`" + path + "`"
+);
+💥 Pourquoi ça marche
+Spark SQL accepte :
+SQL
+`clickhouse.mydb.user`
+mais pas :
+Java
+createOrReplaceTempView("clickhouse.mydb.user")
+✅ Résultat
+✔ ton SQL reste EXACT :
+SQL
+SELECT * FROM clickhouse.mydb.user
+✔ pas de collect
+✔ pas de reader
+✔ stable
+✔ perf OK
+🧠 TLDR
+méthode
+marche
+createOrReplaceTempView("a.b.c")
+❌
+CREATE VIEW a.b.c
+✅
+🚀 PATCH FINAL
+Dans loadTable :
+Java
+String view = sqlViewName(ident);
+
+spark().sql(
+    "CREATE OR REPLACE TEMP VIEW `" + view + "` AS SELECT * FROM parquet.`" + path + "`"
+);
+Si après ça ça plante encore → envoie l’erreur, on finit propre 💪
