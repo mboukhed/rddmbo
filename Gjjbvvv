@@ -1,0 +1,1395 @@
+Oui.
+Voici la classe complète finale avec metadata de partitions intégrée.
+Java
+package it.steps;
+
+import org.apache.spark.sql.DataFrameWriter;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
+import org.apache.spark.sql.catalyst.util.ArrayData;
+import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.catalyst.util.MapData;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.NamespaceChange;
+import org.apache.spark.sql.connector.catalog.SupportsDelete;
+import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
+import org.apache.spark.sql.connector.catalog.SupportsRead;
+import org.apache.spark.sql.connector.catalog.SupportsWrite;
+import org.apache.spark.sql.connector.catalog.Table;
+import org.apache.spark.sql.connector.catalog.TableCapability;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.connector.read.Batch;
+import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.connector.read.PartitionReaderFactory;
+import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.read.ScanBuilder;
+import org.apache.spark.sql.connector.write.BatchWrite;
+import org.apache.spark.sql.connector.write.DataWriter;
+import org.apache.spark.sql.connector.write.DataWriterFactory;
+import org.apache.spark.sql.connector.write.LogicalWriteInfo;
+import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
+import org.apache.spark.sql.connector.write.SupportsOverwrite;
+import org.apache.spark.sql.connector.write.SupportsTruncate;
+import org.apache.spark.sql.connector.write.WriteBuilder;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
+import org.apache.spark.sql.sources.And;
+import org.apache.spark.sql.sources.EqualTo;
+import org.apache.spark.sql.sources.Filter;
+import org.apache.spark.sql.sources.GreaterThan;
+import org.apache.spark.sql.sources.GreaterThanOrEqual;
+import org.apache.spark.sql.sources.In;
+import org.apache.spark.sql.sources.IsNotNull;
+import org.apache.spark.sql.sources.IsNull;
+import org.apache.spark.sql.sources.LessThan;
+import org.apache.spark.sql.sources.LessThanOrEqual;
+import org.apache.spark.sql.sources.Not;
+import org.apache.spark.sql.sources.Or;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.BinaryType;
+import org.apache.spark.sql.types.BooleanType;
+import org.apache.spark.sql.types.ByteType;
+import org.apache.spark.sql.types.CalendarIntervalType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DateType;
+import org.apache.spark.sql.types.DayTimeIntervalType;
+import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.DecimalType;
+import org.apache.spark.sql.types.DoubleType;
+import org.apache.spark.sql.types.FloatType;
+import org.apache.spark.sql.types.IntegerType;
+import org.apache.spark.sql.types.LongType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.NullType;
+import org.apache.spark.sql.types.ShortType;
+import org.apache.spark.sql.types.StringType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.types.TimestampType;
+import org.apache.spark.sql.types.UserDefinedType;
+import org.apache.spark.sql.types.YearMonthIntervalType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.unsafe.types.CalendarInterval;
+import org.apache.spark.unsafe.types.UTF8String;
+import scala.Option;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.Serializable;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.sql.Date;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+public class EmbeddedClickHouseCatalog implements TableCatalog, SupportsNamespaces, Serializable {
+
+    private String catalogName;
+    private String basePath;
+
+    @Override
+    public void initialize(String name, CaseInsensitiveStringMap options) {
+        this.catalogName = name;
+        this.basePath = options.getOrDefault("path", "src/test/resources/data/clickhouse");
+    }
+
+    @Override
+    public String name() {
+        return catalogName;
+    }
+
+    @Override
+    public String[] defaultNamespace() {
+        return new String[]{"default"};
+    }
+
+    private static SparkSession spark() {
+        Option<SparkSession> active = SparkSession.getActiveSession();
+        if (active.isDefined()) {
+            return active.get();
+        }
+
+        Option<SparkSession> def = SparkSession.getDefaultSession();
+        if (def.isDefined()) {
+            return def.get();
+        }
+
+        throw new RuntimeException("No active or default SparkSession found");
+    }
+
+    private String namespaceOf(String[] namespace) {
+        return (namespace == null || namespace.length == 0) ? null : String.join("/", namespace);
+    }
+
+    private String tablePath(Identifier ident) {
+        if (ident.namespace() == null || ident.namespace().length == 0) {
+            return basePath + "/" + ident.name();
+        }
+        return basePath + "/" + String.join("/", ident.namespace()) + "/" + ident.name();
+    }
+
+    private Path partitionMetaPath(String tablePath) {
+        return Paths.get(tablePath + ".__meta_partitions");
+    }
+
+    private static boolean exists(String path) {
+        return Files.exists(Paths.get(path));
+    }
+
+    private static void ensureParent(String path) {
+        try {
+            Path parent = Paths.get(path).getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static void deleteRecursively(Path root) {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try {
+            Files.walk(root)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void savePartitionMetadata(String tablePath, String[] partitionCols) {
+        Path meta = partitionMetaPath(tablePath);
+        try {
+            if (partitionCols == null || partitionCols.length == 0) {
+                Files.deleteIfExists(meta);
+                return;
+            }
+            Files.write(meta, Arrays.asList(partitionCols), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String[] loadPartitionMetadata(String tablePath) {
+        Path meta = partitionMetaPath(tablePath);
+        if (!Files.exists(meta)) {
+            return new String[0];
+        }
+        try {
+            List<String> lines = Files.readAllLines(meta, StandardCharsets.UTF_8)
+                    .stream()
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .collect(Collectors.toList());
+            return lines.toArray(new String[0]);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public Identifier[] listTables(String[] namespace) {
+        Path dir = (namespace == null || namespace.length == 0)
+                ? Paths.get(basePath)
+                : Paths.get(basePath, namespaceOf(namespace));
+
+        if (!Files.exists(dir) || !Files.isDirectory(dir)) {
+            return new Identifier[0];
+        }
+
+        try {
+            List<Identifier> ids = Files.list(dir)
+                    .filter(Files::isDirectory)
+                    .map(p -> Identifier.of(namespace == null ? new String[0] : namespace, p.getFileName().toString()))
+                    .collect(Collectors.toList());
+
+            return ids.toArray(new Identifier[0]);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public Table loadTable(Identifier ident) {
+        String path = tablePath(ident);
+
+        if (!exists(path)) {
+            throw new RuntimeException("Table not found: " + ident);
+        }
+
+        spark().catalog().clearCache();
+        StructType schema = spark().read().parquet(path).schema();
+        String[] partitionCols = loadPartitionMetadata(path);
+        return new FakeTable(path, schema, partitionCols);
+    }
+
+    @Override
+    public Table loadTable(Identifier ident, String version) {
+        return loadTable(ident);
+    }
+
+    @Override
+    public Table loadTable(Identifier ident, long timestamp) {
+        return loadTable(ident);
+    }
+
+    @Override
+    public void invalidateTable(Identifier ident) {
+    }
+
+    @Override
+    public boolean tableExists(Identifier ident) {
+        return exists(tablePath(ident));
+    }
+
+    @Override
+    public Table createTable(
+            Identifier ident,
+            StructType schema,
+            Transform[] partitions,
+            Map<String, String> properties) {
+
+        createNamespace(ident.namespace(), new HashMap<String, String>());
+
+        String path = tablePath(ident);
+        if (exists(path)) {
+            throw new RuntimeException("Table already exists: " + ident);
+        }
+
+        ensureParent(path);
+
+        spark().createDataFrame(Collections.<Row>emptyList(), schema)
+                .write()
+                .mode(SaveMode.Overwrite)
+                .parquet(path);
+
+        String[] partitionCols = properties != null && properties.containsKey("partitioned_by")
+                ? Arrays.stream(properties.get("partitioned_by").split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .toArray(String[]::new)
+                : new String[0];
+
+        savePartitionMetadata(path, partitionCols);
+
+        return new FakeTable(path, schema, partitionCols);
+    }
+
+    @Override
+    public Table alterTable(Identifier ident, TableChange... changes) {
+        return loadTable(ident);
+    }
+
+    @Override
+    public boolean dropTable(Identifier ident) {
+        String path = tablePath(ident);
+        Path p = Paths.get(path);
+        if (!Files.exists(p)) {
+            return false;
+        }
+        deleteRecursively(p);
+        try {
+            Files.deleteIfExists(partitionMetaPath(path));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return true;
+    }
+
+    @Override
+    public boolean purgeTable(Identifier ident) {
+        return dropTable(ident);
+    }
+
+    @Override
+    public void renameTable(Identifier oldIdent, Identifier newIdent) {
+        String oldPathStr = tablePath(oldIdent);
+        String newPathStr = tablePath(newIdent);
+
+        Path oldPath = Paths.get(oldPathStr);
+        Path newPath = Paths.get(newPathStr);
+
+        try {
+            Files.createDirectories(newPath.getParent());
+            Files.move(oldPath, newPath, StandardCopyOption.REPLACE_EXISTING);
+
+            Path oldMeta = partitionMetaPath(oldPathStr);
+            Path newMeta = partitionMetaPath(newPathStr);
+            if (Files.exists(oldMeta)) {
+                Files.move(oldMeta, newMeta, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public String[][] listNamespaces() {
+        return new String[][]{{"default"}};
+    }
+
+    @Override
+    public String[][] listNamespaces(String[] namespace) {
+        return new String[0][];
+    }
+
+    @Override
+    public boolean namespaceExists(String[] namespace) {
+        if (namespace == null || namespace.length == 0) {
+            return true;
+        }
+        return Files.exists(Paths.get(basePath, namespaceOf(namespace)));
+    }
+
+    @Override
+    public void createNamespace(String[] namespace, Map<String, String> metadata) {
+        if (namespace == null || namespace.length == 0) {
+            return;
+        }
+        try {
+            Files.createDirectories(Paths.get(basePath, namespaceOf(namespace)));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void alterNamespace(String[] namespace, NamespaceChange... namespaceChanges) {
+    }
+
+    @Override
+    public boolean dropNamespace(String[] namespace) {
+        return dropNamespace(namespace, true);
+    }
+
+    @Override
+    public boolean dropNamespace(String[] namespace, boolean cascade) {
+        if (namespace == null || namespace.length == 0) {
+            return false;
+        }
+
+        Path p = Paths.get(basePath, namespaceOf(namespace));
+        if (!Files.exists(p)) {
+            return false;
+        }
+
+        if (!cascade) {
+            try {
+                if (Files.list(p).findAny().isPresent()) {
+                    throw new RuntimeException("Namespace not empty: " + Arrays.toString(namespace));
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        deleteRecursively(p);
+        return true;
+    }
+
+    @Override
+    public Map<String, String> loadNamespaceMetadata(String[] namespace) {
+        return new HashMap<String, String>();
+    }
+
+    static final class FakeTable implements Table, SupportsRead, SupportsWrite, SupportsDelete, Serializable {
+
+        private final String path;
+        private final StructType schema;
+        private final String[] partitions;
+
+        FakeTable(String path, StructType schema, String[] partitions) {
+            this.path = path;
+            this.schema = schema;
+            this.partitions = partitions == null ? new String[0] : partitions;
+        }
+
+        @Override
+        public String name() {
+            return path;
+        }
+
+        @Override
+        public StructType schema() {
+            return schema;
+        }
+
+        @Override
+        public Transform[] partitioning() {
+            return new Transform[0];
+        }
+
+        @Override
+        public Map<String, String> properties() {
+            return new HashMap<String, String>();
+        }
+
+        @Override
+        public Set<TableCapability> capabilities() {
+            return new HashSet<TableCapability>(Arrays.asList(
+                    TableCapability.BATCH_READ,
+                    TableCapability.BATCH_WRITE,
+                    TableCapability.OVERWRITE_BY_FILTER,
+                    TableCapability.TRUNCATE
+            ));
+        }
+
+        @Override
+        public ScanBuilder newScanBuilder(CaseInsensitiveStringMap options) {
+            return new FakeScan(path, schema);
+        }
+
+        @Override
+        public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
+            return new FakeWriteBuilder(path, info.schema(), partitions);
+        }
+
+        @Override
+        public boolean canDeleteWhere(Filter[] filters) {
+            return filters == null || Arrays.stream(filters).allMatch(FakeTable::isSupportedFilter);
+        }
+
+        @Override
+        public void deleteWhere(Filter[] filters) {
+            Dataset<Row> df = spark().read().parquet(path);
+
+            if (filters == null || filters.length == 0) {
+                deleteRecursively(Paths.get(path));
+                spark().createDataFrame(Collections.<Row>emptyList(), schema())
+                        .write()
+                        .mode(SaveMode.Overwrite)
+                        .parquet(path);
+                return;
+            }
+
+            String where = Arrays.stream(filters)
+                    .map(FakeTable::toSqlCondition)
+                    .filter(s -> s != null && !s.trim().isEmpty())
+                    .collect(Collectors.joining(" AND "));
+
+            if (where.trim().isEmpty()) {
+                throw new IllegalArgumentException("Unsupported filters for deleteWhere");
+            }
+
+            String tmpView = "tmp_" + UUID.randomUUID().toString().replace("-", "");
+            String tmpOut = path + ".__delete_tmp__" + UUID.randomUUID().toString().replace("-", "");
+
+            try {
+                df.createOrReplaceTempView(tmpView);
+
+                spark().sql("SELECT * FROM " + tmpView + " WHERE NOT (" + where + ")")
+                        .write()
+                        .mode(SaveMode.Overwrite)
+                        .parquet(tmpOut);
+
+                Path target = Paths.get(path);
+                Path tmp = Paths.get(tmpOut);
+
+                spark().catalog().clearCache();
+                deleteRecursively(target);
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            } finally {
+                try {
+                    spark().catalog().dropTempView(tmpView);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        private static boolean isSupportedFilter(Filter f) {
+            if (f instanceof EqualTo
+                    || f instanceof GreaterThan
+                    || f instanceof GreaterThanOrEqual
+                    || f instanceof LessThan
+                    || f instanceof LessThanOrEqual
+                    || f instanceof In
+                    || f instanceof IsNull
+                    || f instanceof IsNotNull) {
+                return true;
+            }
+            if (f instanceof And) {
+                And and = (And) f;
+                return isSupportedFilter(and.left()) && isSupportedFilter(and.right());
+            }
+            if (f instanceof Or) {
+                Or or = (Or) f;
+                return isSupportedFilter(or.left()) && isSupportedFilter(or.right());
+            }
+            if (f instanceof Not) {
+                Not not = (Not) f;
+                return isSupportedFilter(not.child());
+            }
+            return false;
+        }
+
+        private static String toSqlCondition(Filter f) {
+            if (f instanceof EqualTo) {
+                EqualTo eq = (EqualTo) f;
+                return eq.attribute() + " = " + sqlValue(eq.value());
+            }
+            if (f instanceof GreaterThan) {
+                GreaterThan gt = (GreaterThan) f;
+                return gt.attribute() + " > " + sqlValue(gt.value());
+            }
+            if (f instanceof GreaterThanOrEqual) {
+                GreaterThanOrEqual ge = (GreaterThanOrEqual) f;
+                return ge.attribute() + " >= " + sqlValue(ge.value());
+            }
+            if (f instanceof LessThan) {
+                LessThan lt = (LessThan) f;
+                return lt.attribute() + " < " + sqlValue(lt.value());
+            }
+            if (f instanceof LessThanOrEqual) {
+                LessThanOrEqual le = (LessThanOrEqual) f;
+                return le.attribute() + " <= " + sqlValue(le.value());
+            }
+            if (f instanceof In) {
+                In in = (In) f;
+                return in.attribute() + " IN (" +
+                        Arrays.stream(in.values())
+                                .map(FakeTable::sqlValue)
+                                .collect(Collectors.joining(", ")) +
+                        ")";
+            }
+            if (f instanceof IsNull) {
+                IsNull isNull = (IsNull) f;
+                return isNull.attribute() + " IS NULL";
+            }
+            if (f instanceof IsNotNull) {
+                IsNotNull isNotNull = (IsNotNull) f;
+                return isNotNull.attribute() + " IS NOT NULL";
+            }
+            if (f instanceof And) {
+                And and = (And) f;
+                return "(" + toSqlCondition(and.left()) + " AND " + toSqlCondition(and.right()) + ")";
+            }
+            if (f instanceof Or) {
+                Or or = (Or) f;
+                return "(" + toSqlCondition(or.left()) + " OR " + toSqlCondition(or.right()) + ")";
+            }
+            if (f instanceof Not) {
+                Not not = (Not) f;
+                return "(NOT " + toSqlCondition(not.child()) + ")";
+            }
+            return null;
+        }
+
+        private static String sqlValue(Object v) {
+            if (v == null) return "NULL";
+            if (v instanceof String) return "'" + ((String) v).replace("'", "''") + "'";
+            if (v instanceof Date || v instanceof Timestamp) return "'" + v.toString() + "'";
+            if (v instanceof Boolean) return ((Boolean) v) ? "true" : "false";
+            return String.valueOf(v);
+        }
+    }
+
+    static final class FakeScan implements ScanBuilder, Scan, Batch, Serializable {
+
+        private final String path;
+        private final StructType schema;
+
+        FakeScan(String path, StructType schema) {
+            this.path = path;
+            this.schema = schema;
+        }
+
+        @Override
+        public Scan build() {
+            return this;
+        }
+
+        @Override
+        public StructType readSchema() {
+            return schema;
+        }
+
+        @Override
+        public Batch toBatch() {
+            return this;
+        }
+
+        @Override
+        public InputPartition[] planInputPartitions() {
+            return new InputPartition[]{
+                    new FakeInputPartition(path, schema)
+            };
+        }
+
+        @Override
+        public PartitionReaderFactory createReaderFactory() {
+            return new FakePartitionReaderFactory();
+        }
+    }
+
+    static final class FakeInputPartition implements InputPartition, Serializable {
+        final String path;
+        final StructType schema;
+
+        FakeInputPartition(String path, StructType schema) {
+            this.path = path;
+            this.schema = schema;
+        }
+    }
+
+    static final class FakePartitionReaderFactory implements PartitionReaderFactory, Serializable {
+        @Override
+        public PartitionReader<InternalRow> createReader(InputPartition partition) {
+            FakeInputPartition p = (FakeInputPartition) partition;
+            return new FakePartitionReader(p.path, p.schema);
+        }
+    }
+
+    static final class FakePartitionReader implements PartitionReader<InternalRow> {
+
+        private final Iterator<Row> it;
+        private final StructType schema;
+        private InternalRow current;
+
+        FakePartitionReader(String path, StructType schema) {
+            this.schema = schema;
+            Dataset<Row> df = spark()
+                    .read()
+                    .schema(schema)
+                    .parquet(path);
+            this.it = df.toLocalIterator();
+        }
+
+        @Override
+        public boolean next() {
+            if (!it.hasNext()) {
+                return false;
+            }
+
+            Row r = it.next();
+            StructField[] fields = schema.fields();
+            Object[] values = new Object[fields.length];
+
+            for (int i = 0; i < fields.length; i++) {
+                values[i] = toCatalyst(r.get(i), fields[i].dataType());
+            }
+
+            current = new GenericInternalRow(values);
+            return true;
+        }
+
+        @Override
+        public InternalRow get() {
+            return current;
+        }
+
+        @Override
+        public void close() {
+        }
+
+        private static Object toCatalyst(Object v, DataType dataType) {
+            if (v == null) {
+                return null;
+            }
+
+            if (dataType instanceof StructType) {
+                StructType st = (StructType) dataType;
+                Row row = (Row) v;
+                Object[] values = new Object[st.fields().length];
+
+                for (int i = 0; i < st.fields().length; i++) {
+                    values[i] = toCatalyst(row.get(i), st.fields()[i].dataType());
+                }
+
+                return new GenericInternalRow(values);
+            }
+
+            if (dataType instanceof ArrayType) {
+                ArrayType at = (ArrayType) dataType;
+                List<?> list = (List<?>) v;
+                Object[] values = new Object[list.size()];
+
+                for (int i = 0; i < list.size(); i++) {
+                    values[i] = toCatalyst(list.get(i), at.elementType());
+                }
+
+                return new GenericArrayData(values);
+            }
+
+            if (dataType instanceof MapType) {
+                MapType mt = (MapType) dataType;
+                Map<?, ?> input = (Map<?, ?>) v;
+
+                Object[] keys = new Object[input.size()];
+                Object[] vals = new Object[input.size()];
+
+                int i = 0;
+                for (Map.Entry<?, ?> e : input.entrySet()) {
+                    keys[i] = toCatalyst(e.getKey(), mt.keyType());
+                    vals[i] = toCatalyst(e.getValue(), mt.valueType());
+                    i++;
+                }
+
+                return new ArrayBasedMapData(
+                        new GenericArrayData(keys),
+                        new GenericArrayData(vals)
+                );
+            }
+
+            if (v instanceof String) {
+                return UTF8String.fromString((String) v);
+            }
+
+            if (dataType instanceof DecimalType) {
+                DecimalType dt = (DecimalType) dataType;
+
+                if (v instanceof BigDecimal) {
+                    return Decimal.apply((BigDecimal) v, dt.precision(), dt.scale());
+                }
+                if (v instanceof Number) {
+                    return Decimal.apply(
+                            BigDecimal.valueOf(((Number) v).doubleValue()),
+                            dt.precision(),
+                            dt.scale()
+                    );
+                }
+            }
+
+            if (v instanceof Date) {
+                return (int) ((Date) v).toLocalDate().toEpochDay();
+            }
+
+            if (v instanceof LocalDate) {
+                return (int) ((LocalDate) v).toEpochDay();
+            }
+
+            if (v instanceof Timestamp) {
+                Instant instant = ((Timestamp) v).toInstant();
+                return instant.getEpochSecond() * 1000000L + instant.getNano() / 1000L;
+            }
+
+            if (v instanceof Instant) {
+                Instant instant = (Instant) v;
+                return instant.getEpochSecond() * 1000000L + instant.getNano() / 1000L;
+            }
+
+            return v;
+        }
+    }
+
+    static final class FakeWriteBuilder implements WriteBuilder, SupportsOverwrite, SupportsTruncate, Serializable {
+
+        private final String path;
+        private final StructType schema;
+        private final String[] partitions;
+        private boolean overwrite;
+
+        FakeWriteBuilder(String path, StructType schema, String[] partitions) {
+            this.path = path;
+            this.schema = schema;
+            this.partitions = partitions == null ? new String[0] : partitions;
+        }
+
+        @Override
+        public WriteBuilder overwrite(Filter[] filters) {
+            this.overwrite = true;
+            return this;
+        }
+
+        @Override
+        public WriteBuilder truncate() {
+            this.overwrite = true;
+            return this;
+        }
+
+        @Override
+        public BatchWrite buildForBatch() {
+            return new FakeBatchWrite(path, schema, partitions, overwrite);
+        }
+    }
+
+    static final class FakeBatchWrite implements BatchWrite, Serializable {
+
+        private final String path;
+        private final StructType schema;
+        private final String[] partitions;
+        private final boolean overwrite;
+
+        FakeBatchWrite(String path, StructType schema, String[] partitions, boolean overwrite) {
+            this.path = path;
+            this.schema = schema;
+            this.partitions = partitions == null ? new String[0] : partitions;
+            this.overwrite = overwrite;
+        }
+
+        @Override
+        public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+            return new FakeDataWriterFactory(path, schema);
+        }
+
+        @Override
+        public void commit(WriterCommitMessage[] messages) {
+            List<String> files = new ArrayList<String>();
+
+            for (WriterCommitMessage msg : messages) {
+                if (msg == null) continue;
+                FakeWriterCommitMessage m = (FakeWriterCommitMessage) msg;
+                files.add(m.tempFile);
+            }
+
+            if (files.isEmpty()) {
+                return;
+            }
+
+            SparkSession spark = spark();
+
+            Dataset<Row> df = spark.read()
+                    .schema(schema)
+                    .json(files.toArray(new String[0]));
+
+            String tmpOut = path + ".__commit_tmp__" + UUID.randomUUID().toString().replace("-", "");
+
+            DataFrameWriter<Row> writer = df.write();
+            if (partitions.length > 0) {
+                writer = writer.partitionBy(partitions);
+            }
+
+            writer.mode(SaveMode.Overwrite).parquet(tmpOut);
+
+            try {
+                Path target = Paths.get(path);
+                Path tmp = Paths.get(tmpOut);
+
+                if (overwrite || !Files.exists(target)) {
+                    deleteRecursively(target);
+                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                } else {
+                    String appendTmp = path + ".__append_tmp__" + UUID.randomUUID().toString().replace("-", "");
+
+                    Dataset<Row> merged = spark.read().schema(schema).parquet(path, tmpOut);
+
+                    DataFrameWriter<Row> mergedWriter = merged.write();
+                    if (partitions.length > 0) {
+                        mergedWriter = mergedWriter.partitionBy(partitions);
+                    }
+
+                    mergedWriter.mode(SaveMode.Overwrite).parquet(appendTmp);
+
+                    deleteRecursively(target);
+                    Files.move(Paths.get(appendTmp), target, StandardCopyOption.REPLACE_EXISTING);
+                    deleteRecursively(tmp);
+                }
+
+                for (String f : files) {
+                    Files.deleteIfExists(Paths.get(f));
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public void abort(WriterCommitMessage[] messages) {
+            if (messages == null) return;
+
+            for (WriterCommitMessage msg : messages) {
+                if (msg == null) continue;
+                FakeWriterCommitMessage m = (FakeWriterCommitMessage) msg;
+                try {
+                    Files.deleteIfExists(Paths.get(m.tempFile));
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    static final class FakeDataWriterFactory implements DataWriterFactory, Serializable {
+        private final String basePath;
+        private final StructType schema;
+
+        FakeDataWriterFactory(String basePath, StructType schema) {
+            this.basePath = basePath;
+            this.schema = schema;
+        }
+
+        @Override
+        public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+            return new FakeDataWriter(basePath, schema, partitionId, taskId);
+        }
+    }
+
+    static final class FakeDataWriter implements DataWriter<InternalRow>, Serializable {
+
+        private final String tempFile;
+        private final StructType schema;
+        private final transient BufferedWriter writer;
+
+        FakeDataWriter(String basePath, StructType schema, int partitionId, long taskId) {
+            this.schema = schema;
+            this.tempFile = basePath + ".__writer_tmp__" + partitionId + "_" + taskId + "_" +
+                    UUID.randomUUID().toString().replace("-", "") + ".jsonl";
+
+            try {
+                Path p = Paths.get(tempFile);
+                Files.createDirectories(p.getParent());
+                this.writer = Files.newBufferedWriter(p);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public void write(InternalRow row) {
+            try {
+                writer.write(toJsonLine(row, schema));
+                writer.newLine();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public WriterCommitMessage commit() {
+            try {
+                writer.flush();
+                writer.close();
+                return new FakeWriterCommitMessage(tempFile);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public void abort() {
+            try { writer.close(); } catch (Exception ignored) {}
+            try { Files.deleteIfExists(Paths.get(tempFile)); } catch (Exception ignored) {}
+        }
+
+        @Override
+        public void close() {
+            try { writer.close(); } catch (Exception ignored) {}
+        }
+
+        private static String toJsonLine(InternalRow row, StructType schema) {
+            return structToJson(row, schema);
+        }
+
+        private static String toJsonValue(Object value, DataType dataType) {
+            if (value == null || dataType instanceof NullType) {
+                return "null";
+            }
+
+            if (dataType instanceof UserDefinedType) {
+                UserDefinedType<?> udt = (UserDefinedType<?>) dataType;
+                return toJsonValue(value, udt.sqlType());
+            }
+
+            if (dataType instanceof StringType) {
+                return "\"" + escape(asJavaString(value)) + "\"";
+            }
+
+            if (dataType instanceof BooleanType
+                    || dataType instanceof IntegerType
+                    || dataType instanceof LongType
+                    || dataType instanceof DoubleType
+                    || dataType instanceof FloatType
+                    || dataType instanceof ShortType
+                    || dataType instanceof ByteType) {
+                return String.valueOf(value);
+            }
+
+            if (dataType instanceof DecimalType) {
+                return decimalToJson(value);
+            }
+
+            if (dataType instanceof DateType) {
+                return "\"" + escape(formatDate(value)) + "\"";
+            }
+
+            if (dataType instanceof TimestampType) {
+                return "\"" + escape(formatTimestamp(value)) + "\"";
+            }
+
+            if (dataType instanceof BinaryType) {
+                return "\"" + Base64.getEncoder().encodeToString(toBytes(value)) + "\"";
+            }
+
+            if (dataType instanceof CalendarIntervalType) {
+                return "\"" + escape(formatCalendarInterval(value)) + "\"";
+            }
+
+            if (dataType instanceof DayTimeIntervalType) {
+                return String.valueOf(value);
+            }
+
+            if (dataType instanceof YearMonthIntervalType) {
+                return String.valueOf(value);
+            }
+
+            if (dataType instanceof StructType) {
+                return structValueToJson(value, (StructType) dataType);
+            }
+
+            if (dataType instanceof ArrayType) {
+                return arrayToJson(value, (ArrayType) dataType);
+            }
+
+            if (dataType instanceof MapType) {
+                return mapToJson(value, (MapType) dataType);
+            }
+
+            return "\"" + escape(asJavaString(value)) + "\"";
+        }
+
+        private static String structValueToJson(Object value, StructType schema) {
+            if (value == null) {
+                return "null";
+            }
+
+            if (value instanceof InternalRow) {
+                return structToJson((InternalRow) value, schema);
+            }
+
+            if (value instanceof Row) {
+                Row row = (Row) value;
+                StringBuilder sb = new StringBuilder();
+                sb.append("{");
+
+                StructField[] fields = schema.fields();
+                for (int i = 0; i < fields.length; i++) {
+                    if (i > 0) {
+                        sb.append(",");
+                    }
+                    sb.append("\"").append(escape(fields[i].name())).append("\":");
+                    Object v = row.isNullAt(i) ? null : row.get(i);
+                    sb.append(toJsonValue(v, fields[i].dataType()));
+                }
+
+                sb.append("}");
+                return sb.toString();
+            }
+
+            if (value instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<Object, Object> map = (Map<Object, Object>) value;
+
+                StringBuilder sb = new StringBuilder();
+                sb.append("{");
+
+                StructField[] fields = schema.fields();
+                for (int i = 0; i < fields.length; i++) {
+                    if (i > 0) {
+                        sb.append(",");
+                    }
+                    sb.append("\"").append(escape(fields[i].name())).append("\":");
+                    Object v = map.get(fields[i].name());
+                    sb.append(toJsonValue(v, fields[i].dataType()));
+                }
+
+                sb.append("}");
+                return sb.toString();
+            }
+
+            return "\"" + escape(asJavaString(value)) + "\"";
+        }
+
+        private static String structToJson(InternalRow row, StructType schema) {
+            if (row == null) {
+                return "null";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("{");
+
+            StructField[] fields = schema.fields();
+            for (int i = 0; i < fields.length; i++) {
+                if (i > 0) {
+                    sb.append(",");
+                }
+
+                sb.append("\"").append(escape(fields[i].name())).append("\":");
+
+                if (row.isNullAt(i)) {
+                    sb.append("null");
+                } else {
+                    Object v = row.get(i, fields[i].dataType());
+                    sb.append(toJsonValue(v, fields[i].dataType()));
+                }
+            }
+
+            sb.append("}");
+            return sb.toString();
+        }
+
+        private static String arrayToJson(Object value, ArrayType arrayType) {
+            if (value == null) {
+                return "null";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("[");
+
+            boolean first = true;
+
+            if (value instanceof ArrayData) {
+                ArrayData ad = (ArrayData) value;
+
+                for (int i = 0; i < ad.numElements(); i++) {
+                    if (!first) {
+                        sb.append(",");
+                    }
+                    first = false;
+
+                    Object element = ad.isNullAt(i) ? null : ad.get(i, arrayType.elementType());
+                    sb.append(toJsonValue(element, arrayType.elementType()));
+                }
+            } else if (value instanceof List) {
+                List<?> list = (List<?>) value;
+
+                for (Object element : list) {
+                    if (!first) {
+                        sb.append(",");
+                    }
+                    first = false;
+
+                    sb.append(toJsonValue(element, arrayType.elementType()));
+                }
+            } else if (value instanceof Object[]) {
+                Object[] arr = (Object[]) value;
+
+                for (Object element : arr) {
+                    if (!first) {
+                        sb.append(",");
+                    }
+                    first = false;
+
+                    sb.append(toJsonValue(element, arrayType.elementType()));
+                }
+            } else {
+                return "[]";
+            }
+
+            sb.append("]");
+            return sb.toString();
+        }
+
+        private static String mapToJson(Object value, MapType mapType) {
+            if (value == null) {
+                return "null";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("{");
+
+            boolean first = true;
+
+            if (value instanceof MapData) {
+                MapData md = (MapData) value;
+
+                ArrayData keys = md.keyArray();
+                ArrayData vals = md.valueArray();
+
+                for (int i = 0; i < md.numElements(); i++) {
+                    if (!first) {
+                        sb.append(",");
+                    }
+                    first = false;
+
+                    Object k = keys.get(i, mapType.keyType());
+                    Object v = vals.isNullAt(i) ? null : vals.get(i, mapType.valueType());
+
+                    sb.append("\"").append(escape(asJavaString(k))).append("\":");
+                    sb.append(toJsonValue(v, mapType.valueType()));
+                }
+            } else if (value instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<Object, Object> map = (Map<Object, Object>) value;
+
+                for (Map.Entry<Object, Object> e : map.entrySet()) {
+                    if (!first) {
+                        sb.append(",");
+                    }
+                    first = false;
+
+                    sb.append("\"").append(escape(asJavaString(e.getKey()))).append("\":");
+                    sb.append(toJsonValue(e.getValue(), mapType.valueType()));
+                }
+            } else {
+                return "{}";
+            }
+
+            sb.append("}");
+            return sb.toString();
+        }
+
+        private static String decimalToJson(Object value) {
+            if (value == null) {
+                return "null";
+            }
+
+            if (value instanceof Decimal) {
+                return ((Decimal) value).toJavaBigDecimal().toPlainString();
+            }
+
+            if (value instanceof BigDecimal) {
+                return ((BigDecimal) value).toPlainString();
+            }
+
+            if (value instanceof java.math.BigInteger) {
+                return new BigDecimal((java.math.BigInteger) value).toPlainString();
+            }
+
+            if (value instanceof Number) {
+                return BigDecimal.valueOf(((Number) value).doubleValue()).toPlainString();
+            }
+
+            return "\"" + escape(asJavaString(value)) + "\"";
+        }
+
+        private static String formatDate(Object value) {
+            if (value == null) {
+                return null;
+            }
+
+            if (value instanceof Integer) {
+                return LocalDate.ofEpochDay((Integer) value).toString();
+            }
+
+            if (value instanceof Date) {
+                return ((Date) value).toLocalDate().toString();
+            }
+
+            if (value instanceof LocalDate) {
+                return value.toString();
+            }
+
+            return asJavaString(value);
+        }
+
+        private static String formatTimestamp(Object value) {
+            if (value == null) {
+                return null;
+            }
+
+            if (value instanceof Long) {
+                long micros = (Long) value;
+                long seconds = micros / 1_000_000L;
+                long microsRemainder = micros % 1_000_000L;
+                if (microsRemainder < 0) {
+                    microsRemainder += 1_000_000L;
+                    seconds -= 1;
+                }
+                Instant instant = Instant.ofEpochSecond(seconds, microsRemainder * 1000L);
+                return instant.toString();
+            }
+
+            if (value instanceof Timestamp) {
+                return ((Timestamp) value).toInstant().toString();
+            }
+
+            if (value instanceof Instant) {
+                return value.toString();
+            }
+
+            return asJavaString(value);
+        }
+
+        private static String formatCalendarInterval(Object value) {
+            if (value == null) {
+                return null;
+            }
+
+            if (value instanceof CalendarInterval) {
+                CalendarInterval ci = (CalendarInterval) value;
+                return "months=" + ci.months + ",days=" + ci.days + ",microseconds=" + ci.microseconds;
+            }
+
+            return asJavaString(value);
+        }
+
+        private static byte[] toBytes(Object value) {
+            if (value instanceof byte[]) {
+                return (byte[]) value;
+            }
+
+            if (value instanceof UTF8String) {
+                return value.toString().getBytes(StandardCharsets.UTF_8);
+            }
+
+            if (value instanceof String) {
+                return ((String) value).getBytes(StandardCharsets.UTF_8);
+            }
+
+            return asJavaString(value).getBytes(StandardCharsets.UTF_8);
+        }
+
+        private static String asJavaString(Object value) {
+            if (value == null) {
+                return null;
+            }
+
+            if (value instanceof UTF8String) {
+                return value.toString();
+            }
+
+            if (value instanceof Decimal) {
+                return ((Decimal) value).toJavaBigDecimal().toPlainString();
+            }
+
+            return String.valueOf(value);
+        }
+
+        private static String escape(String s) {
+            if (s == null) {
+                return "";
+            }
+
+            return s
+                    .replace("\\", "\\\\")
+                    .replace("\"", "\\\"")
+                    .replace("\n", "\\n")
+                    .replace("\r", "\\r")
+                    .replace("\t", "\\t");
+        }
+    }
+
+    static final class FakeWriterCommitMessage implements WriterCommitMessage, Serializable {
+        final String tempFile;
+
+        FakeWriterCommitMessage(String tempFile) {
+            this.tempFile = tempFile;
+        }
+    }
+}
+Le dernier point “fragile” qui reste, c’est surtout si tu as un UDT custom très spécifique.
+Là, il faut coder le traitement pour ce UDT précis.
