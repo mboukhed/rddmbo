@@ -1,0 +1,381 @@
+Oui.
+Le code que j’ai mis utilisait du style Java plus récent (instanceof X x).
+En Java 11, il faut écrire la version classique.
+Voici la version Java 11 compatible de toCatalyst(...).
+Java
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.util.Utf8;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
+import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.catalyst.util.GenericInternalRow;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.BinaryType;
+import org.apache.spark.sql.types.BooleanType;
+import org.apache.spark.sql.types.ByteType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DateType;
+import org.apache.spark.sql.types.DecimalType;
+import org.apache.spark.sql.types.DoubleType;
+import org.apache.spark.sql.types.FloatType;
+import org.apache.spark.sql.types.IntegerType;
+import org.apache.spark.sql.types.LongType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.NullType;
+import org.apache.spark.sql.types.ShortType;
+import org.apache.spark.sql.types.StringType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.types.TimestampType;
+import org.apache.spark.unsafe.types.UTF8String;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+private static Object toCatalyst(Object v, DataType dataType) {
+    if (v == null) {
+        return null;
+    }
+
+    // ===== helpers avro =====
+
+    if (v instanceof Utf8) {
+        return toCatalyst(v.toString(), dataType);
+    }
+
+    if (v instanceof ByteBuffer && dataType instanceof BinaryType) {
+        ByteBuffer bb = ((ByteBuffer) v).duplicate();
+        byte[] bytes = new byte[bb.remaining()];
+        bb.get(bytes);
+        return bytes;
+    }
+
+    if (v instanceof GenericRecord && dataType instanceof StructType) {
+        GenericRecord record = (GenericRecord) v;
+        StructType st = (StructType) dataType;
+
+        Object[] values = new Object[st.fields().length];
+        for (int i = 0; i < st.fields().length; i++) {
+            StructField f = st.fields()[i];
+            values[i] = toCatalyst(record.get(f.name()), f.dataType());
+        }
+        return new GenericInternalRow(values);
+    }
+
+    if (v instanceof GenericData.Array && dataType instanceof ArrayType) {
+        GenericData.Array<?> arr = (GenericData.Array<?>) v;
+        ArrayType at = (ArrayType) dataType;
+
+        Object[] values = new Object[arr.size()];
+        for (int i = 0; i < arr.size(); i++) {
+            values[i] = toCatalyst(arr.get(i), at.elementType());
+        }
+        return new GenericArrayData(values);
+    }
+
+    // ===== string =====
+
+    if (dataType instanceof StringType) {
+        return UTF8String.fromString(String.valueOf(v));
+    }
+
+    // ===== boolean =====
+
+    if (dataType instanceof BooleanType) {
+        if (v instanceof Boolean) {
+            return v;
+        }
+        if (v instanceof Number) {
+            return ((Number) v).intValue() != 0;
+        }
+        return Boolean.parseBoolean(String.valueOf(v));
+    }
+
+    // ===== byte =====
+
+    if (dataType instanceof ByteType) {
+        if (v instanceof Number) {
+            return ((Number) v).byteValue();
+        }
+        return Byte.parseByte(String.valueOf(v));
+    }
+
+    // ===== short =====
+
+    if (dataType instanceof ShortType) {
+        if (v instanceof Number) {
+            return ((Number) v).shortValue();
+        }
+        return Short.parseShort(String.valueOf(v));
+    }
+
+    // ===== int =====
+
+    if (dataType instanceof IntegerType) {
+        if (v instanceof Number) {
+            return ((Number) v).intValue();
+        }
+        return Integer.parseInt(String.valueOf(v));
+    }
+
+    // ===== long =====
+
+    if (dataType instanceof LongType) {
+        if (v instanceof Number) {
+            return ((Number) v).longValue();
+        }
+        return Long.parseLong(String.valueOf(v));
+    }
+
+    // ===== float =====
+
+    if (dataType instanceof FloatType) {
+        if (v instanceof Number) {
+            return ((Number) v).floatValue();
+        }
+        return Float.parseFloat(String.valueOf(v));
+    }
+
+    // ===== double =====
+
+    if (dataType instanceof DoubleType) {
+        if (v instanceof Number) {
+            return ((Number) v).doubleValue();
+        }
+        return Double.parseDouble(String.valueOf(v));
+    }
+
+    // ===== decimal =====
+
+    if (dataType instanceof DecimalType) {
+        DecimalType dt = (DecimalType) dataType;
+        BigDecimal bd;
+
+        if (v instanceof org.apache.spark.sql.types.Decimal) {
+            return v;
+        } else if (v instanceof BigDecimal) {
+            bd = (BigDecimal) v;
+        } else if (v instanceof BigInteger) {
+            bd = new BigDecimal((BigInteger) v);
+        } else if (v instanceof Number) {
+            bd = new BigDecimal(String.valueOf(v));
+        } else {
+            bd = new BigDecimal(String.valueOf(v));
+        }
+
+        bd = bd.setScale(dt.scale(), java.math.RoundingMode.HALF_UP);
+
+        if (bd.precision() > dt.precision()) {
+            throw new IllegalArgumentException(
+                    "Decimal overflow: value=" + bd +
+                            ", precision=" + dt.precision() +
+                            ", scale=" + dt.scale()
+            );
+        }
+
+        return org.apache.spark.sql.types.Decimal.apply(bd, dt.precision(), dt.scale());
+    }
+
+    // ===== date =====
+    // Spark Catalyst DateType = int jours depuis epoch
+
+    if (dataType instanceof DateType) {
+        if (v instanceof Integer) {
+            return v;
+        }
+        if (v instanceof LocalDate) {
+            return (int) ((LocalDate) v).toEpochDay();
+        }
+        if (v instanceof java.sql.Date) {
+            return (int) ((java.sql.Date) v).toLocalDate().toEpochDay();
+        }
+        if (v instanceof java.util.Date) {
+            return (int) ((java.util.Date) v).toInstant().atZone(ZoneOffset.UTC).toLocalDate().toEpochDay();
+        }
+        return (int) LocalDate.parse(String.valueOf(v)).toEpochDay();
+    }
+
+    // ===== timestamp =====
+    // Spark Catalyst TimestampType = long microseconds depuis epoch
+
+    if (dataType instanceof TimestampType) {
+        if (v instanceof Long) {
+            return v;
+        }
+
+        Instant instant;
+
+        if (v instanceof Timestamp) {
+            instant = ((Timestamp) v).toInstant();
+        } else if (v instanceof java.util.Date) {
+            instant = ((java.util.Date) v).toInstant();
+        } else if (v instanceof Instant) {
+            instant = (Instant) v;
+        } else if (v instanceof LocalDateTime) {
+            instant = ((LocalDateTime) v).toInstant(ZoneOffset.UTC);
+        } else if (v instanceof OffsetDateTime) {
+            instant = ((OffsetDateTime) v).toInstant();
+        } else if (v instanceof ZonedDateTime) {
+            instant = ((ZonedDateTime) v).toInstant();
+        } else {
+            String s = String.valueOf(v).trim();
+            try {
+                instant = Instant.parse(s);
+            } catch (Exception e) {
+                instant = Timestamp.valueOf(s).toInstant();
+            }
+        }
+
+        return instant.getEpochSecond() * 1_000_000L + (instant.getNano() / 1_000L);
+    }
+
+    // ===== binary =====
+
+    if (dataType instanceof BinaryType) {
+        if (v instanceof byte[]) {
+            return v;
+        }
+
+        if (v instanceof Byte[]) {
+            Byte[] arr = (Byte[]) v;
+            byte[] out = new byte[arr.length];
+            for (int i = 0; i < arr.length; i++) {
+                out[i] = arr[i];
+            }
+            return out;
+        }
+
+        throw new IllegalArgumentException("Unsupported binary value: " + v.getClass());
+    }
+
+    // ===== array =====
+
+    if (dataType instanceof ArrayType) {
+        ArrayType at = (ArrayType) dataType;
+        List<?> list;
+
+        if (v instanceof List<?>) {
+            list = (List<?>) v;
+        } else if (v instanceof GenericData.Array<?>) {
+            List<Object> tmp = new ArrayList<Object>();
+            for (Object x : (GenericData.Array<?>) v) {
+                tmp.add(x);
+            }
+            list = tmp;
+        } else if (v.getClass().isArray()) {
+            int len = java.lang.reflect.Array.getLength(v);
+            List<Object> tmp = new ArrayList<Object>(len);
+            for (int i = 0; i < len; i++) {
+                tmp.add(java.lang.reflect.Array.get(v, i));
+            }
+            list = tmp;
+        } else {
+            throw new IllegalArgumentException("Unsupported array value: " + v.getClass());
+        }
+
+        Object[] values = new Object[list.size()];
+        for (int i = 0; i < list.size(); i++) {
+            values[i] = toCatalyst(list.get(i), at.elementType());
+        }
+        return new GenericArrayData(values);
+    }
+
+    // ===== map =====
+
+    if (dataType instanceof MapType) {
+        MapType mt = (MapType) dataType;
+
+        if (!(v instanceof Map<?, ?>)) {
+            throw new IllegalArgumentException("Unsupported map value: " + v.getClass());
+        }
+
+        Map<?, ?> map = (Map<?, ?>) v;
+        Object[] keys = new Object[map.size()];
+        Object[] vals = new Object[map.size()];
+
+        int i = 0;
+        for (Map.Entry<?, ?> e : map.entrySet()) {
+            keys[i] = toCatalyst(e.getKey(), mt.keyType());
+            vals[i] = toCatalyst(e.getValue(), mt.valueType());
+            i++;
+        }
+
+        return ArrayBasedMapData.apply(
+                new GenericArrayData(keys),
+                new GenericArrayData(vals)
+        );
+    }
+
+    // ===== struct =====
+
+    if (dataType instanceof StructType) {
+        StructType st = (StructType) dataType;
+        Object[] values = new Object[st.fields().length];
+
+        if (v instanceof Row) {
+            Row row = (Row) v;
+            for (int i = 0; i < st.fields().length; i++) {
+                values[i] = toCatalyst(row.get(i), st.fields()[i].dataType());
+            }
+            return new GenericInternalRow(values);
+        }
+
+        if (v instanceof Map<?, ?>) {
+            Map<?, ?> map = (Map<?, ?>) v;
+            for (int i = 0; i < st.fields().length; i++) {
+                StructField f = st.fields()[i];
+                values[i] = toCatalyst(map.get(f.name()), f.dataType());
+            }
+            return new GenericInternalRow(values);
+        }
+
+        if (v instanceof GenericRecord) {
+            GenericRecord record = (GenericRecord) v;
+            for (int i = 0; i < st.fields().length; i++) {
+                StructField f = st.fields()[i];
+                values[i] = toCatalyst(record.get(f.name()), f.dataType());
+            }
+            return new GenericInternalRow(values);
+        }
+
+        throw new IllegalArgumentException("Unsupported struct value: " + v.getClass());
+    }
+
+    if (dataType instanceof NullType) {
+        return null;
+    }
+
+    throw new IllegalArgumentException(
+            "Unsupported conversion. valueClass=" + v.getClass().getName() +
+                    ", dataType=" + dataType.catalogString()
+    );
+}
+Et si tu veux construire directement ton InternalRow depuis un GenericRecord :
+Java
+private static InternalRow toInternalRow(GenericRecord record, StructType schema) {
+    Object[] values = new Object[schema.fields().length];
+
+    for (int i = 0; i < schema.fields().length; i++) {
+        StructField f = schema.fields()[i];
+        values[i] = toCatalyst(record.get(f.name()), f.dataType());
+    }
+
+    return new GenericInternalRow(values);
+}
+Deux points utiles pour éviter les emmerdes :
+Timestamp.valueOf(...) attend un format du genre yyyy-MM-dd HH:mm:ss[.fffffffff]
+si ton Avro met les dates/timestamps en long ou int avec logicalType, il faudra parfois traiter ce cas avant conversion texte
+Si tu veux, je te fais la version avec support explicite des logical types Avro date, timestamp-millis, timestamp-micros, decimal.
