@@ -1,0 +1,74 @@
+Oui, là c’est le Decimal / BigDecimal qui casse, pas le timestamp 👍
+Le message :
+NumberFormatException: Character array is missing "e" notation exponential mark
+vient souvent d’une valeur lue depuis parquet/avro qui n’est pas une string décimale propre (par ex. byte[], GenericFixed, ByteBuffer, ou une notation scientifique mal parsée).
+Je te donne la correction complète uniquement pour decimal, générique et robuste Java 11 👇
+Java
+// ===== decimal =====
+if (dataType instanceof DecimalType) {
+    DecimalType dt = (DecimalType) dataType;
+    BigDecimal bd;
+
+    if (v == null) {
+        return null;
+    }
+
+    // déjà BigDecimal
+    if (v instanceof BigDecimal) {
+        bd = (BigDecimal) v;
+
+    // types numériques standards
+    } else if (v instanceof Integer
+            || v instanceof Long
+            || v instanceof Double
+            || v instanceof Float
+            || v instanceof Short) {
+
+        bd = BigDecimal.valueOf(((Number) v).doubleValue());
+
+    // Avro GenericFixed / parquet fixed decimal
+    } else if (v instanceof org.apache.avro.generic.GenericFixed) {
+        byte[] bytes = ((org.apache.avro.generic.GenericFixed) v).bytes();
+        bd = new BigDecimal(new BigInteger(bytes), dt.scale());
+
+    // byte[]
+    } else if (v instanceof byte[]) {
+        bd = new BigDecimal(new BigInteger((byte[]) v), dt.scale());
+
+    // ByteBuffer
+    } else if (v instanceof java.nio.ByteBuffer) {
+        ByteBuffer bb = (ByteBuffer) v;
+        byte[] bytes = new byte[bb.remaining()];
+        bb.get(bytes);
+        bd = new BigDecimal(new BigInteger(bytes), dt.scale());
+
+    // String / fallback
+    } else {
+        String s = String.valueOf(v).trim();
+
+        // nettoyage éventuel
+        s = s.replace(",", ".");
+
+        bd = new BigDecimal(s);
+    }
+
+    bd = bd.setScale(dt.scale(), java.math.RoundingMode.HALF_UP);
+
+    if (bd.precision() > dt.precision()) {
+        throw new IllegalArgumentException(
+                "Decimal precision overflow: " + bd
+        );
+    }
+
+    return org.apache.spark.sql.types.Decimal.apply(bd);
+}
+imports
+Java
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import org.apache.spark.sql.types.Decimal;
+Le point important ici 👇
+si ça vient de parquet decimal stocké en FIXED_LEN_BYTE_ARRAY, il faut absolument passer par BigInteger(bytes) et non new BigDecimal(String.valueOf(v)).
+C’est très probablement ton cas vu le message.
+À mon avis après ce patch, ton 5e test devrait passer.
