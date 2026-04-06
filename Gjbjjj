@@ -1,0 +1,72 @@
+if (dataType instanceof TimestampType) {
+
+    // ===== INT96 parquet raw bytes =====
+    if (v instanceof byte[] bytes && bytes.length == 12) {
+        ByteBuffer buffer = ByteBuffer.wrap(bytes)
+                .order(ByteOrder.LITTLE_ENDIAN);
+
+        long nanosOfDay = buffer.getLong();
+        int julianDay = buffer.getInt();
+
+        long epochDay = julianDay - 2440588L;
+        long seconds = epochDay * 86400L
+                + (nanosOfDay / 1_000_000_000L);
+
+        return seconds * 1_000_000L
+                + ((nanosOfDay % 1_000_000_000L) / 1_000L);
+    }
+
+    Instant instant;
+
+    if (v instanceof Timestamp) {
+        instant = ((Timestamp) v).toInstant();
+
+    } else if (v instanceof java.util.Date) {
+        instant = ((java.util.Date) v).toInstant();
+
+    } else if (v instanceof Instant) {
+        instant = (Instant) v;
+
+    } else if (v instanceof LocalDateTime) {
+        instant = ((LocalDateTime) v).toInstant(ZoneOffset.UTC);
+
+    } else if (v instanceof OffsetDateTime) {
+        instant = ((OffsetDateTime) v).toInstant();
+
+    } else if (v instanceof ZonedDateTime) {
+        instant = ((ZonedDateTime) v).toInstant();
+
+    } else {
+        String s = String.valueOf(v).trim();
+
+        try {
+            instant = Instant.parse(s);
+
+        } catch (Exception e1) {
+            try {
+                instant = OffsetDateTime.parse(s).toInstant();
+
+            } catch (Exception e2) {
+                try {
+                    instant = LocalDateTime.parse(
+                            s,
+                            DateTimeFormatter.ofPattern(
+                                    "yyyy-MM-dd HH:mm:ss.SSS"
+                            )
+                    ).toInstant(ZoneOffset.UTC);
+
+                } catch (Exception e3) {
+                    instant = LocalDateTime.parse(
+                            s,
+                            DateTimeFormatter.ofPattern(
+                                    "yyyy-MM-dd HH:mm:ss"
+                            )
+                    ).toInstant(ZoneOffset.UTC);
+                }
+            }
+        }
+    }
+
+    return instant.getEpochSecond() * 1_000_000L
+            + (instant.getNano() / 1_000L);
+}
