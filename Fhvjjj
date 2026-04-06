@@ -1,0 +1,119 @@
+Bref, voici le code complet prêt à coller (Java 11) pour corriger uniquement le timestamp 👇
+Java
+// ===== timestamp =====
+if (dataType instanceof TimestampType) {
+
+    // INT96 via Avro GenericFixed
+    if (v instanceof org.apache.avro.generic.GenericFixed) {
+        byte[] bytes = ((org.apache.avro.generic.GenericFixed) v).bytes();
+        return int96ToMicros(bytes);
+    }
+
+    // INT96 déjà en byte[]
+    if (v instanceof byte[]) {
+        byte[] bytes = (byte[]) v;
+        if (bytes.length == 12) {
+            return int96ToMicros(bytes);
+        }
+    }
+
+    Instant instant;
+
+    if (v instanceof Timestamp) {
+        instant = ((Timestamp) v).toInstant();
+
+    } else if (v instanceof java.util.Date) {
+        instant = ((java.util.Date) v).toInstant();
+
+    } else if (v instanceof Instant) {
+        instant = (Instant) v;
+
+    } else if (v instanceof LocalDateTime) {
+        instant = ((LocalDateTime) v).toInstant(ZoneOffset.UTC);
+
+    } else if (v instanceof OffsetDateTime) {
+        instant = ((OffsetDateTime) v).toInstant();
+
+    } else if (v instanceof ZonedDateTime) {
+        instant = ((ZonedDateTime) v).toInstant();
+
+    } else if (v instanceof Long) {
+        long raw = ((Long) v).longValue();
+
+        // déjà microseconds Spark
+        if (Math.abs(raw) > 100_000_000_000_000L) {
+            return raw;
+        }
+
+        // sinon millis -> micros
+        return raw * 1_000L;
+
+    } else {
+        String s = String.valueOf(v).trim();
+
+        try {
+            instant = Instant.parse(s);
+
+        } catch (Exception e1) {
+            try {
+                instant = OffsetDateTime.parse(s).toInstant();
+
+            } catch (Exception e2) {
+                try {
+                    instant = LocalDateTime.parse(
+                            s,
+                            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+                    ).toInstant(ZoneOffset.UTC);
+
+                } catch (Exception e3) {
+                    try {
+                        instant = LocalDateTime.parse(
+                                s,
+                                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+                        ).toInstant(ZoneOffset.UTC);
+
+                    } catch (Exception e4) {
+                        throw new IllegalArgumentException(
+                                "Unsupported timestamp format: " + s
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    return instant.getEpochSecond() * 1_000_000L
+            + (instant.getNano() / 1_000L);
+}
+Méthode utilitaire à ajouter dans la classe :
+Java
+private static long int96ToMicros(byte[] bytes) {
+    if (bytes == null || bytes.length != 12) {
+        throw new IllegalArgumentException("INT96 must be 12 bytes");
+    }
+
+    ByteBuffer buffer = ByteBuffer.wrap(bytes)
+            .order(ByteOrder.LITTLE_ENDIAN);
+
+    long nanosOfDay = buffer.getLong();
+    int julianDay = buffer.getInt();
+
+    long epochDay = julianDay - 2440588L;
+    long seconds = epochDay * 86400L
+            + (nanosOfDay / 1_000_000_000L);
+
+    return seconds * 1_000_000L
+            + ((nanosOfDay % 1_000_000_000L) / 1_000L);
+}
+Imports :
+Java
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+Là normalement ton INT96 parquet + formats string + timestamp Java sont couverts.
