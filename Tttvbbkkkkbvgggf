@@ -1,0 +1,338 @@
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+public class JsonFlatClassGeneratorMain {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    public static void main(String[] args) throws Exception {
+
+        Path inputFile = Path.of("C:/tmp/input.json");
+        Path outputFile = Path.of("C:/tmp/RootFlat.java");
+
+        JsonFieldNode root = buildGlobalTree(inputFile);
+
+        String javaCode = generateFlatJavaClass(
+                root,
+                "generated",
+                "RootFlat"
+        );
+
+        Files.write(
+                outputFile,
+                javaCode.getBytes(StandardCharsets.UTF_8)
+        );
+
+        System.out.println("Classe générée : " + outputFile.toAbsolutePath());
+    }
+
+    public static JsonFieldNode buildGlobalTree(Path path) throws IOException {
+        JsonFieldNode root = new JsonFieldNode("ROOT");
+
+        try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+
+            String line;
+            long lineNumber = 0;
+
+            while ((line = br.readLine()) != null) {
+                lineNumber++;
+
+                line = line.trim();
+
+                if (line.isEmpty()) {
+                    continue;
+                }
+
+                try {
+                    JsonNode json = MAPPER.readTree(line);
+                    visit(json, root);
+                } catch (Exception e) {
+                    System.err.println("JSON invalide ligne " + lineNumber);
+                }
+            }
+        }
+
+        return root;
+    }
+
+    private static void visit(JsonNode jsonNode, JsonFieldNode current) {
+
+        if (jsonNode == null || jsonNode.isNull()) {
+            current.incrementOccurrences();
+            current.addType("NULL");
+            return;
+        }
+
+        if (jsonNode.isObject()) {
+            current.incrementOccurrences();
+            current.addType("OBJECT");
+
+            Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
+
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+
+                JsonFieldNode child = current.child(entry.getKey());
+
+                visit(entry.getValue(), child);
+            }
+
+            return;
+        }
+
+        if (jsonNode.isArray()) {
+            current.incrementOccurrences();
+            current.addType("ARRAY");
+
+            JsonFieldNode itemNode = current.child("[*]");
+
+            for (JsonNode item : jsonNode) {
+                visit(item, itemNode);
+            }
+
+            return;
+        }
+
+        current.incrementOccurrences();
+
+        if (jsonNode.isTextual()) {
+            current.addType("STRING");
+        } else if (jsonNode.isBoolean()) {
+            current.addType("BOOLEAN");
+        } else if (jsonNode.isInt()
+                || jsonNode.isLong()
+                || jsonNode.isShort()
+                || jsonNode.isBigInteger()) {
+            current.addType("INTEGER");
+        } else if (jsonNode.isFloat()
+                || jsonNode.isDouble()
+                || jsonNode.isBigDecimal()) {
+            current.addType("DECIMAL");
+        } else {
+            current.addType("SCALAR");
+        }
+    }
+
+    public static String generateFlatJavaClass(JsonFieldNode root,
+                                               String packageName,
+                                               String className) {
+
+        StringBuilder sb = new StringBuilder();
+
+        if (packageName != null && !packageName.trim().isEmpty()) {
+            sb.append("package ").append(packageName).append(";\n\n");
+        }
+
+        sb.append("import java.math.BigDecimal;\n");
+        sb.append("import java.lang.annotation.ElementType;\n");
+        sb.append("import java.lang.annotation.Retention;\n");
+        sb.append("import java.lang.annotation.RetentionPolicy;\n");
+        sb.append("import java.lang.annotation.Target;\n\n");
+
+        sb.append("@Retention(RetentionPolicy.RUNTIME)\n");
+        sb.append("@Target(ElementType.FIELD)\n");
+        sb.append("@interface FieldName {\n");
+        sb.append("    String col();\n");
+        sb.append("}\n\n");
+
+        sb.append("public class ").append(className).append(" {\n\n");
+
+        generateFlatFields(sb, root, "", "");
+
+        sb.append("}\n");
+
+        return sb.toString();
+    }
+
+    private static void generateFlatFields(StringBuilder sb,
+                                           JsonFieldNode node,
+                                           String currentPath,
+                                           String javaPrefix) {
+
+        for (Map.Entry<String, JsonFieldNode> entry : node.getChildren().entrySet()) {
+
+            String fieldName = entry.getKey();
+            JsonFieldNode child = entry.getValue();
+
+            if ("[*]".equals(fieldName)) {
+                continue;
+            }
+
+            String newPath = currentPath.isEmpty()
+                    ? fieldName
+                    : currentPath + "." + fieldName;
+
+            String newJavaPrefix = javaPrefix.isEmpty()
+                    ? toJavaFieldName(fieldName)
+                    : javaPrefix + capitalize(toJavaFieldName(fieldName));
+
+            boolean isLeaf =
+                    !child.getTypes().contains("OBJECT")
+                            && !child.getTypes().contains("ARRAY");
+
+            if (isLeaf) {
+
+                String javaType = scalarType(child.getTypes());
+
+                sb.append("    @FieldName(col = \"")
+                        .append(escapeJava(newPath))
+                        .append("\")\n");
+
+                sb.append("    private ")
+                        .append(javaType)
+                        .append(" ")
+                        .append(newJavaPrefix)
+                        .append(";\n\n");
+
+            } else {
+                generateFlatFields(
+                        sb,
+                        child,
+                        newPath,
+                        newJavaPrefix
+                );
+            }
+        }
+    }
+
+    private static String scalarType(Set<String> types) {
+
+        int typeCount = 0;
+
+        if (types.contains("STRING")) typeCount++;
+        if (types.contains("BOOLEAN")) typeCount++;
+        if (types.contains("INTEGER")) typeCount++;
+        if (types.contains("DECIMAL")) typeCount++;
+        if (types.contains("SCALAR")) typeCount++;
+
+        if (typeCount > 1) {
+            return "Object";
+        }
+
+        if (types.contains("STRING")) {
+            return "String";
+        }
+
+        if (types.contains("BOOLEAN")) {
+            return "Boolean";
+        }
+
+        if (types.contains("INTEGER")) {
+            return "Long";
+        }
+
+        if (types.contains("DECIMAL")) {
+            return "BigDecimal";
+        }
+
+        return "Object";
+    }
+
+    private static String toJavaFieldName(String raw) {
+
+        if (raw == null || raw.trim().isEmpty()) {
+            return "field";
+        }
+
+        String cleaned = raw.replaceAll("[^a-zA-Z0-9_]", "_");
+
+        String[] parts = cleaned.split("_+");
+
+        StringBuilder sb = new StringBuilder();
+
+        for (int i = 0; i < parts.length; i++) {
+
+            if (parts[i] == null || parts[i].isEmpty()) {
+                continue;
+            }
+
+            if (sb.length() == 0) {
+                sb.append(parts[i].toLowerCase());
+            } else {
+                sb.append(capitalize(parts[i].toLowerCase()));
+            }
+        }
+
+        String result = sb.toString();
+
+        if (result.isEmpty()) {
+            result = "field";
+        }
+
+        if (Character.isDigit(result.charAt(0))) {
+            result = "field" + capitalize(result);
+        }
+
+        return result;
+    }
+
+    private static String capitalize(String s) {
+        if (s == null || s.isEmpty()) {
+            return s;
+        }
+
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    private static String escapeJava(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    static class JsonFieldNode {
+
+        private final String name;
+        private final Set<String> types = new LinkedHashSet<String>();
+        private final Map<String, JsonFieldNode> children =
+                new LinkedHashMap<String, JsonFieldNode>();
+
+        private long occurrences;
+
+        JsonFieldNode(String name) {
+            this.name = name;
+        }
+
+        public void incrementOccurrences() {
+            occurrences++;
+        }
+
+        public void addType(String type) {
+            types.add(type);
+        }
+
+        public Set<String> getTypes() {
+            return types;
+        }
+
+        public Map<String, JsonFieldNode> getChildren() {
+            return children;
+        }
+
+        public JsonFieldNode child(String childName) {
+
+            JsonFieldNode existing = children.get(childName);
+
+            if (existing == null) {
+                existing = new JsonFieldNode(childName);
+                children.put(childName, existing);
+            }
+
+            return existing;
+        }
+    }
+}
