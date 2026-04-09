@@ -1,0 +1,375 @@
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class JsonClassGeneratorMain {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    public static void main(String[] args) throws Exception {
+        Path inputFile = Path.of("C:/tmp/input.json");
+        Path outputFile = Path.of("C:/tmp/Root.java");
+
+        JsonFieldNode root = buildGlobalTreeFromJsonLines(inputFile);
+
+        String javaCode = generateJavaClass(root, "generated", "Root");
+
+        Files.write(outputFile, javaCode.getBytes(StandardCharsets.UTF_8));
+
+        System.out.println("Fichier généré : " + outputFile.toAbsolutePath());
+    }
+
+    public static JsonFieldNode buildGlobalTreeFromJsonLines(Path path) throws IOException {
+        JsonFieldNode root = new JsonFieldNode("ROOT");
+
+        try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            String line;
+            long lineNumber = 0;
+
+            while ((line = br.readLine()) != null) {
+                lineNumber++;
+                line = line.trim();
+
+                if (line.isEmpty()) {
+                    continue;
+                }
+
+                try {
+                    JsonNode json = MAPPER.readTree(line);
+                    visit(json, root);
+                } catch (Exception e) {
+                    System.err.println("JSON invalide ignoré ligne " + lineNumber + " : " + e.getMessage());
+                }
+            }
+        }
+
+        return root;
+    }
+
+    private static void visit(JsonNode jsonNode, JsonFieldNode current) {
+        if (jsonNode == null || jsonNode.isNull()) {
+            current.incrementOccurrences();
+            current.addType("NULL");
+            return;
+        }
+
+        if (jsonNode.isObject()) {
+            current.incrementOccurrences();
+            current.addType("OBJECT");
+
+            Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                JsonFieldNode child = current.child(entry.getKey());
+                visit(entry.getValue(), child);
+            }
+            return;
+        }
+
+        if (jsonNode.isArray()) {
+            current.incrementOccurrences();
+            current.addType("ARRAY");
+
+            JsonFieldNode itemNode = current.child("[*]");
+            for (JsonNode item : jsonNode) {
+                visit(item, itemNode);
+            }
+            return;
+        }
+
+        current.incrementOccurrences();
+
+        if (jsonNode.isTextual()) {
+            current.addType("STRING");
+        } else if (jsonNode.isBoolean()) {
+            current.addType("BOOLEAN");
+        } else if (jsonNode.isInt() || jsonNode.isLong() || jsonNode.isShort() || jsonNode.isBigInteger()) {
+            current.addType("INTEGER");
+        } else if (jsonNode.isFloat() || jsonNode.isDouble() || jsonNode.isBigDecimal()) {
+            current.addType("DECIMAL");
+        } else {
+            current.addType("SCALAR");
+        }
+    }
+
+    public static String generateJavaClass(JsonFieldNode root, String packageName, String rootClassName) {
+        StringBuilder sb = new StringBuilder();
+
+        if (packageName != null && !packageName.trim().isEmpty()) {
+            sb.append("package ").append(packageName).append(";\n\n");
+        }
+
+        sb.append("import java.util.List;\n");
+        sb.append("import java.math.BigDecimal;\n");
+        sb.append("import java.lang.annotation.ElementType;\n");
+        sb.append("import java.lang.annotation.Retention;\n");
+        sb.append("import java.lang.annotation.RetentionPolicy;\n");
+        sb.append("import java.lang.annotation.Target;\n\n");
+
+        sb.append("@Retention(RetentionPolicy.RUNTIME)\n");
+        sb.append("@Target(ElementType.FIELD)\n");
+        sb.append("@interface FieldName {\n");
+        sb.append("    String col();\n");
+        sb.append("}\n\n");
+
+        generateClass(sb, root, rootClassName, 0, true);
+
+        return sb.toString();
+    }
+
+    private static void generateClass(StringBuilder sb,
+                                      JsonFieldNode node,
+                                      String className,
+                                      int level,
+                                      boolean topLevel) {
+
+        String indent = repeat("    ", level);
+
+        if (topLevel) {
+            sb.append("public class ").append(className).append(" {\n\n");
+        } else {
+            sb.append(indent).append("public static class ").append(className).append(" {\n\n");
+        }
+
+        List<NestedClass> nestedClasses = new ArrayList<NestedClass>();
+
+        for (Map.Entry<String, JsonFieldNode> entry : node.getChildren().entrySet()) {
+            String fieldName = entry.getKey();
+            JsonFieldNode child = entry.getValue();
+
+            if ("[*]".equals(fieldName)) {
+                continue;
+            }
+
+            String javaFieldName = toJavaFieldName(fieldName);
+            String javaType = resolveType(fieldName, child, nestedClasses);
+
+            sb.append(indent)
+              .append("    @FieldName(col = \"")
+              .append(escapeJava(fieldName))
+              .append("\")\n");
+
+            sb.append(indent)
+              .append("    private ")
+              .append(javaType)
+              .append(" ")
+              .append(javaFieldName)
+              .append(";\n\n");
+        }
+
+        for (NestedClass nested : nestedClasses) {
+            generateClass(
+                    sb,
+                    nested.getNode(),
+                    nested.getClassName(),
+                    level + 1,
+                    false
+            );
+            sb.append("\n");
+        }
+
+        sb.append(indent).append("}\n");
+    }
+
+    private static String resolveType(String fieldName,
+                                      JsonFieldNode child,
+                                      List<NestedClass> nestedClasses) {
+
+        if (child.getTypes().contains("ARRAY")) {
+            JsonFieldNode itemNode = child.getChildren().get("[*]");
+
+            if (itemNode == null) {
+                return "List<Object>";
+            }
+
+            if (itemNode.getTypes().contains("OBJECT")) {
+                String nestedClassName = buildNestedClassName(fieldName, true);
+                nestedClasses.add(new NestedClass(nestedClassName, itemNode));
+                return "List<" + nestedClassName + ">";
+            }
+
+            return "List<" + scalarType(itemNode.getTypes()) + ">";
+        }
+
+        if (child.getTypes().contains("OBJECT")) {
+            String nestedClassName = buildNestedClassName(fieldName, false);
+            nestedClasses.add(new NestedClass(nestedClassName, child));
+            return nestedClassName;
+        }
+
+        return scalarType(child.getTypes());
+    }
+
+    private static String buildNestedClassName(String fieldName, boolean arrayItem) {
+        String base = capitalize(toJavaFieldName(fieldName));
+        return arrayItem ? base + "Item" : base;
+    }
+
+    private static String scalarType(Set<String> types) {
+        boolean hasString = types.contains("STRING");
+        boolean hasBoolean = types.contains("BOOLEAN");
+        boolean hasDecimal = types.contains("DECIMAL");
+        boolean hasInteger = types.contains("INTEGER");
+        boolean hasScalar = types.contains("SCALAR");
+
+        int nonNullTypeCount = 0;
+        if (hasString) nonNullTypeCount++;
+        if (hasBoolean) nonNullTypeCount++;
+        if (hasDecimal) nonNullTypeCount++;
+        if (hasInteger) nonNullTypeCount++;
+        if (hasScalar) nonNullTypeCount++;
+
+        if (nonNullTypeCount > 1) {
+            return "Object";
+        }
+
+        if (hasString) {
+            return "String";
+        }
+        if (hasBoolean) {
+            return "Boolean";
+        }
+        if (hasDecimal) {
+            return "BigDecimal";
+        }
+        if (hasInteger) {
+            return "Long";
+        }
+
+        return "Object";
+    }
+
+    private static String toJavaFieldName(String raw) {
+        if (raw == null || raw.trim().isEmpty()) {
+            return "field";
+        }
+
+        String cleaned = raw.replaceAll("[^a-zA-Z0-9_]", "_");
+        String[] parts = cleaned.split("_+");
+
+        List<String> validParts = new ArrayList<String>();
+        for (String part : parts) {
+            if (part != null && !part.isEmpty()) {
+                validParts.add(part);
+            }
+        }
+
+        if (validParts.isEmpty()) {
+            return "field";
+        }
+
+        StringBuilder sb = new StringBuilder(validParts.get(0).toLowerCase());
+
+        for (int i = 1; i < validParts.size(); i++) {
+            sb.append(capitalize(validParts.get(i).toLowerCase()));
+        }
+
+        String result = sb.toString();
+
+        if (result.isEmpty()) {
+            result = "field";
+        }
+
+        if (Character.isDigit(result.charAt(0))) {
+            result = "field" + capitalize(result);
+        }
+
+        return result;
+    }
+
+    private static String capitalize(String s) {
+        if (s == null || s.isEmpty()) {
+            return s;
+        }
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    private static String repeat(String s, int count) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            sb.append(s);
+        }
+        return sb.toString();
+    }
+
+    private static String escapeJava(String s) {
+        if (s == null) {
+            return null;
+        }
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    static class NestedClass {
+        private final String className;
+        private final JsonFieldNode node;
+
+        NestedClass(String className, JsonFieldNode node) {
+            this.className = className;
+            this.node = node;
+        }
+
+        public String getClassName() {
+            return className;
+        }
+
+        public JsonFieldNode getNode() {
+            return node;
+        }
+    }
+
+    static class JsonFieldNode {
+        private final String name;
+        private final Set<String> types = new LinkedHashSet<String>();
+        private final Map<String, JsonFieldNode> children = new LinkedHashMap<String, JsonFieldNode>();
+        private long occurrences;
+
+        JsonFieldNode(String name) {
+            this.name = name;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public Set<String> getTypes() {
+            return types;
+        }
+
+        public Map<String, JsonFieldNode> getChildren() {
+            return children;
+        }
+
+        public long getOccurrences() {
+            return occurrences;
+        }
+
+        public void incrementOccurrences() {
+            occurrences++;
+        }
+
+        public void addType(String type) {
+            types.add(type);
+        }
+
+        public JsonFieldNode child(String childName) {
+            JsonFieldNode existing = children.get(childName);
+            if (existing == null) {
+                existing = new JsonFieldNode(childName);
+                children.put(childName, existing);
+            }
+            return existing;
+        }
+    }
+}
