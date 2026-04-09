@@ -1,0 +1,57 @@
+private static void generateClass(StringBuilder sb,
+                                  JsonFieldNode node,
+                                  String className,
+                                  int level,
+                                  boolean topLevel) {
+
+    String indent = repeat("    ", level);
+
+    if (topLevel) {
+        sb.append("public class ").append(className).append(" {\n\n");
+    } else {
+        sb.append(indent)
+          .append("public static class ")
+          .append(className)
+          .append(" {\n\n");
+    }
+
+    List<NestedClass> nestedClasses = new ArrayList<NestedClass>();
+
+    for (Map.Entry<String, JsonFieldNode> entry : node.getChildren().entrySet()) {
+        String fieldName = entry.getKey();
+        JsonFieldNode child = entry.getValue();
+
+        if ("[*]".equals(fieldName)) {
+            continue;
+        }
+
+        String javaField = toJavaFieldName(fieldName);
+        String javaType = resolveType(fieldName, child, nestedClasses);
+
+        sb.append(indent)
+          .append("    @FieldName(col = \"")
+          .append(escapeJava(fieldName))
+          .append("\")\n");
+
+        sb.append(indent)
+          .append("    private ")
+          .append(javaType)
+          .append(" ")
+          .append(javaField)
+          .append(";\n\n");
+    }
+
+    // classes imbriquées
+    for (NestedClass nested : nestedClasses) {
+        generateClass(
+                sb,
+                nested.getNode(),
+                nested.getClassName(),
+                level + 1,
+                false
+        );
+        sb.append("\n");
+    }
+
+    sb.append(indent).append("}\n");
+}
