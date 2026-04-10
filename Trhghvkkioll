@@ -1,0 +1,301 @@
+Parfait 👍
+Je te mets le code complet final, prêt à utiliser avec :
+source Apache Spark Parquet
+colonne JSON string
+scan des 20M lignes
+schéma complet distribué
+génération Java imbriquée
+Lombok
+java.sql.Date
+java.sql.Timestamp
+BigDecimal
+Je te mets tout propre de bout en bout.
+1) Annotation
+Java
+package com.example.generator;
+
+import java.lang.annotation.*;
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+public @interface JsonFieldName {
+    String value();
+}
+2) Arbre de schéma
+Java
+package com.example.generator;
+
+import lombok.Data;
+import java.util.ArrayList;
+import java.util.List;
+
+@Data
+public class JsonNodeSchema {
+
+    private String fieldName;
+    private String javaType;
+    private boolean object;
+
+    private List<JsonNodeSchema> children = new ArrayList<>();
+
+    public JsonNodeSchema(String fieldName, String javaType, boolean object) {
+        this.fieldName = fieldName;
+        this.javaType = javaType;
+        this.object = object;
+    }
+
+    public void addChild(JsonNodeSchema child) {
+        children.add(child);
+    }
+}
+3) Conversion StructType Spark → arbre Java
+Java
+package com.example.generator;
+
+import org.apache.spark.sql.types.*;
+
+public class SparkSchemaToJava {
+
+    public static JsonNodeSchema convert(
+            StructType schema,
+            String rootName
+    ) {
+        JsonNodeSchema root =
+                new JsonNodeSchema(rootName, null, true);
+
+        for (StructField field : schema.fields()) {
+
+            DataType dt = field.dataType();
+
+            if (dt instanceof StructType) {
+
+                JsonNodeSchema child =
+                        convert((StructType) dt, field.name());
+
+                root.addChild(child);
+
+            } else if (dt instanceof ArrayType) {
+
+                root.addChild(
+                        new JsonNodeSchema(
+                                field.name(),
+                                mapArrayType((ArrayType) dt),
+                                false
+                        )
+                );
+
+            } else {
+
+                root.addChild(
+                        new JsonNodeSchema(
+                                field.name(),
+                                mapSparkType(dt),
+                                false
+                        )
+                );
+            }
+        }
+
+        return root;
+    }
+
+    private static String mapArrayType(ArrayType arrayType) {
+        DataType elementType = arrayType.elementType();
+
+        if (elementType instanceof StringType) {
+            return "LIST_STRING";
+        }
+
+        if (elementType instanceof LongType) {
+            return "LIST_LONG";
+        }
+
+        if (elementType instanceof DecimalType) {
+            return "LIST_DECIMAL";
+        }
+
+        return "LIST_OBJECT";
+    }
+
+    private static String mapSparkType(DataType dt) {
+
+        if (dt instanceof StringType) return "STRING";
+        if (dt instanceof IntegerType) return "INTEGER";
+        if (dt instanceof LongType) return "LONG";
+        if (dt instanceof DoubleType) return "DOUBLE";
+        if (dt instanceof FloatType) return "FLOAT";
+        if (dt instanceof DecimalType) return "DECIMAL";
+        if (dt instanceof BooleanType) return "BOOLEAN";
+        if (dt instanceof DateType) return "DATE";
+        if (dt instanceof TimestampType) return "TIMESTAMP";
+
+        return "OBJECT";
+    }
+}
+4) Générateur Java complet
+Java
+package com.example.generator;
+
+public class JavaClassGenerator {
+
+    public static String generate(
+            JsonNodeSchema root,
+            String className
+    ) {
+        StringBuilder sb = new StringBuilder();
+
+        appendImports(sb);
+
+        generateClass(sb, root, className, 0);
+
+        return sb.toString();
+    }
+
+    private static void appendImports(StringBuilder sb) {
+        sb.append("import lombok.Data;\n");
+        sb.append("import lombok.NoArgsConstructor;\n");
+        sb.append("import lombok.AllArgsConstructor;\n");
+        sb.append("import java.math.BigDecimal;\n");
+        sb.append("import java.sql.Date;\n");
+        sb.append("import java.sql.Timestamp;\n");
+        sb.append("import java.util.List;\n\n");
+    }
+
+    private static void generateClass(
+            StringBuilder sb,
+            JsonNodeSchema node,
+            String className,
+            int level
+    ) {
+        String indent = "    ".repeat(level);
+
+        sb.append(indent).append("@Data\n");
+        sb.append(indent).append("@NoArgsConstructor\n");
+        sb.append(indent).append("@AllArgsConstructor\n");
+
+        sb.append(indent)
+          .append(level == 0
+                  ? "public class "
+                  : "public static class ")
+          .append(className)
+          .append(" {\n\n");
+
+        for (JsonNodeSchema child : node.getChildren()) {
+
+            String fieldIndent = "    ".repeat(level + 1);
+
+            sb.append(fieldIndent)
+              .append("@JsonFieldName(\"")
+              .append(child.getFieldName())
+              .append("\")\n");
+
+            sb.append(fieldIndent)
+              .append("private ")
+              .append(resolveJavaType(child))
+              .append(" ")
+              .append(toFieldName(child.getFieldName()))
+              .append(";\n\n");
+        }
+
+        for (JsonNodeSchema child : node.getChildren()) {
+            if (child.isObject()) {
+                generateClass(
+                        sb,
+                        child,
+                        toClassName(child.getFieldName()),
+                        level + 1
+                );
+                sb.append("\n");
+            }
+        }
+
+        sb.append(indent).append("}\n");
+    }
+
+    private static String resolveJavaType(JsonNodeSchema node) {
+
+        if (node.isObject()) {
+            return toClassName(node.getFieldName());
+        }
+
+        switch (node.getJavaType()) {
+            case "STRING":
+                return "String";
+            case "INTEGER":
+                return "Integer";
+            case "LONG":
+                return "Long";
+            case "DOUBLE":
+                return "Double";
+            case "FLOAT":
+                return "Float";
+            case "DECIMAL":
+                return "BigDecimal";
+            case "BOOLEAN":
+                return "Boolean";
+            case "DATE":
+                return "Date";
+            case "TIMESTAMP":
+                return "Timestamp";
+            case "LIST_STRING":
+                return "List<String>";
+            case "LIST_LONG":
+                return "List<Long>";
+            case "LIST_DECIMAL":
+                return "List<BigDecimal>";
+            default:
+                return "Object";
+        }
+    }
+
+    private static String toClassName(String name) {
+        return Character.toUpperCase(name.charAt(0))
+                + name.substring(1);
+    }
+
+    private static String toFieldName(String name) {
+        return Character.toLowerCase(name.charAt(0))
+                + name.substring(1);
+    }
+}
+5) Main complet depuis parquet
+Java
+package com.example.generator;
+
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.StructType;
+
+public class JsonClassGeneratorMain {
+
+    public static void main(String[] args) {
+
+        SparkSession spark = SparkSession.builder()
+                .appName("json-class-generator")
+                .master("local[*]")
+                .getOrCreate();
+
+        Dataset<Row> parquetDf =
+                spark.read().parquet("input.parquet");
+
+        Dataset<String> jsonDs =
+                parquetDf.select("payload")
+                        .as(Encoders.STRING());
+
+        Dataset<Row> parsedDf =
+                spark.read().json(jsonDs);
+
+        StructType schema = parsedDf.schema();
+
+        JsonNodeSchema javaSchema =
+                SparkSchemaToJava.convert(schema, "Root");
+
+        String code =
+                JavaClassGenerator.generate(javaSchema, "Root");
+
+        System.out.println(code);
+
+        spark.stop();
+    }
+}
+Ça c’est la version industrielle finale.
+Tu peux lancer ça directement dans IntelliJ IDEA sur ton parquet.
