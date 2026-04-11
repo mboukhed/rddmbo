@@ -1,0 +1,203 @@
+Oui.
+SparkStructFlattener.java
+Java
+package com.example.spark;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.col;
+
+public final class SparkStructFlattener {
+
+    private static final String SEP = "__";
+
+    private SparkStructFlattener() {
+    }
+
+    public static Dataset<Row> flattenStructColumn(
+            Dataset<Row> df,
+            String structColumnName
+    ) {
+        DataType dataType = df.schema().apply(structColumnName).dataType();
+
+        if (!(dataType instanceof StructType)) {
+            throw new IllegalArgumentException(
+                    "Column [" + structColumnName + "] is not struct. Actual type = "
+                            + dataType.simpleString()
+            );
+        }
+
+        List<Column> columns = new ArrayList<>();
+
+        for (String columnName : df.columns()) {
+            if (!structColumnName.equals(columnName)) {
+                columns.add(col(escape(columnName)));
+            }
+        }
+
+        columns.addAll(
+                flattenColumns(
+                        escape(structColumnName),
+                        (StructType) dataType,
+                        sanitize(structColumnName)
+                )
+        );
+
+        return df.select(columns.toArray(new Column[0]));
+    }
+
+    public static Dataset<Row> flattenAllStructColumns(Dataset<Row> df) {
+        List<Column> columns = new ArrayList<>();
+
+        for (StructField field : df.schema().fields()) {
+            String fieldName = field.name();
+            DataType fieldType = field.dataType();
+
+            if (fieldType instanceof StructType) {
+                columns.addAll(
+                        flattenColumns(
+                                escape(fieldName),
+                                (StructType) fieldType,
+                                sanitize(fieldName)
+                        )
+                );
+            } else {
+                columns.add(col(escape(fieldName)));
+            }
+        }
+
+        return df.select(columns.toArray(new Column[0]));
+    }
+
+    private static List<Column> flattenColumns(
+            String fullPath,
+            StructType structType,
+            String aliasPrefix
+    ) {
+        List<Column> result = new ArrayList<>();
+
+        for (StructField field : structType.fields()) {
+            String fieldName = field.name();
+            DataType fieldType = field.dataType();
+
+            String childPath = fullPath + "." + escape(fieldName);
+            String childAlias = aliasPrefix + SEP + sanitize(fieldName);
+
+            if (fieldType instanceof StructType) {
+                result.addAll(
+                        flattenColumns(
+                                childPath,
+                                (StructType) fieldType,
+                                childAlias
+                        )
+                );
+            } else if (fieldType instanceof ArrayType) {
+                result.add(col(childPath).alias(childAlias));
+            } else if (fieldType instanceof MapType) {
+                result.add(col(childPath).alias(childAlias));
+            } else {
+                result.add(col(childPath).alias(childAlias));
+            }
+        }
+
+        return result;
+    }
+
+    private static String sanitize(String name) {
+        return name.replace(".", SEP);
+    }
+
+    private static String escape(String name) {
+        return "`" + name.replace("`", "``") + "`";
+    }
+}
+JsonColumnParser.java
+Java
+package com.example.spark;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.StructType;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.from_json;
+import static org.apache.spark.sql.functions.regexp_replace;
+
+public final class JsonColumnParser {
+
+    private JsonColumnParser() {
+    }
+
+    public static Dataset<Row> parseJsonColumn(
+            SparkSession spark,
+            Dataset<Row> df,
+            String jsonColumnName,
+            String parsedColumnName
+    ) {
+        Dataset<Row> cleanedDf = df.withColumn(
+                "__json_cleaned",
+                regexp_replace(
+                        regexp_replace(col(jsonColumnName).cast("string"), "^\"|\"$", ""),
+                        "\\\\\"",
+                        "\""
+                )
+        );
+
+        Dataset<String> jsonDs = cleanedDf
+                .select(col("__json_cleaned"))
+                .where(col("__json_cleaned").isNotNull())
+                .as(Encoders.STRING());
+
+        StructType jsonSchema = spark.read().json(jsonDs).schema();
+
+        return cleanedDf
+                .withColumn(
+                        parsedColumnName,
+                        from_json(col("__json_cleaned"), jsonSchema)
+                )
+                .drop("__json_cleaned");
+    }
+}
+Utilisation
+Cas 1 : parser une colonne JSON puis tout aplatir
+Java
+Dataset<Row> parsedDf = JsonColumnParser.parseJsonColumn(
+        spark,
+        df,
+        "json_column",
+        "json_struct"
+);
+
+Dataset<Row> flatDf = SparkStructFlattener.flattenAllStructColumns(parsedDf);
+Cas 2 : si plusieurs colonnes struct existent déjà
+Java
+Dataset<Row> flatDf = SparkStructFlattener.flattenAllStructColumns(df);
+Cas 3 : virer la colonne JSON brute
+Java
+Dataset<Row> parsedDf = JsonColumnParser.parseJsonColumn(
+        spark,
+        df,
+        "json_column",
+        "json_struct"
+);
+
+Dataset<Row> flatDf = SparkStructFlattener.flattenAllStructColumns(
+        parsedDf.drop("json_column")
+);
+Résultat :
+tous les struct sont aplatis récursivement
+les array et map restent en colonnes complexes
+les noms avec . sont protégés
+les alias remplacent . par 
