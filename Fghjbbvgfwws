@@ -1,0 +1,206 @@
+Oui 👍
+Je te remets le code complet final, propre, qui couvre :
+colonne pouvant contenir null, vide, string simple ou vrai JSON
+schémas différents selon les lignes
+champs présents / absents → valeur ou null
+flatten uniquement sur la colonne choisie
+objets imbriqués à N niveaux
+listes et maps conservées
+renommage avec __
+JsonColumnParser.java
+Java
+package com.example.spark;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.StructType;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.from_json;
+import static org.apache.spark.sql.functions.length;
+import static org.apache.spark.sql.functions.lit;
+import static org.apache.spark.sql.functions.regexp_replace;
+import static org.apache.spark.sql.functions.trim;
+import static org.apache.spark.sql.functions.when;
+
+public final class JsonColumnParser {
+
+    private JsonColumnParser() {
+    }
+
+    public static Dataset<Row> parseJsonColumn(
+            SparkSession spark,
+            Dataset<Row> df,
+            String jsonColumnName,
+            String parsedColumnName
+    ) {
+        Dataset<Row> preparedDf = df
+                .withColumn("__raw_json", col(jsonColumnName).cast("string"))
+                .withColumn(
+                        "__json_cleaned",
+                        regexp_replace(
+                                regexp_replace(col("__raw_json"), "^\"|\"$", ""),
+                                "\\\\\"",
+                                "\""
+                        )
+                )
+                .withColumn(
+                        "__json_candidate",
+                        when(
+                                col("__json_cleaned").isNull()
+                                        .or(length(trim(col("__json_cleaned"))).equalTo(0)),
+                                lit(null)
+                        ).when(
+                                trim(col("__json_cleaned")).rlike("^\\{.*\\}$|^\\[.*\\]$"),
+                                trim(col("__json_cleaned"))
+                        ).otherwise(lit(null))
+                );
+
+        Dataset<String> jsonDs = preparedDf
+                .select(col("__json_candidate"))
+                .where(col("__json_candidate").isNotNull())
+                .as(Encoders.STRING());
+
+        StructType jsonSchema = spark.read().json(jsonDs).schema();
+
+        return preparedDf
+                .withColumn(
+                        parsedColumnName,
+                        from_json(col("__json_candidate"), jsonSchema)
+                )
+                .drop("__raw_json", "__json_cleaned", "__json_candidate");
+    }
+}
+SparkStructFlattener.java
+Java
+package com.example.spark;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.col;
+
+public final class SparkStructFlattener {
+
+    private static final String SEP = "__";
+
+    private SparkStructFlattener() {
+    }
+
+    public static Dataset<Row> flattenStructColumn(
+            Dataset<Row> df,
+            String structColumnName
+    ) {
+        DataType dataType = df.schema().apply(structColumnName).dataType();
+
+        if (!(dataType instanceof StructType)) {
+            throw new IllegalArgumentException(
+                    "Column [" + structColumnName + "] is not struct. Actual type = "
+                            + dataType.simpleString()
+            );
+        }
+
+        List<Column> columns = new ArrayList<>();
+
+        for (String columnName : df.columns()) {
+            if (!structColumnName.equals(columnName)) {
+                columns.add(col(escape(columnName)));
+            }
+        }
+
+        columns.addAll(
+                flattenColumns(
+                        escape(structColumnName),
+                        (StructType) dataType,
+                        sanitize(structColumnName)
+                )
+        );
+
+        return df.select(columns.toArray(new Column[0]));
+    }
+
+    private static List<Column> flattenColumns(
+            String fullPath,
+            StructType structType,
+            String aliasPrefix
+    ) {
+        List<Column> result = new ArrayList<>();
+
+        for (StructField field : structType.fields()) {
+            String fieldName = field.name();
+            DataType fieldType = field.dataType();
+
+            String childPath = fullPath + "." + escape(fieldName);
+            String childAlias = aliasPrefix + SEP + sanitize(fieldName);
+
+            if (fieldType instanceof StructType) {
+                result.addAll(
+                        flattenColumns(
+                                childPath,
+                                (StructType) fieldType,
+                                childAlias
+                        )
+                );
+            } else if (fieldType instanceof ArrayType) {
+                result.add(col(childPath).alias(childAlias));
+            } else if (fieldType instanceof MapType) {
+                result.add(col(childPath).alias(childAlias));
+            } else {
+                result.add(col(childPath).alias(childAlias));
+            }
+        }
+
+        return result;
+    }
+
+    private static String sanitize(String name) {
+        return name.replace(".", SEP);
+    }
+
+    private static String escape(String name) {
+        return "`" + name.replace("`", "``") + "`";
+    }
+}
+Utilisation
+Java
+Dataset<Row> parsedDf = JsonColumnParser.parseJsonColumn(
+        spark,
+        df,
+        "json_column",
+        "json_struct"
+);
+
+Dataset<Row> resultDf = SparkStructFlattener.flattenStructColumn(
+        parsedDf,
+        "json_struct"
+);
+Résultat attendu
+Input
+Plain text
+ligne1 -> {"a":{"b":1,"c":"x"}}
+ligne2 -> {"a":{"b":2}}
+ligne3 -> ABC
+ligne4 -> null
+Output
+Plain text
+json_column
+json_struct__a__b
+json_struct__a__c
+Valeurs :
+Plain text
+1 | x
+2 | null
+null | null
+null | null
+C’est la version finale propre.
