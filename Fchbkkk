@@ -1,0 +1,206 @@
+Oui.
+Voici la version complète et générique, qui gère :
+objets imbriqués à N niveaux
+listes simples
+listes d’objets
+listes imbriquées
+map
+autres colonnes conservées
+flatten des struct seulement
+colonnes renommées avec __
+JsonColumnParser.java
+Java
+package com.example.spark;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.StructType;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.from_json;
+import static org.apache.spark.sql.functions.regexp_replace;
+
+public final class JsonColumnParser {
+
+    private JsonColumnParser() {
+    }
+
+    public static Dataset<Row> parseJsonColumn(
+            SparkSession spark,
+            Dataset<Row> df,
+            String jsonColumnName,
+            String parsedColumnName
+    ) {
+        Dataset<Row> cleanedDf = df.withColumn(
+                "__json_cleaned",
+                regexp_replace(
+                        regexp_replace(col(jsonColumnName).cast("string"), "^\"|\"$", ""),
+                        "\\\\\"",
+                        "\""
+                )
+        );
+
+        Dataset<String> jsonDs = cleanedDf
+                .select(col("__json_cleaned"))
+                .where(col("__json_cleaned").isNotNull())
+                .as(Encoders.STRING());
+
+        StructType jsonSchema = spark.read().json(jsonDs).schema();
+
+        return cleanedDf
+                .withColumn(
+                        parsedColumnName,
+                        from_json(col("__json_cleaned"), jsonSchema)
+                )
+                .drop("__json_cleaned");
+    }
+}
+SparkStructFlattener.java
+Java
+package com.example.spark;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.col;
+
+public final class SparkStructFlattener {
+
+    private static final String SEP = "__";
+
+    private SparkStructFlattener() {
+    }
+
+    public static Dataset<Row> flattenStructColumn(
+            Dataset<Row> df,
+            String structColumnName
+    ) {
+        DataType dataType = df.schema().apply(structColumnName).dataType();
+
+        if (!(dataType instanceof StructType)) {
+            throw new IllegalArgumentException(
+                    "Column [" + structColumnName + "] is not struct. Actual type = "
+                            + dataType.simpleString()
+            );
+        }
+
+        List<Column> columns = new ArrayList<>();
+
+        for (String columnName : df.columns()) {
+            if (!structColumnName.equals(columnName)) {
+                columns.add(col(columnName));
+            }
+        }
+
+        columns.addAll(
+                flattenColumns(
+                        structColumnName,
+                        (StructType) dataType,
+                        structColumnName
+                )
+        );
+
+        return df.select(columns.toArray(new Column[0]));
+    }
+
+    private static List<Column> flattenColumns(
+            String fullPath,
+            StructType structType,
+            String aliasPrefix
+    ) {
+        List<Column> result = new ArrayList<>();
+
+        for (StructField field : structType.fields()) {
+            String fieldName = field.name();
+            DataType fieldType = field.dataType();
+
+            String childPath = fullPath + "." + fieldName;
+            String childAlias = aliasPrefix + SEP + fieldName;
+
+            if (fieldType instanceof StructType) {
+                result.addAll(
+                        flattenColumns(
+                                childPath,
+                                (StructType) fieldType,
+                                childAlias
+                        )
+                );
+            } else if (fieldType instanceof ArrayType) {
+                result.add(col(childPath).alias(childAlias));
+            } else if (fieldType instanceof MapType) {
+                result.add(col(childPath).alias(childAlias));
+            } else {
+                result.add(col(childPath).alias(childAlias));
+            }
+        }
+
+        return result;
+    }
+}
+Utilisation
+Java
+Dataset<Row> parsedDf = JsonColumnParser.parseJsonColumn(
+        spark,
+        df,
+        "json_column",
+        "json_struct"
+);
+
+Dataset<Row> flatDf = SparkStructFlattener.flattenStructColumn(
+        parsedDf,
+        "json_struct"
+);
+
+flatDf.printSchema();
+flatDf.show(false);
+Ce que ça donne
+Si ton JSON contient :
+JSON
+{
+  "id": 1,
+  "a": {
+    "b": {
+      "names": ["x", "y"],
+      "orders": [
+        {
+          "id": 10,
+          "amount": 12.5
+        }
+      ],
+      "matrix": [[1,2],[3,4]],
+      "attrs": {
+        "k1": "v1",
+        "k2": "v2"
+      },
+      "c": {
+        "flag": true
+      }
+    }
+  }
+}
+tu obtiens des colonnes comme :
+Plain text
+json_struct__id
+json_struct__a__b__names
+json_struct__a__b__orders
+json_struct__a__b__matrix
+json_struct__a__b__attrs
+json_struct__a__b__c__flag
+Donc :
+struct → aplati récursivement
+array<primitive> → gardé
+array<struct> → gardé
+array<array<...>> → gardé
+map → gardé
+Si tu veux, je peux maintenant te donner la version qui génère en plus la classe Java de mapping à partir du schéma de json_struct.
