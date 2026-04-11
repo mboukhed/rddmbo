@@ -1,0 +1,261 @@
+Oui.
+Règle :
+si colonne = null / vide / string simple → on laisse la ligne telle quelle
+si colonne = JSON objet avec clés dynamiques → on duplique la ligne
+ajoute main_computed_data_id
+flatten la valeur de chaque clé
+Code
+Java
+package com.example.spark;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.spark.api.java.function.FlatMapFunction;
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.explode_outer;
+import static org.apache.spark.sql.functions.from_json;
+import static org.apache.spark.sql.functions.length;
+import static org.apache.spark.sql.functions.lit;
+import static org.apache.spark.sql.functions.map_entries;
+import static org.apache.spark.sql.functions.regexp_replace;
+import static org.apache.spark.sql.functions.trim;
+import static org.apache.spark.sql.functions.when;
+
+public final class JsonDynamicKeyTransformer {
+
+    private JsonDynamicKeyTransformer() {
+    }
+
+    public static Dataset<Row> transformDynamicObjectColumn(
+            SparkSession spark,
+            Dataset<Row> df,
+            String sourceColumnName
+    ) {
+        String rawCol = "__raw_json";
+        String cleanedCol = "__json_cleaned";
+        String candidateCol = "__json_candidate";
+        String mapCol = "__json_map";
+        String entryCol = "__json_entry";
+        String valueStructCol = "__json_value_struct";
+        String idCol = sourceColumnName + "_id";
+
+        Dataset<Row> preparedDf = df
+                .withColumn(rawCol, col(sourceColumnName).cast("string"))
+                .withColumn(
+                        cleanedCol,
+                        regexp_replace(
+                                regexp_replace(col(rawCol), "^\"|\"$", ""),
+                                "\\\\\"",
+                                "\""
+                        )
+                )
+                .withColumn(
+                        candidateCol,
+                        when(
+                                col(cleanedCol).isNull()
+                                        .or(length(trim(col(cleanedCol))).equalTo(0)),
+                                lit(null)
+                        ).when(
+                                trim(col(cleanedCol)).rlike("^\\{.*\\}$"),
+                                trim(col(cleanedCol))
+                        ).otherwise(lit(null))
+                );
+
+        StructType valueSchema = inferDynamicValueSchema(
+                spark,
+                preparedDf.select(candidateCol).as(Encoders.STRING())
+        );
+
+        MapType mapType = DataTypes.createMapType(
+                DataTypes.StringType,
+                valueSchema,
+                true
+        );
+
+        Dataset<Row> explodedJsonDf = preparedDf
+                .withColumn(mapCol, from_json(col(candidateCol), mapType))
+                .withColumn(entryCol, explode_outer(map_entries(col(mapCol))))
+                .withColumn(idCol, col(entryCol + ".key"))
+                .withColumn(valueStructCol, col(entryCol + ".value"));
+
+        Dataset<Row> flattenedJsonDf = SparkStructFlattener.flattenStructColumnWithAliasPrefix(
+                explodedJsonDf,
+                valueStructCol,
+                sourceColumnName
+        ).drop(mapCol, entryCol, valueStructCol, rawCol, cleanedCol, candidateCol);
+
+        Dataset<Row> untouchedDf = preparedDf
+                .filter(col(candidateCol).isNull())
+                .withColumn(idCol, lit(null).cast("string"))
+                .drop(rawCol, cleanedCol, candidateCol);
+
+        return untouchedDf.unionByName(flattenedJsonDf, true);
+    }
+
+    private static StructType inferDynamicValueSchema(
+            SparkSession spark,
+            Dataset<String> jsonCandidates
+    ) {
+        Dataset<String> valueJsonDs = jsonCandidates.flatMap(
+                (FlatMapFunction<String, String>) json -> {
+                    List<String> out = new ArrayList<>();
+
+                    if (json == null || json.trim().isEmpty()) {
+                        return out.iterator();
+                    }
+
+                    ObjectMapper mapper = new ObjectMapper();
+                    JsonNode root;
+
+                    try {
+                        root = mapper.readTree(json);
+                    } catch (Exception e) {
+                        return out.iterator();
+                    }
+
+                    if (root == null || !root.isObject()) {
+                        return out.iterator();
+                    }
+
+                    root.fields().forEachRemaining(entry -> {
+                        JsonNode value = entry.getValue();
+                        if (value != null && value.isObject()) {
+                            out.add(value.toString());
+                        }
+                    });
+
+                    return out.iterator();
+                },
+                Encoders.STRING()
+        );
+
+        return spark.read().json(valueJsonDs).schema();
+    }
+}
+Java
+package com.example.spark;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.col;
+
+public final class SparkStructFlattener {
+
+    private static final String SEP = "__";
+
+    private SparkStructFlattener() {
+    }
+
+    public static Dataset<Row> flattenStructColumnWithAliasPrefix(
+            Dataset<Row> df,
+            String structColumnName,
+            String aliasPrefix
+    ) {
+        DataType dataType = df.schema().apply(structColumnName).dataType();
+
+        if (!(dataType instanceof StructType)) {
+            throw new IllegalArgumentException(
+                    "Column [" + structColumnName + "] is not struct. Actual type = "
+                            + dataType.simpleString()
+            );
+        }
+
+        List<Column> columns = new ArrayList<>();
+
+        for (String columnName : df.columns()) {
+            if (!structColumnName.equals(columnName)) {
+                columns.add(col(escape(columnName)));
+            }
+        }
+
+        columns.addAll(
+                flattenColumns(
+                        escape(structColumnName),
+                        (StructType) dataType,
+                        sanitize(aliasPrefix)
+                )
+        );
+
+        return df.select(columns.toArray(new Column[0]));
+    }
+
+    private static List<Column> flattenColumns(
+            String fullPath,
+            StructType structType,
+            String aliasPrefix
+    ) {
+        List<Column> result = new ArrayList<>();
+
+        for (StructField field : structType.fields()) {
+            String fieldName = field.name();
+            DataType fieldType = field.dataType();
+
+            String childPath = fullPath + "." + escape(fieldName);
+            String childAlias = aliasPrefix + SEP + sanitize(fieldName);
+
+            if (fieldType instanceof StructType) {
+                result.addAll(
+                        flattenColumns(
+                                childPath,
+                                (StructType) fieldType,
+                                childAlias
+                        )
+                );
+            } else if (fieldType instanceof ArrayType) {
+                result.add(col(childPath).alias(childAlias));
+            } else if (fieldType instanceof MapType) {
+                result.add(col(childPath).alias(childAlias));
+            } else {
+                result.add(col(childPath).alias(childAlias));
+            }
+        }
+
+        return result;
+    }
+
+    private static String sanitize(String name) {
+        return name.replace(".", SEP);
+    }
+
+    private static String escape(String name) {
+        return "`" + name.replace("`", "``") + "`";
+    }
+}
+Utilisation
+Java
+Dataset<Row> resultDf = JsonDynamicKeyTransformer.transformDynamicObjectColumn(
+        spark,
+        df,
+        "main_computed_data"
+);
+Comportement
+Si main_computed_data = null
+→ ligne conservée, main_computed_data_id = null
+Si main_computed_data = "ABC"
+→ ligne conservée, main_computed_data_id = null
+Si main_computed_data = {"Toto":{"amount":123.45},"Tata":{"amount":17.9,"Type":"toto"}}
+→ 2 lignes :
+main_computed_data_id = Toto
+main_computed_data_id = Tata
+et colonnes :
+main_computed_data__amount
+main_computed_data__Type
+Si tu veux, je te fais la version qui gère aussi le cas où la valeur de Toto est parfois un string et parfois un objet.
