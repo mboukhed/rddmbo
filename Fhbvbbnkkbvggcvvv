@@ -1,0 +1,120 @@
+package com.sgcib.datalab.equity.helper;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.spark.api.java.function.FlatMapFunction;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.catalyst.encoders.RowEncoder;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+public final class DynamicTopLevelJsonColumnExploder {
+
+    private DynamicTopLevelJsonColumnExploder() {
+    }
+
+    public static Dataset<Row> explodeTopLevelObjectColumn(
+            Dataset<Row> df,
+            String sourceColumnName
+    ) {
+        String idColumnName = sourceColumnName + "_id";
+        StructType outputSchema = buildOutputSchema(df.schema(), idColumnName);
+
+        return df.flatMap((FlatMapFunction<Row, Row>) row -> {
+            List<Row> out = new ArrayList<>();
+            Object rawValue = row.getAs(sourceColumnName);
+
+            if (rawValue == null) {
+                out.add(copyRow(row, sourceColumnName, null, idColumnName, null));
+                return out.iterator();
+            }
+
+            String text = rawValue.toString();
+
+            if (text.trim().isEmpty()) {
+                out.add(copyRow(row, sourceColumnName, text, idColumnName, null));
+                return out.iterator();
+            }
+
+            JsonNode root;
+            try {
+                root = new ObjectMapper().readTree(text);
+            } catch (Exception e) {
+                out.add(copyRow(row, sourceColumnName, text, idColumnName, null));
+                return out.iterator();
+            }
+
+            if (root == null || !root.isObject()) {
+                out.add(copyRow(row, sourceColumnName, text, idColumnName, null));
+                return out.iterator();
+            }
+
+            Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+            boolean exploded = false;
+
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                String key = entry.getKey();
+                JsonNode valueNode = entry.getValue();
+
+                if (valueNode != null && valueNode.isObject()) {
+                    out.add(copyRow(row, sourceColumnName, valueNode.toString(), idColumnName, key));
+                    exploded = true;
+                }
+            }
+
+            if (!exploded) {
+                out.add(copyRow(row, sourceColumnName, text, idColumnName, null));
+            }
+
+            return out.iterator();
+        }, RowEncoder.apply(outputSchema));
+    }
+
+    private static Row copyRow(
+            Row row,
+            String sourceColumnName,
+            String newSourceValue,
+            String idColumnName,
+            String idValue
+    ) {
+        List<Object> values = new ArrayList<>(row.size() + 1);
+        StructType schema = row.schema();
+
+        for (int i = 0; i < row.size(); i++) {
+            String currentName = schema.fields()[i].name();
+
+            if (sourceColumnName.equals(currentName)) {
+                values.add(newSourceValue);
+            } else {
+                values.add(row.get(i));
+            }
+        }
+
+        values.add(idValue);
+        return RowFactory.create(values.toArray());
+    }
+
+    private static StructType buildOutputSchema(
+            StructType inputSchema,
+            String idColumnName
+    ) {
+        List<StructField> fields = new ArrayList<>();
+
+        for (StructField field : inputSchema.fields()) {
+            fields.add(field);
+        }
+
+        fields.add(DataTypes.createStructField(idColumnName, DataTypes.StringType, true));
+
+        return DataTypes.createStructType(fields);
+    }
+}
