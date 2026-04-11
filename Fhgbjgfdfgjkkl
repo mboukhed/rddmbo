@@ -1,0 +1,36 @@
+D’accord. On va doucement.
+Étape 1 seulement :
+Tu as un Dataset<Row> avec :
+des colonnes normales
+une colonne JSON string, par exemple payload
+Et tu veux :
+garder les autres colonnes
+transformer payload en colonne typée
+pas encore aplatir
+Le code minimum :
+Java
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.StructType;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.from_json;
+
+Dataset<String> jsonDs = df.select("payload").as(Encoders.STRING());
+
+StructType jsonSchema = spark.read().json(jsonDs).schema();
+
+Dataset<Row> parsedDf = df.withColumn(
+    "payload_struct",
+    from_json(col("payload"), jsonSchema)
+);
+Résultat :
+tu gardes toutes les colonnes de df
+tu ajoutes une nouvelle colonne payload_struct
+payload_struct est une vraie colonne struct
+Pour vérifier :
+Java
+parsedDf.printSchema();
+parsedDf.show(false);
+Si tu veux, prochaine étape je te montre juste comment sortir un seul champ de payload_struct, pas tout aplatir d’un coup.
