@@ -1,0 +1,117 @@
+package com.example.spark;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.functions;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+public final class ColumnExploder {
+
+    private ColumnExploder() {
+    }
+
+    /**
+     * Gère uniquement ce cas :
+     * - Toto__x
+     * - Toto__yy
+     * - Toto__bobo
+     *
+     * Sortie :
+     * - Toto__SUFFIX (string)
+     * - Toto         (même type que les colonnes source)
+     */
+    public static Dataset<Row> explodeSimpleSuffix(
+            Dataset<Row> df,
+            String baseColumnName
+    ) {
+        String quotedBase = Pattern.quote(baseColumnName);
+        Pattern pattern = Pattern.compile("^" + quotedBase + "__([A-Za-z0-9]+)$");
+
+        Map<String, String> columnsBySuffix = new LinkedHashMap<>();
+
+        for (String colName : df.columns()) {
+            Matcher matcher = pattern.matcher(colName);
+            if (matcher.matches()) {
+                String suffix = matcher.group(1);
+                columnsBySuffix.put(suffix, colName);
+            }
+        }
+
+        if (columnsBySuffix.isEmpty()) {
+            return df;
+        }
+
+        String suffixColumnName = baseColumnName + "__SUFFIX";
+
+        List<Column> stableColumns = Arrays.stream(df.columns())
+                .filter(c -> !columnsBySuffix.containsValue(c))
+                .map(functions::col)
+                .collect(Collectors.toList());
+
+        List<Column> structs = new ArrayList<>();
+
+        for (Map.Entry<String, String> entry : columnsBySuffix.entrySet()) {
+            String suffix = entry.getKey();
+            String sourceCol = entry.getValue();
+
+            structs.add(
+                    functions.struct(
+                            functions.lit(suffix)
+                                    .cast("string")
+                                    .alias(suffixColumnName),
+                            functions.col(sourceCol)
+                                    .alias(baseColumnName)
+                    )
+            );
+        }
+
+        Dataset<Row> result = df.withColumn(
+                "__tmp_array",
+                functions.array(structs.toArray(new Column[0]))
+        ).withColumn(
+                "__tmp_item",
+                functions.explode_outer(functions.col("__tmp_array"))
+        );
+
+        List<Column> finalColumns = new ArrayList<>(stableColumns);
+        finalColumns.add(
+                functions.col("__tmp_item.`" + suffixColumnName + "`")
+                        .alias(suffixColumnName)
+        );
+        finalColumns.add(
+                functions.col("__tmp_item.`" + baseColumnName + "`")
+                        .alias(baseColumnName)
+        );
+
+        return result.select(finalColumns.toArray(new Column[0]));
+    }
+
+    public static Dataset<Row> explodeSimpleSuffix(
+            Dataset<Row> df,
+            List<String> baseColumnNames
+    ) {
+        Dataset<Row> result = df;
+
+        for (String baseColumnName : baseColumnNames) {
+            result = explodeSimpleSuffix(result, baseColumnName);
+        }
+
+        return result;
+    }
+
+    public static Dataset<Row> explodeSimpleSuffix(
+            Dataset<Row> df,
+            String... baseColumnNames
+    ) {
+        return explodeSimpleSuffix(df, Arrays.asList(baseColumnNames));
+    }
+}
