@@ -1,0 +1,312 @@
+package com.example.spark;
+
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.functions;
+import org.apache.spark.sql.types.*;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+public final class ParquetSchemaEvolutionUtil {
+
+    private ParquetSchemaEvolutionUtil() {
+    }
+
+    public static Dataset<Row> alignToParquetSchema(
+            SparkSession spark,
+            Dataset<Row> incomingDf,
+            String parquetRootPath,
+            String partitionColumn
+    ) {
+        StructType incomingSchema = incomingDf.schema();
+        StructType existingSchema = readExistingSchemaIfAny(spark, parquetRootPath);
+
+        StructType targetSchema = mergeSchemas(existingSchema, incomingSchema, partitionColumn);
+
+        Dataset<Row> alignedDf = castAndAddMissingColumns(incomingDf, targetSchema);
+
+        List<Column> orderedColumns = Arrays.stream(targetSchema.fields())
+                .map(field -> functions.col(field.name()))
+                .collect(Collectors.toList());
+
+        return alignedDf.select(orderedColumns.toArray(new Column[0]));
+    }
+
+    public static void writeDailyPartition(
+            SparkSession spark,
+            Dataset<Row> incomingDf,
+            String parquetRootPath,
+            String partitionColumn
+    ) {
+        Dataset<Row> alignedDf = alignToParquetSchema(
+                spark,
+                incomingDf,
+                parquetRootPath,
+                partitionColumn
+        );
+
+        alignedDf.write()
+                .mode("append")
+                .partitionBy(partitionColumn)
+                .parquet(parquetRootPath);
+    }
+
+    public static StructType readMergedSchema(
+            SparkSession spark,
+            String parquetRootPath
+    ) {
+        return spark.read()
+                .option("mergeSchema", "true")
+                .parquet(parquetRootPath)
+                .schema();
+    }
+
+    private static StructType readExistingSchemaIfAny(SparkSession spark, String parquetRootPath) {
+        if (!pathExists(spark, parquetRootPath)) {
+            return null;
+        }
+
+        try {
+            return spark.read()
+                    .option("mergeSchema", "true")
+                    .parquet(parquetRootPath)
+                    .schema();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static boolean pathExists(SparkSession spark, String path) {
+        try {
+            FileSystem fs = FileSystem.get(spark.sparkContext().hadoopConfiguration());
+            return fs.exists(new Path(path));
+        } catch (Exception e) {
+            throw new RuntimeException("Erreur vérification path: " + path, e);
+        }
+    }
+
+    private static StructType mergeSchemas(
+            StructType existingSchema,
+            StructType incomingSchema,
+            String partitionColumn
+    ) {
+        LinkedHashMap<String, StructField> merged = new LinkedHashMap<>();
+
+        if (existingSchema != null) {
+            for (StructField field : existingSchema.fields()) {
+                merged.put(field.name(), field);
+            }
+        }
+
+        for (StructField incomingField : incomingSchema.fields()) {
+            StructField existingField = merged.get(incomingField.name());
+
+            if (existingField == null) {
+                merged.put(incomingField.name(), incomingField);
+            } else {
+                DataType mergedType = resolveCompatibleType(
+                        existingField.dataType(),
+                        incomingField.dataType()
+                );
+
+                boolean nullable = existingField.nullable() || incomingField.nullable();
+
+                merged.put(
+                        incomingField.name(),
+                        new StructField(
+                                incomingField.name(),
+                                mergedType,
+                                nullable,
+                                Metadata.empty()
+                        )
+                );
+            }
+        }
+
+        if (!merged.containsKey(partitionColumn)) {
+            throw new IllegalArgumentException(
+                    "La colonne de partition est absente du schéma cible: " + partitionColumn
+            );
+        }
+
+        return new StructType(merged.values().toArray(new StructField[0]));
+    }
+
+    private static Dataset<Row> castAndAddMissingColumns(
+            Dataset<Row> df,
+            StructType targetSchema
+    ) {
+        Set<String> existingColumns = new HashSet<>(Arrays.asList(df.columns()));
+        Dataset<Row> result = df;
+
+        for (StructField targetField : targetSchema.fields()) {
+            String colName = targetField.name();
+            DataType targetType = targetField.dataType();
+
+            if (!existingColumns.contains(colName)) {
+                result = result.withColumn(
+                        colName,
+                        functions.lit(null).cast(targetType)
+                );
+            } else {
+                DataType currentType = result.schema().apply(colName).dataType();
+
+                if (!sameType(currentType, targetType)) {
+                    result = result.withColumn(
+                            colName,
+                            functions.col(colName).cast(targetType)
+                    );
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static boolean sameType(DataType a, DataType b) {
+        return a.sameType(b);
+    }
+
+    private static DataType resolveCompatibleType(DataType left, DataType right) {
+        if (left.sameType(right)) {
+            return left;
+        }
+
+        if (isNumeric(left) && isNumeric(right)) {
+            return widerNumericType(left, right);
+        }
+
+        if ((left instanceof DateType && right instanceof TimestampType)
+                || (left instanceof TimestampType && right instanceof DateType)) {
+            return DataTypes.TimestampType;
+        }
+
+        if (left instanceof StringType || right instanceof StringType) {
+            return DataTypes.StringType;
+        }
+
+        if (left instanceof BooleanType && right instanceof BooleanType) {
+            return DataTypes.BooleanType;
+        }
+
+        if (left instanceof ArrayType && right instanceof ArrayType) {
+            ArrayType la = (ArrayType) left;
+            ArrayType ra = (ArrayType) right;
+
+            DataType mergedElementType = resolveCompatibleType(
+                    la.elementType(),
+                    ra.elementType()
+            );
+
+            return DataTypes.createArrayType(
+                    mergedElementType,
+                    la.containsNull() || ra.containsNull()
+            );
+        }
+
+        if (left instanceof StructType && right instanceof StructType) {
+            return mergeStructTypes((StructType) left, (StructType) right);
+        }
+
+        return DataTypes.StringType;
+    }
+
+    private static StructType mergeStructTypes(StructType left, StructType right) {
+        LinkedHashMap<String, StructField> merged = new LinkedHashMap<>();
+
+        for (StructField field : left.fields()) {
+            merged.put(field.name(), field);
+        }
+
+        for (StructField rightField : right.fields()) {
+            StructField leftField = merged.get(rightField.name());
+
+            if (leftField == null) {
+                merged.put(rightField.name(), rightField);
+            } else {
+                DataType mergedType = resolveCompatibleType(
+                        leftField.dataType(),
+                        rightField.dataType()
+                );
+
+                merged.put(
+                        rightField.name(),
+                        new StructField(
+                                rightField.name(),
+                                mergedType,
+                                leftField.nullable() || rightField.nullable(),
+                                Metadata.empty()
+                        )
+                );
+            }
+        }
+
+        return new StructType(merged.values().toArray(new StructField[0]));
+    }
+
+    private static boolean isNumeric(DataType type) {
+        return type instanceof ByteType
+                || type instanceof ShortType
+                || type instanceof IntegerType
+                || type instanceof LongType
+                || type instanceof FloatType
+                || type instanceof DoubleType
+                || type instanceof DecimalType;
+    }
+
+    private static DataType widerNumericType(DataType a, DataType b) {
+        if (a instanceof DoubleType || b instanceof DoubleType) {
+            return DataTypes.DoubleType;
+        }
+        if (a instanceof FloatType || b instanceof FloatType) {
+            return DataTypes.FloatType;
+        }
+        if (a instanceof DecimalType || b instanceof DecimalType) {
+            DecimalType da = toDecimal(a);
+            DecimalType db = toDecimal(b);
+
+            int precision = Math.max(da.precision(), db.precision());
+            int scale = Math.max(da.scale(), db.scale());
+
+            precision = Math.min(38, Math.max(precision, scale + 1));
+            return DataTypes.createDecimalType(precision, scale);
+        }
+        if (a instanceof LongType || b instanceof LongType) {
+            return DataTypes.LongType;
+        }
+        if (a instanceof IntegerType || b instanceof IntegerType) {
+            return DataTypes.IntegerType;
+        }
+        if (a instanceof ShortType || b instanceof ShortType) {
+            return DataTypes.ShortType;
+        }
+        return DataTypes.ByteType;
+    }
+
+    private static DecimalType toDecimal(DataType type) {
+        if (type instanceof DecimalType) {
+            return (DecimalType) type;
+        }
+        if (type instanceof DoubleType || type instanceof FloatType) {
+            return DataTypes.createDecimalType(38, 18);
+        }
+        if (type instanceof LongType) {
+            return DataTypes.createDecimalType(20, 0);
+        }
+        if (type instanceof IntegerType) {
+            return DataTypes.createDecimalType(10, 0);
+        }
+        if (type instanceof ShortType) {
+            return DataTypes.createDecimalType(5, 0);
+        }
+        if (type instanceof ByteType) {
+            return DataTypes.createDecimalType(3, 0);
+        }
+        return DataTypes.createDecimalType(38, 18);
+    }
+}
