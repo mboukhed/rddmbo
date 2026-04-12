@@ -1,0 +1,163 @@
+package com.example.spark;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.functions;
+
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+public final class GenericSuffixColumnExploder {
+
+    private GenericSuffixColumnExploder() {
+    }
+
+    public static Dataset<Row> explodeColumnGroup(Dataset<Row> df, String baseColumnName) {
+        String quotedBase = Pattern.quote(baseColumnName);
+
+        Pattern simpleNumericPattern =
+                Pattern.compile("^" + quotedBase + "_(\\d+)$");
+
+        Pattern simpleAlphaPattern =
+                Pattern.compile("^" + quotedBase + "__([A-Za-z0-9]+)$");
+
+        Pattern indexedSubFieldPattern =
+                Pattern.compile("^" + quotedBase + "_(\\d+)_(.+)$");
+
+        Pattern alphaSubFieldPattern =
+                Pattern.compile("^" + quotedBase + "__([A-Za-z0-9]+)__(.+)$");
+
+        Map<String, Map<String, String>> valuesBySuffix = new LinkedHashMap<>();
+        Set<String> matchedSourceColumns = new HashSet<>();
+        Set<String> outputFieldNames = new LinkedHashSet<>();
+
+        for (String colName : df.columns()) {
+            Matcher mAlphaSub = alphaSubFieldPattern.matcher(colName);
+            Matcher mIndexedSub = indexedSubFieldPattern.matcher(colName);
+            Matcher mSimpleNumeric = simpleNumericPattern.matcher(colName);
+            Matcher mSimpleAlpha = simpleAlphaPattern.matcher(colName);
+
+            if (mAlphaSub.matches()) {
+                String suffix = mAlphaSub.group(1);
+                String subField = mAlphaSub.group(2);
+
+                String outputFieldName = baseColumnName + "__" + subField;
+
+                valuesBySuffix
+                        .computeIfAbsent(suffix, k -> new LinkedHashMap<>())
+                        .put(outputFieldName, colName);
+
+                matchedSourceColumns.add(colName);
+                outputFieldNames.add(outputFieldName);
+
+            } else if (mIndexedSub.matches()) {
+                String suffix = mIndexedSub.group(1);
+                String subField = mIndexedSub.group(2);
+
+                String outputFieldName = baseColumnName + "__" + subField;
+
+                valuesBySuffix
+                        .computeIfAbsent(suffix, k -> new LinkedHashMap<>())
+                        .put(outputFieldName, colName);
+
+                matchedSourceColumns.add(colName);
+                outputFieldNames.add(outputFieldName);
+
+            } else if (mSimpleNumeric.matches()) {
+                String suffix = mSimpleNumeric.group(1);
+
+                valuesBySuffix
+                        .computeIfAbsent(suffix, k -> new LinkedHashMap<>())
+                        .put(baseColumnName, colName);
+
+                matchedSourceColumns.add(colName);
+                outputFieldNames.add(baseColumnName);
+
+            } else if (mSimpleAlpha.matches()) {
+                String suffix = mSimpleAlpha.group(1);
+
+                valuesBySuffix
+                        .computeIfAbsent(suffix, k -> new LinkedHashMap<>())
+                        .put(baseColumnName, colName);
+
+                matchedSourceColumns.add(colName);
+                outputFieldNames.add(baseColumnName);
+            }
+        }
+
+        if (valuesBySuffix.isEmpty()) {
+            return df;
+        }
+
+        String suffixColumnName = baseColumnName + "__SUFFIX";
+
+        List<Column> stableColumns = Arrays.stream(df.columns())
+                .filter(c -> !matchedSourceColumns.contains(c))
+                .map(functions::col)
+                .collect(Collectors.toList());
+
+        List<Column> explodedStructs = new ArrayList<>();
+
+        for (Map.Entry<String, Map<String, String>> suffixEntry : valuesBySuffix.entrySet()) {
+            String suffix = suffixEntry.getKey();
+            Map<String, String> fieldMapping = suffixEntry.getValue();
+
+            List<Column> structFields = new ArrayList<>();
+            structFields.add(functions.lit(suffix).cast("string").alias(suffixColumnName));
+
+            for (String outputFieldName : outputFieldNames) {
+                String sourceCol = fieldMapping.get(outputFieldName);
+
+                if (sourceCol != null) {
+                    structFields.add(functions.col(sourceCol).alias(outputFieldName));
+                } else {
+                    structFields.add(functions.lit(null).alias(outputFieldName));
+                }
+            }
+
+            explodedStructs.add(functions.struct(structFields.toArray(new Column[0])));
+        }
+
+        Dataset<Row> result = df.withColumn(
+                "__tmp_exploded_array",
+                functions.array(explodedStructs.toArray(new Column[0]))
+        ).withColumn(
+                "__tmp_exploded_item",
+                functions.explode_outer(functions.col("__tmp_exploded_array"))
+        );
+
+        List<Column> finalColumns = new ArrayList<>(stableColumns);
+
+        finalColumns.add(
+                functions.col("__tmp_exploded_item.`" + suffixColumnName + "`")
+                        .cast("string")
+                        .alias(suffixColumnName)
+        );
+
+        for (String outputFieldName : outputFieldNames) {
+            finalColumns.add(
+                    functions.col("__tmp_exploded_item.`" + outputFieldName + "`")
+                            .alias(outputFieldName)
+            );
+        }
+
+        return result.select(finalColumns.toArray(new Column[0]));
+    }
+
+    public static Dataset<Row> explodeColumnGroups(Dataset<Row> df, List<String> baseColumnNames) {
+        Dataset<Row> result = df;
+
+        for (String baseColumnName : baseColumnNames) {
+            result = explodeColumnGroup(result, baseColumnName);
+        }
+
+        return result;
+    }
+
+    public static Dataset<Row> explodeColumnGroups(Dataset<Row> df, String... baseColumnNames) {
+        return explodeColumnGroups(df, Arrays.asList(baseColumnNames));
+    }
+}
