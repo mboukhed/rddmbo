@@ -1,0 +1,26 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.*;
+import static org.apache.spark.sql.functions.*;
+
+public final class ArrayToJsonUtil {
+
+    private ArrayToJsonUtil() {
+    }
+
+    public static Dataset<Row> convertArrayColumnsToJson(Dataset<Row> df) {
+        StructType schema = df.schema();
+        Dataset<Row> result = df;
+
+        for (StructField field : schema.fields()) {
+            if (field.dataType() instanceof ArrayType) {
+                result = result.withColumn(
+                        field.name(),
+                        to_json(col(field.name()))
+                );
+            }
+        }
+
+        return result;
+    }
+}
