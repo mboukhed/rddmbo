@@ -1,0 +1,10 @@
+public static Dataset<Row> normalizeUpdated(Dataset<Row> df, String jsonColumn) {
+    return df.withColumn(
+            jsonColumn,
+            regexp_replace(
+                    col(jsonColumn),
+                    "\"Updated\\s*@\\s*([^\"]+)\"\\s*:\\s*\"[^\"]*\"",
+                    "\"Updated\":\"$1\""
+            )
+    );
+}
