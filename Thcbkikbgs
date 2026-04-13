@@ -1,0 +1,14 @@
+private static StringBuilder appendSchema(
+        Dataset<Row> df,
+        String schemaName,
+        StringBuilder schemas
+) {
+    schemas.append("Nom schema : ")
+            .append(schemaName)
+            .append(System.lineSeparator())
+            .append(df.schema().treeString())
+            .append(System.lineSeparator())
+            .append(System.lineSeparator());
+
+    return schemas;
+}
