@@ -1,0 +1,19 @@
+public Dataset<Row> flatColumn(Dataset<Row> df, String columnName) {
+    return df
+        .withColumn(
+            columnName + "_updated",
+            regexp_extract(
+                col(columnName),
+                ".*Updated\\s*@\\s*(.*)$",
+                1
+            )
+        )
+        .withColumn(
+            columnName,
+            regexp_replace(
+                col(columnName),
+                "\\s*Updated\\s*@\\s*.*$",
+                ""
+            )
+        );
+}
