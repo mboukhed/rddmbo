@@ -1,0 +1,5 @@
+ResultSet rs = stmt.executeQuery("SHOW TABLES FROM srv");
+
+while (rs.next()) {
+    System.out.println("Table = " + rs.getString(1));
+}
