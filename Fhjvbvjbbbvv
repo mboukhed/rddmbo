@@ -1,0 +1,5 @@
+Dataset<String> jsonDs = preparedDf
+        .select(col(jsonCandidateColumn))
+        .where(col(jsonCandidateColumn).isNotNull())
+        .where(trim(col(jsonCandidateColumn)).rlike("^\\{.*\\}$"))
+        .as(Encoders.STRING());
