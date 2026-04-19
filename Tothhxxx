@@ -1,0 +1,8 @@
+df = df.withColumn(
+    columnName,
+    regexp_replace(
+        col(columnName),
+        "(\"[^\"]*)\\.(?=[^\"]*\"\\s*:)",
+        "$1__"
+    )
+);
