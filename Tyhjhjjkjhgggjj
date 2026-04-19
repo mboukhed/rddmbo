@@ -1,0 +1,4 @@
+Dataset<Row> emptyDf = spark.createDataFrame(
+        Collections.emptyList(),
+        structType
+);
