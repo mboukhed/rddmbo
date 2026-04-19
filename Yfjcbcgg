@@ -1,0 +1,10 @@
+private static String sanitize(String value) {
+    if (value == null || value.trim().isEmpty()) {
+        return "unknown";
+    }
+
+    return value
+            .trim()
+            .replace(".", "__")   // 🔥 clé du fix
+            .replaceAll("\\s+", "_"); // optionnel
+}
