@@ -1,0 +1,4 @@
+df.filter(
+    col("payload").isNotNull()
+        .and(col("payload").rlike("^\\s*\\{.*\\}\\s*$"))
+);
