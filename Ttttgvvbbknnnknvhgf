@@ -1,0 +1,49 @@
+package com.example.spark.helper;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import static org.apache.spark.sql.functions.col;
+
+public final class DatasetCastHelper {
+
+    private DatasetCastHelper() {
+    }
+
+    public static Dataset<Row> castAllColumnsToStringExcept(
+            Dataset<Row> df,
+            List<String> excludedColumns
+    ) {
+        if (df == null) {
+            throw new IllegalArgumentException("df must not be null");
+        }
+
+        Set<String> excluded = new HashSet<>();
+        if (excludedColumns != null) {
+            excluded.addAll(excludedColumns);
+        }
+
+        Column[] cols = new Column[df.columns().length];
+
+        for (int i = 0; i < df.columns().length; i++) {
+            String c = df.columns()[i];
+
+            if (excluded.contains(c)) {
+                cols[i] = col(escape(c));
+            } else {
+                cols[i] = col(escape(c)).cast("string").alias(c);
+            }
+        }
+
+        return df.select(cols);
+    }
+
+    private static String escape(String name) {
+        return "`" + name.replace("`", "") + "`";
+    }
+}
