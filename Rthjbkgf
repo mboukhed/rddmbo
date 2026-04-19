@@ -1,0 +1,109 @@
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.spark.api.java.function.MapPartitionsFunction;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.catalyst.encoders.RowEncoder;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+public final class JsonCleanerHelper {
+
+    private JsonCleanerHelper() {}
+
+    public static Dataset<Row> cleanUpdatedFields(Dataset<Row> df, String jsonColumn) {
+
+        final StructType schema = df.schema();
+        final int jsonIndex = findIndex(schema, jsonColumn);
+
+        return df.mapPartitions(
+                (MapPartitionsFunction<Row, Row>) it -> {
+
+                    ObjectMapper mapper = new ObjectMapper();
+                    List<Row> out = new ArrayList<>();
+
+                    while (it.hasNext()) {
+
+                        Row row = it.next();
+                        Object[] values = new Object[row.size()];
+
+                        for (int i = 0; i < row.size(); i++) {
+                            values[i] = row.get(i);
+                        }
+
+                        Object raw = row.get(jsonIndex);
+
+                        if (raw != null && raw instanceof String) {
+                            String json = (String) raw;
+
+                            if (!json.trim().isEmpty()) {
+                                try {
+                                    JsonNode root = mapper.readTree(json);
+                                    clean(root);
+                                    values[jsonIndex] = mapper.writeValueAsString(root);
+                                } catch (Exception e) {
+                                    values[jsonIndex] = json;
+                                }
+                            }
+                        }
+
+                        out.add(RowFactory.create(values));
+                    }
+
+                    return out.iterator();
+                },
+                RowEncoder.apply(schema)
+        );
+    }
+
+    private static int findIndex(StructType schema, String name) {
+        StructField[] fields = schema.fields();
+        for (int i = 0; i < fields.length; i++) {
+            if (fields[i].name().equals(name)) return i;
+        }
+        throw new IllegalArgumentException("Colonne introuvable: " + name);
+    }
+
+    private static void clean(JsonNode node) {
+
+        if (node == null) return;
+
+        if (node.isObject()) {
+            ObjectNode obj = (ObjectNode) node;
+
+            List<String> remove = new ArrayList<>();
+            Iterator<Map.Entry<String, JsonNode>> fields = obj.fields();
+
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> e = fields.next();
+                String key = e.getKey();
+
+                if (isUpdated(key)) {
+                    remove.add(key);
+                } else {
+                    clean(e.getValue());
+                }
+            }
+
+            for (String k : remove) {
+                obj.remove(k);
+            }
+
+        } else if (node.isArray()) {
+            for (JsonNode child : node) {
+                clean(child);
+            }
+        }
+    }
+
+    private static boolean isUpdated(String key) {
+        return key != null && key.matches("(?i).*updated\\s*@\\s*.*");
+    }
+}
