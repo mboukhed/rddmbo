@@ -1,0 +1,187 @@
+package com.example.spark.helper;
+
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.from_json;
+import static org.apache.spark.sql.functions.length;
+import static org.apache.spark.sql.functions.lit;
+import static org.apache.spark.sql.functions.regexp_replace;
+import static org.apache.spark.sql.functions.to_json;
+import static org.apache.spark.sql.functions.trim;
+import static org.apache.spark.sql.functions.when;
+
+public final class JsonFlattenHelper {
+
+    private static final String SEP = "__";
+
+    private JsonFlattenHelper() {
+    }
+
+    public static Dataset<Row> flattenJsonColumns(Dataset<Row> df, String... sourceColumnNames) {
+        if (df == null) {
+            throw new IllegalArgumentException("df must not be null");
+        }
+        if (sourceColumnNames == null || sourceColumnNames.length == 0) {
+            return df;
+        }
+
+        Dataset<Row> result = df;
+
+        for (String sourceColumnName : sourceColumnNames) {
+            result = flattenSingleJsonColumn(result, sourceColumnName);
+        }
+
+        return result;
+    }
+
+    public static Dataset<Row> flattenSingleJsonColumn(Dataset<Row> df, String sourceColumnName) {
+        if (df == null) {
+            throw new IllegalArgumentException("df must not be null");
+        }
+        if (sourceColumnName == null || sourceColumnName.trim().isEmpty()) {
+            throw new IllegalArgumentException("sourceColumnName must not be empty");
+        }
+
+        final String rawJsonColumn = "__raw_json_" + sourceColumnName;
+        final String cleanedJsonColumn = "__json_cleaned_" + sourceColumnName;
+        final String jsonCandidateColumn = "__json_candidate_" + sourceColumnName;
+        final String tempStructColumn = "__tmp_struct_" + sourceColumnName;
+
+        Dataset<Row> preparedDf = df
+                .withColumn(rawJsonColumn, col(escapeSimple(sourceColumnName)).cast("string"))
+                .withColumn(
+                        cleanedJsonColumn,
+                        regexp_replace(
+                                regexp_replace(col(escapeSimple(rawJsonColumn)), "^\"|\"$", ""),
+                                "\\\\\"",
+                                "\""
+                        )
+                )
+                .withColumn(
+                        jsonCandidateColumn,
+                        when(col(escapeSimple(rawJsonColumn)).isNull(), lit(null))
+                                .when(length(trim(col(escapeSimple(cleanedJsonColumn)))).equalTo(0), lit(null))
+                                .when(trim(col(escapeSimple(cleanedJsonColumn))).rlike("^\\{.*\\}$"),
+                                        trim(col(escapeSimple(cleanedJsonColumn))))
+                                .otherwise(lit(null))
+                );
+
+        Dataset<String> jsonDs = preparedDf
+                .select(col(escapeSimple(jsonCandidateColumn)))
+                .where(col(escapeSimple(jsonCandidateColumn)).isNotNull())
+                .as(Encoders.STRING());
+
+        if (jsonDs.takeAsList(1).isEmpty()) {
+            return df;
+        }
+
+        StructType jsonSchema = preparedDf.sparkSession()
+                .read()
+                .json(jsonDs)
+                .schema();
+
+        if (jsonSchema == null || jsonSchema.fields().length == 0) {
+            return df;
+        }
+
+        Dataset<Row> parsedDf = preparedDf
+                .withColumn(
+                        tempStructColumn,
+                        from_json(col(escapeSimple(jsonCandidateColumn)), jsonSchema)
+                )
+                .drop(rawJsonColumn, cleanedJsonColumn, jsonCandidateColumn);
+
+        Dataset<Row> flattenedDf = flattenStructColumn(parsedDf, tempStructColumn, sourceColumnName);
+
+        return flattenedDf.drop(tempStructColumn);
+    }
+
+    private static Dataset<Row> flattenStructColumn(
+            Dataset<Row> df,
+            String structColumnName,
+            String aliasPrefix
+    ) {
+        StructField structField = df.schema().apply(structColumnName);
+
+        if (!(structField.dataType() instanceof StructType)) {
+            return df;
+        }
+
+        List<Column> selectedColumns = new ArrayList<Column>();
+
+        for (String columnName : df.columns()) {
+            if (!structColumnName.equals(columnName)) {
+                selectedColumns.add(col(escapeSimple(columnName)));
+            }
+        }
+
+        selectedColumns.addAll(
+                flattenFields(
+                        escapeSimple(structColumnName),
+                        sanitize(aliasPrefix),
+                        (StructType) structField.dataType()
+                )
+        );
+
+        return df.select(selectedColumns.toArray(new Column[0]));
+    }
+
+    private static List<Column> flattenFields(
+            String parentPath,
+            String aliasPrefix,
+            StructType structType
+    ) {
+        List<Column> result = new ArrayList<Column>();
+
+        for (StructField field : structType.fields()) {
+            String fieldName = field.name();
+            DataType fieldType = field.dataType();
+
+            String childPath = parentPath + "." + escapeSimple(fieldName);
+            String childAlias = aliasPrefix + SEP + sanitize(fieldName);
+
+            if (fieldType instanceof StructType) {
+                result.addAll(
+                        flattenFields(
+                                childPath,
+                                childAlias,
+                                (StructType) fieldType
+                        )
+                );
+            } else if (fieldType instanceof ArrayType || fieldType instanceof MapType) {
+                result.add(
+                        to_json(col(childPath)).alias(childAlias)
+                );
+            } else {
+                result.add(
+                        col(childPath).cast("string").alias(childAlias)
+                );
+            }
+        }
+
+        return result;
+    }
+
+    private static String sanitize(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return "unknown";
+        }
+        return value.trim().replace(".", SEP);
+    }
+
+    private static String escapeSimple(String name) {
+        return "`" + name.replace("`", "") + "`";
+    }
+}
