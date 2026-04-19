@@ -1,0 +1,325 @@
+package com.example.spark.helper;
+
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.lit;
+
+public final class ParquetSchemaHelper {
+
+    private static final DateTimeFormatter ARCHIVE_TS_FORMAT =
+            DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
+
+    private ParquetSchemaHelper() {
+    }
+
+    public static void write(
+            SparkSession spark,
+            Dataset<Row> incomingDf,
+            String parquetPath,
+            String... partitionColumns
+    ) throws Exception {
+
+        Objects.requireNonNull(spark, "spark must not be null");
+        Objects.requireNonNull(incomingDf, "incomingDf must not be null");
+
+        if (parquetPath == null || parquetPath.trim().isEmpty()) {
+            throw new IllegalArgumentException("parquetPath must not be empty");
+        }
+
+        String[] safePartitions = normalizePartitionColumns(partitionColumns);
+        validatePartitionColumns(incomingDf, safePartitions);
+
+        FileSystem fs = FileSystem.get(spark.sparkContext().hadoopConfiguration());
+        Path path = new Path(parquetPath);
+
+        // 1) First write: no existing parquet
+        if (!fs.exists(path)) {
+            writeDf(incomingDf, parquetPath, SaveMode.Append, safePartitions);
+            return;
+        }
+
+        // 2) Existing schema is the reference
+        StructType existingSchema = spark.read().parquet(parquetPath).schema();
+        validatePartitionColumns(existingSchema, safePartitions);
+
+        // 3) Detect unsafe casts (data loss during cast)
+        Set<String> unsafeColumns = findUnsafeColumns(incomingDf, existingSchema);
+
+        // 4) Simple append (no schema conflict)
+        if (unsafeColumns.isEmpty()) {
+            Dataset<Row> normalizedIncoming = normalizeForAppend(incomingDf, existingSchema);
+            writeDf(normalizedIncoming, parquetPath, SaveMode.Append, safePartitions);
+            return;
+        }
+
+        // 5) Fallback:
+        // - read existing data
+        // - convert unsafe columns to string on both sides
+        // - archive existing dataset
+        // - overwrite with merged dataset
+        Dataset<Row> existingDf = spark.read().parquet(parquetPath);
+        StructType rewriteSchema = buildRewriteSchema(existingSchema, unsafeColumns);
+
+        Dataset<Row> left = normalizeForRewrite(existingDf, rewriteSchema, unsafeColumns);
+        Dataset<Row> right = normalizeForRewrite(incomingDf, rewriteSchema, unsafeColumns);
+
+        Dataset<Row> merged = left.unionByName(right, true)
+                .select(toColumns(rewriteSchema.fieldNames()));
+
+        validatePartitionColumns(merged, safePartitions);
+
+        Path archivedPath = archiveExistingParquetDirectory(fs, path);
+
+        try {
+            writeDf(merged, parquetPath, SaveMode.Overwrite, safePartitions);
+        } catch (Exception e) {
+            // restore original data if overwrite fails
+            restoreArchivedDirectory(fs, path, archivedPath);
+            throw e;
+        }
+    }
+
+    /**
+     * Append logic:
+     * - keep only existing schema columns
+     * - missing columns are added with null values
+     * - new columns are dropped
+     * - type mismatch is cast to existing type
+     * - column order is preserved
+     */
+    private static Dataset<Row> normalizeForAppend(Dataset<Row> df, StructType existingSchema) {
+        Dataset<Row> result = df;
+        Set<String> existingCols = new LinkedHashSet<>(Arrays.asList(existingSchema.fieldNames()));
+        Map<String, StructField> incomingMap = toFieldMap(df.schema());
+
+        // drop new columns
+        for (String colName : df.columns()) {
+            if (!existingCols.contains(colName)) {
+                result = result.drop(colName);
+            }
+        }
+
+        // add missing columns and cast types
+        for (StructField field : existingSchema.fields()) {
+            String name = field.name();
+            DataType existingType = field.dataType();
+
+            if (!incomingMap.containsKey(name)) {
+                result = result.withColumn(name, lit(null).cast(existingType));
+            } else if (!incomingMap.get(name).dataType().sameType(existingType)) {
+                result = result.withColumn(name, col(name).cast(existingType));
+            }
+        }
+
+        return result.select(toColumns(existingSchema.fieldNames()));
+    }
+
+    /**
+     * Unsafe columns = values that become null after cast
+     */
+    private static Set<String> findUnsafeColumns(Dataset<Row> incomingDf, StructType existingSchema) {
+        Map<String, StructField> incomingMap = toFieldMap(incomingDf.schema());
+        Set<String> unsafe = new LinkedHashSet<>();
+
+        for (StructField field : existingSchema.fields()) {
+            String name = field.name();
+
+            if (!incomingMap.containsKey(name)) {
+                continue;
+            }
+
+            DataType existingType = field.dataType();
+            DataType incomingType = incomingMap.get(name).dataType();
+
+            if (incomingType.sameType(existingType)) {
+                continue;
+            }
+
+            boolean safe = incomingDf
+                    .filter(col(name).isNotNull().and(col(name).cast(existingType).isNull()))
+                    .takeAsList(1)
+                    .isEmpty();
+
+            if (!safe) {
+                unsafe.add(name);
+            }
+        }
+
+        return unsafe;
+    }
+
+    /**
+     * Build schema for fallback:
+     * unsafe columns are converted to String
+     */
+    private static StructType buildRewriteSchema(StructType existingSchema, Set<String> unsafeColumns) {
+        List<StructField> fields = new ArrayList<>();
+
+        for (StructField field : existingSchema.fields()) {
+            if (unsafeColumns.contains(field.name())) {
+                fields.add(DataTypes.createStructField(field.name(), DataTypes.StringType, true));
+            } else {
+                fields.add(field);
+            }
+        }
+
+        return new StructType(fields.toArray(new StructField[0]));
+    }
+
+    /**
+     * Normalize dataset for fallback rewrite
+     */
+    private static Dataset<Row> normalizeForRewrite(
+            Dataset<Row> df,
+            StructType targetSchema,
+            Set<String> unsafeColumns
+    ) {
+        Dataset<Row> result = df;
+        Set<String> targetCols = new LinkedHashSet<>(Arrays.asList(targetSchema.fieldNames()));
+        Map<String, StructField> currentMap = toFieldMap(df.schema());
+
+        // drop extra columns
+        for (String colName : df.columns()) {
+            if (!targetCols.contains(colName)) {
+                result = result.drop(colName);
+            }
+        }
+
+        // add missing columns and cast
+        for (StructField field : targetSchema.fields()) {
+            String name = field.name();
+            DataType targetType = field.dataType();
+
+            if (!currentMap.containsKey(name)) {
+                result = result.withColumn(name, lit(null).cast(targetType));
+            } else if (unsafeColumns.contains(name)) {
+                result = result.withColumn(name, col(name).cast(DataTypes.StringType));
+            } else if (!currentMap.get(name).dataType().sameType(targetType)) {
+                result = result.withColumn(name, col(name).cast(targetType));
+            }
+        }
+
+        return result.select(toColumns(targetSchema.fieldNames()));
+    }
+
+    /**
+     * Archive existing parquet directory with timestamp suffix
+     */
+    private static Path archiveExistingParquetDirectory(FileSystem fs, Path originalPath) throws Exception {
+        if (!fs.exists(originalPath)) {
+            throw new IllegalStateException("Directory does not exist: " + originalPath);
+        }
+
+        String timestamp = LocalDateTime.now().format(ARCHIVE_TS_FORMAT);
+        Path parent = originalPath.getParent();
+        String archivedName = originalPath.getName() + "_" + timestamp;
+        Path archivedPath = parent == null ? new Path(archivedName) : new Path(parent, archivedName);
+
+        int i = 1;
+        while (fs.exists(archivedPath)) {
+            archivedName = originalPath.getName() + "_" + timestamp + "_" + i;
+            archivedPath = parent == null ? new Path(archivedName) : new Path(parent, archivedName);
+            i++;
+        }
+
+        if (!fs.rename(originalPath, archivedPath)) {
+            throw new IllegalStateException("Failed to archive directory");
+        }
+
+        return archivedPath;
+    }
+
+    /**
+     * Restore archived directory if overwrite fails
+     */
+    private static void restoreArchivedDirectory(FileSystem fs, Path originalPath, Path archivedPath) {
+        try {
+            if (fs.exists(originalPath)) {
+                fs.delete(originalPath, true);
+            }
+            if (fs.exists(archivedPath)) {
+                fs.rename(archivedPath, originalPath);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static Map<String, StructField> toFieldMap(StructType schema) {
+        Map<String, StructField> map = new LinkedHashMap<>();
+        for (StructField field : schema.fields()) {
+            map.put(field.name(), field);
+        }
+        return map;
+    }
+
+    private static Column[] toColumns(String[] names) {
+        return Arrays.stream(names)
+                .map(org.apache.spark.sql.functions::col)
+                .toArray(Column[]::new);
+    }
+
+    private static String[] normalizePartitionColumns(String... partitionColumns) {
+        if (partitionColumns == null || partitionColumns.length == 0) {
+            return new String[0];
+        }
+
+        LinkedHashSet<String> ordered = new LinkedHashSet<>();
+        for (String partitionColumn : partitionColumns) {
+            if (partitionColumn == null || partitionColumn.trim().isEmpty()) {
+                throw new IllegalArgumentException("Partition column is empty");
+            }
+            ordered.add(partitionColumn.trim());
+        }
+        return ordered.toArray(new String[0]);
+    }
+
+    private static void validatePartitionColumns(Dataset<Row> df, String... partitionColumns) {
+        validatePartitionColumns(df.schema(), partitionColumns);
+    }
+
+    private static void validatePartitionColumns(StructType schema, String... partitionColumns) {
+        if (partitionColumns == null || partitionColumns.length == 0) {
+            return;
+        }
+
+        Set<String> cols = new HashSet<>(Arrays.asList(schema.fieldNames()));
+        for (String partitionColumn : partitionColumns) {
+            if (!cols.contains(partitionColumn)) {
+                throw new IllegalArgumentException("Missing partition column: " + partitionColumn);
+            }
+        }
+    }
+
+    private static void writeDf(
+            Dataset<Row> df,
+            String parquetPath,
+            SaveMode saveMode,
+            String... partitionColumns
+    ) {
+        if (partitionColumns != null && partitionColumns.length > 0) {
+            df.write()
+                    .mode(saveMode)
+                    .partitionBy(partitionColumns)
+                    .parquet(parquetPath);
+        } else {
+            df.write()
+                    .mode(saveMode)
+                    .parquet(parquetPath);
+        }
+    }
+}
