@@ -1,0 +1,38 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+import java.util.Arrays;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.regexp_replace;
+
+public class FixUpdatedJsonFields {
+
+    public static void main(String[] args) {
+        SparkSession spark = SparkSession.builder()
+                .appName("FixUpdatedJsonFields")
+                .master("local[*]")
+                .getOrCreate();
+
+        Dataset<Row> df = spark.createDataset(Arrays.asList(
+                "{\"Updated @ 21/09/2020 12:08:26\":\"TRUE\",\"x\":\"y\"}",
+                "{\"abc Updated @ fffffff\":\"XXXX\",\"a\":\"b\"}",
+                "{\"Updated\":\"already_ok\",\"z\":\"1\"}",
+                "{\"Other @ value\":\"XXX\",\"k\":\"v\"}"
+        ), Encoders.STRING()).toDF("json");
+
+        Dataset<Row> df2 = df.withColumn(
+                "json",
+                regexp_replace(
+                        col("json"),
+                        "\"([^\"]*Updated)\\s*@\\s*([^\"]*)\"\\s*:\\s*(\"[^\"]*\"|true|false|null)",
+                        "\"$1\":\"$2\""
+                )
+        );
+
+        df2.show(false);
+        spark.stop();
+    }
+}
