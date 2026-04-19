@@ -1,0 +1,103 @@
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.spark.api.java.function.MapFunction;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.catalyst.encoders.RowEncoder;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+public final class EquityJsonHelper {
+
+    private EquityJsonHelper() {
+    }
+
+    public static Dataset<Row> cleanUpdatedFields(Dataset<Row> df, String jsonColumn) {
+        final StructType schema = df.schema();
+        final int jsonIndex = findIndex(schema, jsonColumn);
+
+        return df.map(
+                (MapFunction<Row, Row>) row -> {
+                    ObjectMapper mapper = new ObjectMapper();
+                    Object[] values = new Object[row.size()];
+
+                    for (int i = 0; i < row.size(); i++) {
+                        values[i] = row.get(i);
+                    }
+
+                    Object raw = row.get(jsonIndex);
+
+                    if (raw != null && raw instanceof String) {
+                        String json = (String) raw;
+
+                        if (!json.trim().isEmpty()) {
+                            try {
+                                JsonNode root = mapper.readTree(json);
+                                clean(root);
+                                values[jsonIndex] = mapper.writeValueAsString(root);
+                            } catch (Exception e) {
+                                values[jsonIndex] = json;
+                            }
+                        }
+                    }
+
+                    return RowFactory.create(values);
+                },
+                RowEncoder.apply(schema)
+        );
+    }
+
+    private static int findIndex(StructType schema, String name) {
+        StructField[] fields = schema.fields();
+        for (int i = 0; i < fields.length; i++) {
+            if (fields[i].name().equals(name)) {
+                return i;
+            }
+        }
+        throw new IllegalArgumentException("Column not found: " + name);
+    }
+
+    private static void clean(JsonNode node) {
+        if (node == null) {
+            return;
+        }
+
+        if (node.isObject()) {
+            ObjectNode obj = (ObjectNode) node;
+            List<String> toRemove = new ArrayList<String>();
+            Iterator<Map.Entry<String, JsonNode>> fields = obj.fields();
+
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                String key = entry.getKey();
+
+                if (isUpdatedField(key)) {
+                    toRemove.add(key);
+                } else {
+                    clean(entry.getValue());
+                }
+            }
+
+            for (String key : toRemove) {
+                obj.remove(key);
+            }
+
+        } else if (node.isArray()) {
+            Iterator<JsonNode> it = node.elements();
+            while (it.hasNext()) {
+                clean(it.next());
+            }
+        }
+    }
+
+    private static boolean isUpdatedField(String key) {
+        return key != null && key.matches("(?i).*updated\\s*@\\s*.*");
+    }
+}
