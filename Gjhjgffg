@@ -1,0 +1,196 @@
+package com.example.spark.helper;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+import scala.Tuple2;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+
+public final class JsonFlattenHelper {
+
+    private static final String SEP = "__";
+
+    private JsonFlattenHelper() {
+    }
+
+    public static Dataset<Row> flattenJsonColumn(Dataset<Row> df, String sourceColumnName) {
+        if (df == null) {
+            throw new IllegalArgumentException("df must not be null");
+        }
+        if (sourceColumnName == null || sourceColumnName.trim().isEmpty()) {
+            throw new IllegalArgumentException("sourceColumnName must not be empty");
+        }
+
+        final SparkSession spark = df.sparkSession();
+        final StructType inputSchema = df.schema();
+        final int sourceColumnIndex = findColumnIndex(inputSchema, sourceColumnName);
+
+        final JavaRDD<Row> baseRdd = df.toJavaRDD();
+
+        JavaRDD<LinkedHashMap<String, String>> flatMapRdd = baseRdd.mapPartitions(iterator -> {
+            final ObjectMapper mapper = new ObjectMapper();
+
+            return new Iterator<LinkedHashMap<String, String>>() {
+                @Override
+                public boolean hasNext() {
+                    return iterator.hasNext();
+                }
+
+                @Override
+                public LinkedHashMap<String, String> next() {
+                    Row row = iterator.next();
+                    LinkedHashMap<String, String> flatMap = new LinkedHashMap<String, String>();
+
+                    Object raw = row.get(sourceColumnIndex);
+                    if (raw == null) {
+                        return flatMap;
+                    }
+
+                    String json = String.valueOf(raw);
+                    if (json.trim().isEmpty()) {
+                        return flatMap;
+                    }
+
+                    String trimmed = json.trim();
+
+                    // only flatten JSON objects; arrays / text / invalid content are left as-is
+                    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+                        return flatMap;
+                    }
+
+                    try {
+                        JsonNode root = mapper.readTree(trimmed);
+                        if (root != null && root.isObject()) {
+                            flattenNode(root, sanitize(sourceColumnName), flatMap, mapper);
+                        }
+                    } catch (Exception e) {
+                        // leave row unchanged if invalid JSON
+                    }
+
+                    return flatMap;
+                }
+            };
+        });
+
+        List<String> discoveredFlatColumns = flatMapRdd
+                .flatMap(flatMap -> flatMap.keySet().iterator())
+                .distinct()
+                .collect();
+
+        if (discoveredFlatColumns == null || discoveredFlatColumns.isEmpty()) {
+            return df;
+        }
+
+        LinkedHashSet<String> orderedFlatColumns = new LinkedHashSet<String>(discoveredFlatColumns);
+        List<String> finalFlatColumns = new ArrayList<String>(orderedFlatColumns);
+
+        StructType finalSchema = buildFinalSchema(inputSchema, finalFlatColumns);
+
+        JavaRDD<Row> finalRdd = baseRdd.zip(flatMapRdd).map(tuple -> {
+            Row row = tuple._1();
+            LinkedHashMap<String, String> flatMap = tuple._2();
+
+            Object[] values = new Object[row.size() + finalFlatColumns.size()];
+
+            for (int i = 0; i < row.size(); i++) {
+                values[i] = row.get(i);
+            }
+
+            for (int i = 0; i < finalFlatColumns.size(); i++) {
+                values[row.size() + i] = flatMap.get(finalFlatColumns.get(i));
+            }
+
+            return RowFactory.create(values);
+        });
+
+        return spark.createDataFrame(finalRdd, finalSchema);
+    }
+
+    private static void flattenNode(
+            JsonNode node,
+            String prefix,
+            LinkedHashMap<String, String> out,
+            ObjectMapper mapper
+    ) throws Exception {
+        if (node == null || node.isNull()) {
+            return;
+        }
+
+        if (node.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+
+                String childName = sanitize(entry.getKey());
+                String childPrefix = prefix + SEP + childName;
+                JsonNode childNode = entry.getValue();
+
+                if (childNode == null || childNode.isNull()) {
+                    out.put(childPrefix, null);
+                } else if (childNode.isObject()) {
+                    flattenNode(childNode, childPrefix, out, mapper);
+                } else if (childNode.isArray()) {
+                    out.put(childPrefix, mapper.writeValueAsString(childNode));
+                } else {
+                    out.put(childPrefix, childNode.asText());
+                }
+            }
+        } else {
+            out.put(prefix, node.asText());
+        }
+    }
+
+    private static StructType buildFinalSchema(StructType inputSchema, List<String> flatColumns) {
+        List<StructField> fields = new ArrayList<StructField>();
+
+        for (StructField field : inputSchema.fields()) {
+            fields.add(field);
+        }
+
+        for (String flatColumn : flatColumns) {
+            fields.add(new StructField(
+                    flatColumn,
+                    DataTypes.StringType,
+                    true,
+                    Metadata.empty()
+            ));
+        }
+
+        return new StructType(fields.toArray(new StructField[0]));
+    }
+
+    private static int findColumnIndex(StructType schema, String columnName) {
+        StructField[] fields = schema.fields();
+
+        for (int i = 0; i < fields.length; i++) {
+            if (fields[i].name().equals(columnName)) {
+                return i;
+            }
+        }
+
+        throw new IllegalArgumentException("Column not found: " + columnName);
+    }
+
+    private static String sanitize(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return "unknown";
+        }
+
+        return value.trim().replace(".", SEP);
+    }
+}
