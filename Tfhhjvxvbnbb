@@ -1,0 +1,161 @@
+package com.example.spark.helper;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.*;
+
+public final class JsonFlattenNoSchemaHelper {
+
+    private static final String SEP = "__";
+
+    private JsonFlattenNoSchemaHelper() {
+    }
+
+    public static Dataset<Row> flattenJsonColumn(Dataset<Row> df, String sourceColumnName) {
+        if (df == null) {
+            throw new IllegalArgumentException("df must not be null");
+        }
+        if (sourceColumnName == null || sourceColumnName.trim().isEmpty()) {
+            throw new IllegalArgumentException("sourceColumnName must not be empty");
+        }
+
+        SparkSession spark = df.sparkSession();
+        StructType inputSchema = df.schema();
+        int jsonIndex = findColumnIndex(inputSchema, sourceColumnName);
+
+        JavaRDD<Row> baseRdd = df.toJavaRDD();
+
+        JavaRDD<LinkedHashMap<String, String>> flattenedRdd = baseRdd.map(row -> {
+            ObjectMapper mapper = new ObjectMapper();
+            LinkedHashMap<String, String> out = new LinkedHashMap<String, String>();
+
+            Object raw = row.get(jsonIndex);
+            if (raw == null) {
+                return out;
+            }
+
+            String json = String.valueOf(raw);
+            if (json.trim().isEmpty()) {
+                return out;
+            }
+
+            String trimmed = json.trim();
+            if (!trimmed.startsWith("{")) {
+                return out;
+            }
+
+            try {
+                JsonNode root = mapper.readTree(trimmed);
+                if (root != null && root.isObject()) {
+                    flattenNode(root, sourceColumnName, out, mapper);
+                }
+            } catch (Exception e) {
+                // leave row unchanged if invalid json
+            }
+
+            return out;
+        });
+
+        LinkedHashSet<String> flattenedColumns = new LinkedHashSet<String>(
+                flattenedRdd.flatMap(map -> map.keySet().iterator()).distinct().collect()
+        );
+
+        if (flattenedColumns.isEmpty()) {
+            return df;
+        }
+
+        List<String> finalFlatCols = new ArrayList<String>(flattenedColumns);
+
+        List<StructField> finalFields = new ArrayList<StructField>();
+        for (StructField f : inputSchema.fields()) {
+            finalFields.add(f);
+        }
+        for (String flatCol : finalFlatCols) {
+            finalFields.add(new StructField(flatCol, DataTypes.StringType, true, Metadata.empty()));
+        }
+
+        StructType finalSchema = new StructType(finalFields.toArray(new StructField[0]));
+
+        JavaRDD<Row> finalRdd = baseRdd.zip(flattenedRdd).map(tuple -> {
+            Row row = tuple._1();
+            LinkedHashMap<String, String> flatMap = tuple._2();
+
+            Object[] values = new Object[row.size() + finalFlatCols.size()];
+
+            for (int i = 0; i < row.size(); i++) {
+                values[i] = row.get(i);
+            }
+
+            for (int i = 0; i < finalFlatCols.size(); i++) {
+                values[row.size() + i] = flatMap.get(finalFlatCols.get(i));
+            }
+
+            return RowFactory.create(values);
+        });
+
+        return spark.createDataFrame(finalRdd, finalSchema);
+    }
+
+    private static void flattenNode(
+            JsonNode node,
+            String prefix,
+            LinkedHashMap<String, String> out,
+            ObjectMapper mapper
+    ) throws Exception {
+        if (node == null || node.isNull()) {
+            return;
+        }
+
+        if (node.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                String childKey = sanitize(entry.getKey());
+                String childPrefix = prefix + SEP + childKey;
+                JsonNode childNode = entry.getValue();
+
+                if (childNode != null && childNode.isObject()) {
+                    flattenNode(childNode, childPrefix, out, mapper);
+                } else if (childNode != null && (childNode.isArray() || childNode.isContainerNode())) {
+                    out.put(childPrefix, mapper.writeValueAsString(childNode));
+                } else if (childNode != null && !childNode.isNull()) {
+                    out.put(childPrefix, childNode.asText());
+                } else {
+                    out.put(childPrefix, null);
+                }
+            }
+        } else if (node instanceof ArrayNode) {
+            out.put(prefix, mapper.writeValueAsString(node));
+        } else {
+            out.put(prefix, node.asText());
+        }
+    }
+
+    private static int findColumnIndex(StructType schema, String columnName) {
+        StructField[] fields = schema.fields();
+        for (int i = 0; i < fields.length; i++) {
+            if (fields[i].name().equals(columnName)) {
+                return i;
+            }
+        }
+        throw new IllegalArgumentException("Column not found: " + columnName);
+    }
+
+    private static String sanitize(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return "unknown";
+        }
+        return value.trim().replace(".", SEP);
+    }
+}
