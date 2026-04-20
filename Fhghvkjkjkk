@@ -1,0 +1,14 @@
+import static org.apache.spark.sql.functions.*;
+
+Dataset<String> jsonDs = preparedDf
+    .select(col(jsonCandidateColumn))
+    .where(col(jsonCandidateColumn).isNotNull())
+    .where(trim(col(jsonCandidateColumn)).rlike("^\\{.*\\}$"))
+    .orderBy(length(trim(col(jsonCandidateColumn))).desc())
+    .limit(200)
+    .as(Encoders.STRING());
+
+StructType jsonSchema = df.sparkSession()
+    .read()
+    .json(jsonDs)
+    .schema();
