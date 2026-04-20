@@ -1,0 +1,7 @@
+Dataset<String> jsonDs = preparedDf
+    .select(col(jsonCandidateColumn).cast("string").alias("json"))
+    .where(col("json").isNotNull())
+    .where(trim(col("json")).rlike("^\\{.*\\}$"))
+    .orderBy(length(col("json")).desc())   // 🔥 IMPORTANT
+    .limit(200)                            // 🔥 IMPORTANT
+    .as(Encoders.STRING());
