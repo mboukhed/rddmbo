@@ -1,0 +1,19 @@
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+
+import java.util.Comparator;
+import java.util.List;
+
+Dataset<String> baseJsonDs = preparedDf
+        .select(col(jsonCandidateColumn))
+        .where(col(jsonCandidateColumn).isNotNull())
+        .where(trim(col(jsonCandidateColumn)).rlike("^\\{.*\\}$"))
+        .as(Encoders.STRING());
+
+List<String> top200 = baseJsonDs.toJavaRDD().takeOrdered(
+        200,
+        Comparator.comparingInt(String::length).reversed()
+);
+
+Dataset<String> jsonDs = df.sparkSession().createDataset(top200, Encoders.STRING());
