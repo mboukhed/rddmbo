@@ -1,0 +1,156 @@
+package com.example.spark;
+
+import org.apache.spark.api.java.function.FilterFunction;
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.*;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.*;
+
+public final class JsonFlattener {
+
+    private static final String SEP = "__";
+
+    private JsonFlattener() {
+    }
+
+    /**
+     * Entrée principale :
+     * - infère un schéma global
+     * - affiche le schéma dans les logs
+     * - parse
+     * - flatten avec règle globale
+     */
+    public static Dataset<Row> flattenJsonColumn(Dataset<Row> df, String jsonColumn) {
+
+        StructType schema = inferGlobalObjectSchema(df, jsonColumn);
+
+        // 🔥 LOG DU SCHEMA
+        System.out.println("==== JSON SCHEMA ====");
+        System.out.println(schema.prettyJson());
+        System.out.println("=====================");
+
+        return flattenJsonColumn(df, jsonColumn, schema);
+    }
+
+    /**
+     * Version avec schéma fourni (réutilisation)
+     */
+    public static Dataset<Row> flattenJsonColumn(Dataset<Row> df, String jsonColumn, StructType schema) {
+
+        if (schema == null || schema.fields().length == 0) {
+            return df;
+        }
+
+        String parsedCol = jsonColumn + "_parsed";
+
+        Dataset<Row> parsed = df.withColumn(parsedCol, from_json(col(jsonColumn), schema));
+
+        List<Column> cols = new ArrayList<>();
+
+        // garder colonnes d'origine
+        for (String c : df.columns()) {
+            cols.add(col(c));
+        }
+
+        // ajouter flatten
+        cols.addAll(flattenStruct(col(parsedCol), schema, jsonColumn));
+
+        return parsed.select(cols.toArray(new Column[0]));
+    }
+
+    /**
+     * Infère schéma global uniquement sur JSON objet
+     */
+    private static StructType inferGlobalObjectSchema(Dataset<Row> df, String jsonColumn) {
+
+        SparkSession spark = df.sparkSession();
+
+        Dataset<String> jsonDs = df
+                .select(col(jsonColumn).cast("string"))
+                .filter(col(jsonColumn).isNotNull())
+                .filter(trim(col(jsonColumn)).notEqual(lit("")))
+                .as(Encoders.STRING())
+                .filter((FilterFunction<String>) JsonFlattener::isJsonObject);
+
+        List<String> sample = jsonDs.takeAsList(1);
+        if (sample.isEmpty()) {
+            return new StructType();
+        }
+
+        return spark.read().json(jsonDs).schema();
+    }
+
+    /**
+     * Flatten uniquement STRUCT
+     */
+    private static List<Column> flattenStruct(Column parentCol, StructType schema, String prefix) {
+
+        List<Column> result = new ArrayList<>();
+
+        for (StructField field : schema.fields()) {
+
+            String name = field.name();
+            DataType type = field.dataType();
+
+            Column child = parentCol.getField(name);
+            String alias = prefix + SEP + name;
+
+            if (type instanceof StructType struct) {
+
+                // règle STOP globale
+                if (shouldStop(struct)) {
+                    result.add(to_json(child).alias(alias));
+                } else {
+                    result.addAll(flattenStruct(child, struct, alias));
+                }
+
+            } else {
+                // primitive / array / map
+                result.add(child.alias(alias));
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * STOP si enfant interdit
+     */
+    private static boolean shouldStop(StructType schema) {
+
+        for (StructField f : schema.fields()) {
+            String n = f.name();
+
+            if (isNumeric(n) || hasMoreThanOneDigit(n)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isNumeric(String s) {
+        return s != null && s.matches("\\d+");
+    }
+
+    private static boolean hasMoreThanOneDigit(String s) {
+        if (s == null) return false;
+
+        int count = 0;
+        for (char c : s.toCharArray()) {
+            if (Character.isDigit(c)) {
+                count++;
+                if (count > 1) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isJsonObject(String s) {
+        if (s == null) return false;
+        String v = s.trim();
+        return !v.isEmpty() && v.startsWith("{") && v.endsWith("}");
+    }
+}
