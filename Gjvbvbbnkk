@@ -1,0 +1,24 @@
+✅ Correctif bref
+Parser sécurisé
+Java
+String parsedCol = jsonColumn + "_parsed";
+
+Dataset<Row> parsed = df.withColumn(
+    parsedCol,
+    functions.when(
+        functions.col(jsonColumn).isNotNull()
+            .and(functions.trim(functions.col(jsonColumn)).startsWith("{")),
+        functions.from_json(functions.col(jsonColumn), schema)
+    ).otherwise(functions.lit(null).cast(schema))
+);
+Ne pas garder la colonne JSON source
+Java
+for (String c : df.columns()) {
+    if (!c.equals(jsonColumn) && !c.equals(parsedCol)) {
+        cols.add(functions.col(c));
+    }
+}
+Flatten sur la colonne parsée
+Java
+cols.addAll(flattenStruct(functions.col(parsedCol), schema, jsonColumn));
+👉 C’est tout.
