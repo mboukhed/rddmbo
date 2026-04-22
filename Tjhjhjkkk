@@ -1,0 +1,9 @@
+String parsedCol = jsonColumn + "_parsed";
+
+Dataset<Row> parsed = df.withColumn(
+    parsedCol,
+    functions.when(
+        functions.trim(functions.col(jsonColumn)).startsWith("{"),
+        functions.from_json(functions.col(jsonColumn), schema)
+    ).otherwise(functions.lit(null).cast(schema))
+);
