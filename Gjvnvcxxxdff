@@ -1,0 +1,50 @@
+👉 Là je te réponds direct : NON, ce code n’est pas correct.
+❌ Le problème EXACT
+Tu fais :
+Java
+obj.remove(key);
+obj.set(newKey, value);
+👉 dans le while (fields.hasNext())
+➡️ Donc tu modifies l’objet pendant que tu l’itères
+⚠️ Conséquences
+certains champs sautés
+comportement aléatoire
+“ça ne rentre pas dedans”
+bugs invisibles
+🎯 Règle absolue
+❌ NE JAMAIS modifier obj dans la boucle ✔️ modifier après la boucle
+✅ Correction MINIMALE (sans changer ton code)
+👉 Tu gardes TON code et tu fais juste ça :
+1. En haut
+Java
+Map<String, String> toRename = new LinkedHashMap<>();
+2. Remplace ton bloc actuel
+Java
+String newKey = renameKey(key);
+
+if (!newKey.equals(key)) {
+    obj.remove(key);
+    obj.set(newKey, value);
+}
+👉 par :
+Java
+String newKey = renameKey(key);
+
+if (!newKey.equals(key)) {
+    toRename.put(key, newKey);
+}
+3. Après ton for (toRemove)
+Java
+for (Map.Entry<String, String> e : toRename.entrySet()) {
+    JsonNode value = obj.remove(e.getKey());
+    obj.set(e.getValue(), value);
+}
+🎯 Résultat
+✔️ ton code actuel reste
+✔️ ton clean reste
+✔️ ton isUpdatedField reste
+✔️ rename ajouté proprement
+💬 Conclusion claire
+👉 Ton erreur = modifier pendant boucle
+👉 Fix = bufferiser puis appliquer après
+Si tu fais juste ça → ton bug disparaît direct 👍
