@@ -1,0 +1,14 @@
+String jsonColName = "json_col";
+int maxDots = 5;
+
+Column cleanedCol = col(jsonColName);
+
+for (int i = 0; i < maxDots; i++) {
+    cleanedCol = regexp_replace(
+        cleanedCol,
+        "\"([^\"]*)\\.([^\"]*?)\"\\s*:",  // matche uniquement "clé.avec.point" :
+        "\"$1__$2\" :"                     // remplace le point par __
+    );
+}
+
+Dataset<Row> result = df.withColumn("json_fixed", cleanedCol);
