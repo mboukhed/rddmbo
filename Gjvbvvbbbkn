@@ -1,0 +1,16 @@
+public static Dataset<Row> replaceDotsInJsonKeys(Dataset<Row> df, String jsonColName) {
+
+    int maxDots = 10;
+
+    Column cleanedCol = col(jsonColName);
+
+    for (int i = 0; i < maxDots; i++) {
+        cleanedCol = regexp_replace(
+                cleanedCol,
+                "\"([^\".]*)\\.([^\".]*)\"\\s*:",
+                "\"$1__$2\":"
+        );
+    }
+
+    return df.withColumn(jsonColName, cleanedCol);
+}
