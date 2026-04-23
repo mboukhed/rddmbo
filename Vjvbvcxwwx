@@ -1,0 +1,48 @@
+Oui. Garde ton traitement actuel, et ajoute le rename comme deuxième traitement dans le else.
+Java
+while (fields.hasNext()) {
+    Map.Entry<String, JsonNode> entry = fields.next();
+
+    String key = entry.getKey();
+    JsonNode value = entry.getValue();
+
+    if (isUpdatedField(key)) {
+        toRemove.add(key);          // traitement actuel
+    } else {
+        clean(value);               // traitement actuel
+
+        String newKey = renameKey(key);  // nouveau traitement
+
+        if (!newKey.equals(key)) {
+            obj.remove(key);
+            obj.set(newKey, value);
+        }
+    }
+}
+Ajoute ça :
+Java
+private static String renameKey(String key) {
+    if (key == null) {
+        return null;
+    }
+
+    if (isNumericKey(key)) {
+        return key;
+    }
+
+    return key.replace(".", "__");
+}
+
+private static boolean isNumericKey(String key) {
+    return key.matches("[+-]?\\d+(\\.\\d+)?");
+}
+Et tu gardes ton ancien bloc après la boucle :
+Java
+for (String key : toRemove) {
+    obj.remove(key);
+}
+Donc logique finale :
+si isUpdatedField(key) → tu supprimes comme avant
+sinon → tu continues le nettoyage récursif comme avant
+puis tu renommes . en __
+sauf clés numériques 123, 45.67
