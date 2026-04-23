@@ -1,0 +1,18 @@
+import org.apache.spark.sql.Column;
+import static org.apache.spark.sql.functions.*;
+
+String jsonColName = "json_col";
+int maxDots = 5; // nombre max de points dans une clé
+
+Column cleanedCol = col(jsonColName);
+
+for (int i = 0; i < maxDots; i++) {
+    cleanedCol = regexp_replace(
+        cleanedCol,
+        "(?<=\")([^\".]*)\\.([^\".]*?)(?=\"\\s*:)",
+        "$1__$2"
+    );
+}
+
+Dataset<Row> result = df.withColumn("json_fixed", cleanedCol);
+result.show(false);
