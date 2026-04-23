@@ -1,0 +1,72 @@
+import com.fasterxml.jackson.core.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+import java.io.StringWriter;
+import java.util.regex.Pattern;
+
+import static org.apache.spark.sql.functions.callUDF;
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.types.DataTypes.StringType;
+
+public final class JsonKeyCleaner {
+
+    private static final String UDF_NAME = "clean_json_keys_streaming";
+    private static final Pattern NUMERIC_KEY =
+            Pattern.compile("[+-]?\\d+(\\.\\d+)?");
+
+    private JsonKeyCleaner() {}
+
+    public static Dataset<Row> cleanJsonColumn(Dataset<Row> df, String jsonColName) {
+
+        df.sparkSession().udf().register(
+                UDF_NAME,
+                (String json) -> {
+                    if (json == null || json.trim().isEmpty()) {
+                        return json;
+                    }
+                    return cleanJsonKeys(json);
+                },
+                StringType
+        );
+
+        return df.withColumn(jsonColName, callUDF(UDF_NAME, col(jsonColName)));
+    }
+
+    private static String cleanJsonKeys(String json) throws Exception {
+        JsonFactory factory = Holder.MAPPER.getFactory();
+
+        StringWriter writer = new StringWriter(json.length());
+        JsonParser parser = factory.createParser(json);
+        JsonGenerator generator = factory.createGenerator(writer);
+
+        while (parser.nextToken() != null) {
+            JsonToken token = parser.currentToken();
+
+            if (token == JsonToken.FIELD_NAME) {
+                String oldKey = parser.currentName();
+                String newKey = isNumericKey(oldKey)
+                        ? oldKey
+                        : oldKey.replace(".", "__");
+
+                generator.writeFieldName(newKey);
+            } else {
+                generator.copyCurrentEvent(parser);
+            }
+        }
+
+        parser.close();
+        generator.close();
+
+        return writer.toString();
+    }
+
+    private static boolean isNumericKey(String key) {
+        return key != null && NUMERIC_KEY.matcher(key).matches();
+    }
+
+    private static final class Holder {
+        private static final ObjectMapper MAPPER = new ObjectMapper();
+    }
+}
