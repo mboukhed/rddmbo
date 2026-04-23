@@ -1,0 +1,77 @@
+😂 ok je vois, tu veux ultra simple, sans “pollution”.
+👉 Pas de champs inutiles, pas de trucs bizarres.
+✅ Table CLEAN
+SQL
+CREATE TABLE job_monitoring
+(
+    run_id String,
+    job_name String,
+    event_type String,   -- START / END / METRIC
+    event_time DateTime,
+
+    status String,
+
+    metric_name String,
+    metric_value Float64,
+
+    error_message String
+)
+ENGINE = MergeTree
+ORDER BY (job_name, run_id, event_time);
+✅ Classe Java CLEAN
+Java
+import java.time.LocalDateTime;
+
+public record JobMonitoringEvent(
+        String runId,
+        String jobName,
+        String eventType,
+        LocalDateTime eventTime,
+        String status,
+        String metricName,
+        Double metricValue,
+        String errorMessage
+) {}
+✅ Exemple
+START
+Java
+new JobMonitoringEvent(
+    "run-1",
+    "job",
+    "START",
+    LocalDateTime.now(),
+    "STARTED",
+    null,
+    null,
+    null
+);
+METRIC
+Java
+new JobMonitoringEvent(
+    "run-1",
+    "job",
+    "METRIC",
+    LocalDateTime.now(),
+    null,
+    "input_count",
+    1000000.0,
+    null
+);
+END
+Java
+new JobMonitoringEvent(
+    "run-1",
+    "job",
+    "END",
+    LocalDateTime.now(),
+    "SUCCESS",
+    null,
+    null,
+    null
+);
+🎯 Résumé
+✔️ zéro complexité
+✔️ une seule table
+✔️ insert simple depuis Spark
+✔️ lisible direct
+Si tu veux encore mieux : 👉 je peux te faire une version 100% compatible Spark Dataset → ClickHouse direct sans mapping.
