@@ -1,0 +1,21 @@
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.regexp_replace;
+
+public static Dataset<Row> replaceDotsInJsonKeys(Dataset<Row> df, String jsonCol) {
+    Column c = col(jsonCol);
+
+    // on répète plusieurs fois pour gérer plusieurs points dans une même clé
+    for (int i = 0; i < 20; i++) {
+        c = regexp_replace(
+                c,
+                "\"([^\"]*)\\.([^\"]*)\"\\s*:",
+                "\"$1__$2\":"
+        );
+    }
+
+    return df.withColumn(jsonCol, c);
+}
