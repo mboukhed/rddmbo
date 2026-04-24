@@ -1,0 +1,54 @@
+Oui, ajoute une liste de colonnes normales à garder/ajouter dans le select.
+Java
+public static Dataset<Row> extractJsonFields(
+        Dataset<Row> df,
+        List<String> normalColumns,
+        Map<String, List<String>> fieldsByJsonColumn
+) {
+    List<Column> cols = new ArrayList<>();
+
+    // colonnes normales non JSON
+    for (String c : normalColumns) {
+        cols.add(col(c));
+    }
+
+    // champs extraits depuis les colonnes JSON
+    for (Map.Entry<String, List<String>> e : fieldsByJsonColumn.entrySet()) {
+        String jsonCol = e.getKey();
+
+        for (String fieldPath : e.getValue()) {
+            String jsonPath = "$." + fieldPath;
+            String outputCol = jsonCol + "__" + fieldPath.replace(".", "__");
+
+            cols.add(
+                get_json_object(col(jsonCol), jsonPath)
+                    .alias(outputCol)
+            );
+        }
+    }
+
+    return df.select(cols.toArray(new Column[0]));
+}
+Exemple :
+Java
+List<String> normalColumns = Arrays.asList(
+        "id",
+        "date_traitement",
+        "source"
+);
+
+Map<String, List<String>> fields = new LinkedHashMap<>();
+
+fields.put("A", Arrays.asList("client.nom", "client.age"));
+fields.put("D", Arrays.asList("contrat.id", "contrat.montant"));
+
+Dataset<Row> result = extractJsonFields(df, normalColumns, fields);
+Résultat :
+Plain text
+id
+date_traitement
+source
+A__client__nom
+A__client__age
+D__contrat__id
+D__contrat__montant
