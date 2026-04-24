@@ -1,0 +1,59 @@
+Oui : passe une Map<colonneJson, listeDesChamps>.
+Java
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+import java.util.*;
+
+import static org.apache.spark.sql.functions.*;
+
+public static Dataset<Row> extractJsonFieldsFromManyColumns(
+        Dataset<Row> df,
+        Map<String, List<String>> fieldsByJsonColumn
+) {
+    List<Column> selectCols = new ArrayList<>();
+
+    // garder toutes les colonnes existantes
+    for (String c : df.columns()) {
+        selectCols.add(col(c));
+    }
+
+    // extraire les champs depuis chaque colonne JSON
+    for (Map.Entry<String, List<String>> entry : fieldsByJsonColumn.entrySet()) {
+        String jsonColumn = entry.getKey();
+
+        for (String field : entry.getValue()) {
+            String jsonPath = "$." + field;
+            String outputName = jsonColumn + "__" + field.replace(".", "__");
+
+            selectCols.add(
+                    get_json_object(col(jsonColumn), jsonPath).alias(outputName)
+            );
+        }
+    }
+
+    return df.select(selectCols.toArray(new Column[0]));
+}
+Exemple :
+Java
+Map<String, List<String>> fieldsByColumn = new LinkedHashMap<>();
+
+fieldsByColumn.put("A", Arrays.asList(
+        "client.nom",
+        "client.adresse.ville"
+));
+
+fieldsByColumn.put("D", Arrays.asList(
+        "contrat.id",
+        "contrat.date.effet"
+));
+
+Dataset<Row> result =
+        extractJsonFieldsFromManyColumns(df, fieldsByColumn);
+Colonnes générées :
+Plain text
+A__client__nom
+A__client__adresse__ville
+D__contrat__id
+D__contrat__date__effet
