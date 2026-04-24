@@ -1,0 +1,56 @@
+Version robuste avec champs absents → null, plusieurs colonnes JSON :
+Java
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.Column;
+
+import java.util.*;
+
+import static org.apache.spark.sql.functions.*;
+
+public static Dataset<Row> extractJsonFields(
+        Dataset<Row> df,
+        Map<String, List<String>> fieldsByJsonColumn
+) {
+    List<Column> cols = new ArrayList<>();
+
+    // colonnes existantes
+    for (String c : df.columns()) {
+        cols.add(col(c));
+    }
+
+    for (Map.Entry<String, List<String>> e : fieldsByJsonColumn.entrySet()) {
+        String jsonCol = e.getKey();
+
+        for (String fieldPath : e.getValue()) {
+            String jsonPath = "$." + fieldPath;
+            String outputCol = jsonCol + "__" + fieldPath.replace(".", "__");
+
+            cols.add(
+                get_json_object(col(jsonCol), jsonPath)
+                    .alias(outputCol)
+            );
+        }
+    }
+
+    return df.select(cols.toArray(new Column[0]));
+}
+Exemple :
+Java
+Map<String, List<String>> fields = new LinkedHashMap<>();
+
+fields.put("A", Arrays.asList(
+        "client.nom",
+        "client.adresse.ville",
+        "client.age"
+));
+
+fields.put("D", Arrays.asList(
+        "contrat.id",
+        "contrat.montant"
+));
+
+Dataset<Row> result = extractJsonFields(df, fields);
+Si un champ n’existe pas dans une ligne :
+Plain text
+A__client__adresse__ville = null
+Aucun crash.
