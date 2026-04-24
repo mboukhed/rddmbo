@@ -1,0 +1,50 @@
+Oui. Le plus simple : get_json_object.
+Java
+import org.apache.spark.sql.Column;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.*;
+
+public static Dataset<Row> extractJsonFields(
+        Dataset<Row> df,
+        String jsonColumn,
+        List<String> fields
+) {
+    List<Column> selectCols = new ArrayList<>();
+
+    // garder les colonnes existantes
+    for (String c : df.columns()) {
+        selectCols.add(col(c));
+    }
+
+    // ajouter les champs extraits
+    for (String field : fields) {
+        String jsonPath = "$." + field;              // A.B.C => $.A.B.C
+        String outputName = field.replace(".", "__"); // A.B.C => A__B__C
+
+        selectCols.add(
+                get_json_object(col(jsonColumn), jsonPath).alias(outputName)
+        );
+    }
+
+    return df.select(selectCols.toArray(new Column[0]));
+}
+Exemple :
+Java
+List<String> fields = Arrays.asList(
+        "A.B.C",
+        "client.nom",
+        "client.adresse.ville"
+);
+
+Dataset<Row> result = extractJsonFields(df, "json_col", fields);
+Résultat colonnes ajoutées :
+Plain text
+A__B__C
+client__nom
+client__adresse__ville
+get_json_object retourne toujours String.
