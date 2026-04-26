@@ -1,0 +1,8 @@
+Dataset<Row> emptyDf = sc.createDataFrame(
+        new ArrayList<Row>(),
+        schema
+);
+
+emptyDf.write()
+       .mode(SaveMode.Overwrite)
+       .parquet(SCHEMA_PATH + "/" + columnName);
