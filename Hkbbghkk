@@ -1,0 +1,16 @@
+private static void writeSchemaAzure(
+        SparkSession spark,
+        StructType schema,
+        String outputPath
+) throws Exception {
+
+    org.apache.hadoop.fs.Path path = new org.apache.hadoop.fs.Path(outputPath);
+    org.apache.hadoop.fs.FileSystem fs =
+            path.getFileSystem(spark.sparkContext().hadoopConfiguration());
+
+    try (BufferedWriter writer = new BufferedWriter(
+            new OutputStreamWriter(fs.create(path, true), StandardCharsets.UTF_8)
+    )) {
+        writer.write(schema.treeString()); // équivalent printSchema
+    }
+}
