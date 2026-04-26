@@ -1,0 +1,40 @@
+Oui.
+Mets ton zip dans :
+Plain text
+src/main/resources/ddl/clickhouse.zip
+Lecture à la demande d’un fichier précis :
+Java
+public static String readFileFromZipResource(String zipResourcePath, String fileName) throws IOException {
+    ClassLoader cl = Thread.currentThread().getContextClassLoader();
+
+    try (InputStream is = cl.getResourceAsStream(zipResourcePath)) {
+        if (is == null) {
+            throw new FileNotFoundException("Resource not found: " + zipResourcePath);
+        }
+
+        try (ZipInputStream zis = new ZipInputStream(is, StandardCharsets.UTF_8)) {
+            ZipEntry entry;
+
+            while ((entry = zis.getNextEntry()) != null) {
+                if (!entry.isDirectory() && entry.getName().equals(fileName)) {
+                    return new String(zis.readAllBytes(), StandardCharsets.UTF_8);
+                }
+            }
+        }
+    }
+
+    throw new FileNotFoundException("File not found in zip: " + fileName);
+}
+Imports :
+Java
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+Utilisation :
+Java
+String ddl = readFileFromZipResource(
+    "ddl/clickhouse.zip",
+    "DDL_CLICKHOUSE_MONITORING.sql"
+);
+Sur Azure/AKS, si le zip est dans le jar, ça marche pareil.
