@@ -1,0 +1,41 @@
+Java
+String sql = """
+    INSERT INTO run_monitoring
+    (
+        application_id,
+        application_name,
+        job_name,
+        step_name,
+        status,
+        start_time,
+        end_time,
+        message,
+        environment,
+        spark_master,
+        driver_host
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """;
+
+try (Connection connection = connectionService.getConnection();
+     PreparedStatement ps = connection.prepareStatement(sql)) {
+
+    ps.setString(1, run.getApplicationId());
+    ps.setString(2, run.getApplicationName());
+    ps.setString(3, run.getJobName());
+    ps.setString(4, run.getStepName());
+    ps.setString(5, run.getStatus());
+
+    ps.setTimestamp(6, run.getStartTime() == null ? null : Timestamp.valueOf(run.getStartTime()));
+    ps.setTimestamp(7, run.getEndTime() == null ? null : Timestamp.valueOf(run.getEndTime()));
+
+    ps.setString(8, run.getMessage());
+    ps.setString(9, run.getEnvironment());
+    ps.setString(10, run.getSparkMaster());
+    ps.setString(11, run.getDriverHost());
+
+    ps.executeUpdate();
+}
+Import :
+Java
+import java.sql.Timestamp;
