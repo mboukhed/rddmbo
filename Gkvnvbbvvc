@@ -1,0 +1,27 @@
+public static StructType loadSchemaSafe(String path, SparkSession spark) throws Exception {
+
+    org.apache.hadoop.fs.Path hPath = new org.apache.hadoop.fs.Path(path);
+    org.apache.hadoop.fs.FileSystem fs =
+            hPath.getFileSystem(spark.sparkContext().hadoopConfiguration());
+
+    StringBuilder raw = new StringBuilder();
+
+    try (java.io.BufferedReader reader = new java.io.BufferedReader(
+            new java.io.InputStreamReader(fs.open(hPath), java.nio.charset.StandardCharsets.UTF_8)
+    )) {
+        String line;
+        while ((line = reader.readLine()) != null) {
+            raw.append(line);
+        }
+    }
+
+    String json = raw.toString().trim();
+
+    if (json.startsWith("\"") && json.endsWith("\"")) {
+        json = json.substring(1, json.length() - 1);
+    }
+
+    json = json.replace("\\\"", "\"");
+
+    return (StructType) DataType.fromJson(json);
+}
