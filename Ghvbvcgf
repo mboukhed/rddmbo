@@ -1,0 +1,41 @@
+OK 👍 ton schema vient de :
+Java
+StructType jsonSchema = df.sparkSession().read().json(jsonDs).schema();
+👉 Donc maintenant pour l’écrire en Parquet (juste le schema) :
+✔ Version directe avec TON schema
+Java
+StructType schema = jsonSchema;
+
+Dataset<Row> emptyDf = df.sparkSession().createDataFrame(
+        df.sparkSession().sparkContext().emptyRDD(),
+        schema
+);
+
+emptyDf.write()
+       .mode(SaveMode.Overwrite)
+       .parquet(path);
+✔ Version ultra simple (si tu veux inline)
+Java
+df.sparkSession()
+  .createDataFrame(df.sparkSession().sparkContext().emptyRDD(), jsonSchema)
+  .write()
+  .mode(SaveMode.Overwrite)
+  .parquet(path);
+✔ Résultat
+parquet vide
+mais avec schema complet de ton JSON flatten
+⚠️ Important pour ton cas
+Ton schema est dynamique (JSON hétérogène) :
+👉 donc tu peux :
+sauvegarder 1 schema par run
+ou versionner (recommandé)
+✔ Bonus (utile pour toi)
+Si tu veux vérifier :
+Java
+spark.read().parquet(path).printSchema();
+Résumé
+✔ tu récupères schema via read().json()
+✔ tu crées DF vide
+✔ tu write parquet
+✔ schema persiste
+Si tu veux aller plus loin (ton vrai besoin) : 👉 stocker schema en ClickHouse / JSON / versionné → je peux te faire un truc propre adapté à ton pipeline.
