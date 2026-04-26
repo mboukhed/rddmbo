@@ -1,0 +1,51 @@
+Java
+import org.apache.spark.sql.SparkSession;
+
+public class SchemaToParquetMain {
+
+    public static void main(String[] args) {
+
+        SparkSession spark = SparkSession.builder()
+                .appName("SchemaToParquet")
+                .master("local[*]")
+                .getOrCreate();
+
+        String schemaFilePath = "C:/tmp/schema.txt";
+        String parquetOutputPath = "C:/tmp/schema_parquet";
+
+        writeSchemaStringFileToParquet(spark, schemaFilePath, parquetOutputPath);
+
+        spark.stop();
+    }
+
+    public static void writeSchemaStringFileToParquet(
+            SparkSession spark,
+            String schemaFilePath,
+            String parquetOutputPath
+    ) {
+        String schemaJson = String.join(
+                "",
+                spark.read().textFile(schemaFilePath).collectAsList()
+        );
+
+        StructType schema = (StructType) DataType.fromJson(schemaJson);
+
+        Dataset<Row> emptyDf = spark.createDataFrame(
+                new ArrayList<Row>(),
+                schema
+        );
+
+        emptyDf.write()
+                .mode(SaveMode.Overwrite)
+                .parquet(parquetOutputPath);
+    }
+}
+Imports :
+Java
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.StructType;
+
+import java.util.ArrayList;
