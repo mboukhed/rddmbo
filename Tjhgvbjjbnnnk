@@ -1,0 +1,48 @@
+import java.time.LocalDateTime;
+
+@EventListener
+public void listenRunInStart(RunInSuccessEvent event) {
+
+    try {
+        Run run = event.getRunInformation();
+
+        // Spark infos
+        run.setApplicationId(sc.sparkContext().applicationId());
+        run.setApplicationName(sc.sparkContext().appName());
+
+        // master (AKS / local / yarn…)
+        run.setSparkMaster(sc.sparkContext().master());
+
+        // driver host
+        run.setDriverHost(sc.sparkContext().getConf().get("spark.driver.host", "unknown"));
+
+        // métier
+        run.setJobName("");
+        run.setStepName("START");
+
+        // environnement (à adapter)
+        run.setEnvironment(System.getProperty("env", "dev"));
+
+        // arguments si besoin
+        run.setArguments(String.join(" ", sc.sparkContext().getConf().getAll()));
+
+        // status
+        run.setStatus("STARTED");
+
+        // dates
+        run.setStartTime(LocalDateTime.now());
+        run.setEndTime(null);
+
+        // message
+        run.setMessage("Job started");
+
+        // count
+        run.setCountName("nb_rows");
+        run.setCount(0L);
+
+        monitoringService.insertRunMonitoring(run);
+
+    } catch (Exception e) {
+        throw new RuntimeException(e);
+    }
+}
