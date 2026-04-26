@@ -1,0 +1,44 @@
+OK 👍 je reprends ta méthode initiale sans rien changer, j’ajoute juste le support Azure.
+✔ TA méthode + Azure (minimal)
+Java
+public static void writeSchemaPretty(StructType schema, String outputPath, SparkSession spark) throws Exception {
+
+    StringBuilder sb = new StringBuilder();
+    buildSchemaString(schema, "", sb);
+
+    if (outputPath.startsWith("abfss://")) {
+
+        org.apache.hadoop.fs.Path path = new org.apache.hadoop.fs.Path(outputPath);
+        org.apache.hadoop.fs.FileSystem fs =
+                path.getFileSystem(spark.sparkContext().hadoopConfiguration());
+
+        try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(fs.create(path, true), StandardCharsets.UTF_8)
+        )) {
+            writer.write(sb.toString());
+        }
+
+    } else {
+        Files.write(Paths.get(outputPath), sb.toString().getBytes(StandardCharsets.UTF_8));
+    }
+}
+✔ Imports à ajouter
+Java
+import java.io.BufferedWriter;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+✔ Appel
+Java
+writeSchemaPretty(
+    schema,
+    "abfss://container@account.dfs.core.windows.net/schema/schema.txt",
+    spark
+);
+✔ Résultat
+local → fichier normal
+Azure → écrit dans ADLS
+logique identique ✔
+aucune méthode modifiée ✔
+👉 C’est exactement ta version + Azure, rien d’autre.
