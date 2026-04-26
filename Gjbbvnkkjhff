@@ -1,0 +1,53 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.StructType;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+
+public class SchemaToParquetMain {
+
+    public static void main(String[] args) throws Exception {
+
+        SparkSession spark = SparkSession.builder()
+                .appName("SchemaToParquet")
+                .master("local[*]")
+                .getOrCreate();
+
+        String schemaFilePath = "C:/tmp/schema.txt";
+        String parquetOutputPath = "C:/tmp/schema_parquet";
+
+        StructType schema = loadSchemaSafe(schemaFilePath);
+
+        Dataset<Row> emptyDf = spark.createDataFrame(
+                new ArrayList<Row>(),
+                schema
+        );
+
+        emptyDf.write()
+                .mode(SaveMode.Overwrite)
+                .parquet(parquetOutputPath);
+
+        spark.stop();
+
+        System.out.println("Schema parquet written to: " + parquetOutputPath);
+    }
+
+    public static StructType loadSchemaSafe(String path) throws IOException {
+
+        String raw = Files.readString(Paths.get(path)).trim();
+
+        if (raw.startsWith("\"") && raw.endsWith("\"")) {
+            raw = raw.substring(1, raw.length() - 1);
+        }
+
+        raw = raw.replace("\\\"", "\"");
+
+        return (StructType) DataType.fromJson(raw);
+    }
+}
