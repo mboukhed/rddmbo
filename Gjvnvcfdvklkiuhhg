@@ -1,0 +1,207 @@
+Java
+import java.time.LocalDateTime;
+
+public class SparkRunMonitoring {
+
+    private String runId;
+    private String applicationId;
+    private String applicationName;
+    private String jobName;
+    private String stepName;
+
+    private String status;      // STARTED, SUCCESS, FAILED
+    private String eventType;   // START, END, ERROR
+
+    private LocalDateTime startTime;
+    private LocalDateTime endTime;
+
+    private Long durationMs;
+
+    private Long inputRows;
+    private Long outputRows;
+    private Long errorRows;
+
+    private String errorMessage;
+    private String errorClass;
+
+    private String environment;
+    private String sparkMaster;
+    private String driverHost;
+
+    public SparkRunMonitoring() {
+    }
+
+    public String getRunId() {
+        return runId;
+    }
+
+    public void setRunId(String runId) {
+        this.runId = runId;
+    }
+
+    public String getApplicationId() {
+        return applicationId;
+    }
+
+    public void setApplicationId(String applicationId) {
+        this.applicationId = applicationId;
+    }
+
+    public String getApplicationName() {
+        return applicationName;
+    }
+
+    public void setApplicationName(String applicationName) {
+        this.applicationName = applicationName;
+    }
+
+    public String getJobName() {
+        return jobName;
+    }
+
+    public void setJobName(String jobName) {
+        this.jobName = jobName;
+    }
+
+    public String getStepName() {
+        return stepName;
+    }
+
+    public void setStepName(String stepName) {
+        this.stepName = stepName;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public String getEventType() {
+        return eventType;
+    }
+
+    public void setEventType(String eventType) {
+        this.eventType = eventType;
+    }
+
+    public LocalDateTime getStartTime() {
+        return startTime;
+    }
+
+    public void setStartTime(LocalDateTime startTime) {
+        this.startTime = startTime;
+    }
+
+    public LocalDateTime getEndTime() {
+        return endTime;
+    }
+
+    public void setEndTime(LocalDateTime endTime) {
+        this.endTime = endTime;
+    }
+
+    public Long getDurationMs() {
+        return durationMs;
+    }
+
+    public void setDurationMs(Long durationMs) {
+        this.durationMs = durationMs;
+    }
+
+    public Long getInputRows() {
+        return inputRows;
+    }
+
+    public void setInputRows(Long inputRows) {
+        this.inputRows = inputRows;
+    }
+
+    public Long getOutputRows() {
+        return outputRows;
+    }
+
+    public void setOutputRows(Long outputRows) {
+        this.outputRows = outputRows;
+    }
+
+    public Long getErrorRows() {
+        return errorRows;
+    }
+
+    public void setErrorRows(Long errorRows) {
+        this.errorRows = errorRows;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
+    public String getErrorClass() {
+        return errorClass;
+    }
+
+    public void setErrorClass(String errorClass) {
+        this.errorClass = errorClass;
+    }
+
+    public String getEnvironment() {
+        return environment;
+    }
+
+    public void setEnvironment(String environment) {
+        this.environment = environment;
+    }
+
+    public String getSparkMaster() {
+        return sparkMaster;
+    }
+
+    public void setSparkMaster(String sparkMaster) {
+        this.sparkMaster = sparkMaster;
+    }
+
+    public String getDriverHost() {
+        return driverHost;
+    }
+
+    public void setDriverHost(String driverHost) {
+        this.driverHost = driverHost;
+    }
+}
+Table ClickHouse correspondante :
+SQL
+CREATE TABLE spark_run_monitoring
+(
+    run_id String,
+    application_id Nullable(String),
+    application_name Nullable(String),
+    job_name String,
+    step_name Nullable(String),
+
+    status String,
+    event_type String,
+
+    start_time Nullable(DateTime),
+    end_time Nullable(DateTime),
+    duration_ms Nullable(UInt64),
+
+    input_rows Nullable(UInt64),
+    output_rows Nullable(UInt64),
+    error_rows Nullable(UInt64),
+
+    error_message Nullable(String),
+    error_class Nullable(String),
+
+    environment Nullable(String),
+    spark_master Nullable(String),
+    driver_host Nullable(String)
+)
+ENGINE = MergeTree
+ORDER BY (job_name, run_id);
