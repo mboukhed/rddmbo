@@ -1,0 +1,59 @@
+Oui, ton erreur est normale :
+👉 Files.readString(Paths.get(...)) NE marche PAS avec abfss://
+C’est uniquement local FS.
+✔ Solution correcte (Azure / ABFS)
+Remplace juste la lecture par Hadoop FS (sans changer ta logique)
+🔧 Correction de loadSchemaSafe
+Java
+public static StructType loadSchemaSafe(String path, SparkSession spark) throws IOException {
+
+    String raw;
+
+    if (path.startsWith("abfss://")) {
+
+        org.apache.hadoop.fs.Path hadoopPath = new org.apache.hadoop.fs.Path(path);
+        org.apache.hadoop.fs.FileSystem fs =
+                hadoopPath.getFileSystem(spark.sparkContext().hadoopConfiguration());
+
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(fs.open(hadoopPath), StandardCharsets.UTF_8)
+        )) {
+            raw = reader.lines().collect(Collectors.joining());
+        }
+
+    } else {
+        raw = Files.readString(Paths.get(path));
+    }
+
+    raw = raw.trim();
+
+    if (raw.startsWith("\"") && raw.endsWith("\"")) {
+        raw = raw.substring(1, raw.length() - 1);
+    }
+
+    raw = raw.replace("\\\"", "\"");
+
+    return (StructType) DataType.fromJson(raw);
+}
+✔ Imports à ajouter
+Java
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.stream.Collectors;
+✔ Appel
+Java
+StructType schema = loadSchemaSafe(
+    "abfss://dms-xxxx@account.dfs.core.windows.net/schema/file.json",
+    spark
+);
+✔ Résultat
+✔ local → fonctionne comme avant
+✔ Azure → fonctionne avec abfss://
+✔ aucune logique changée
+✔ juste la lecture adaptée
+⚠️ Ton erreur actuelle
+
+NoSuchFileException: abfss://...
+➡️ parce que Java NIO ne connaît pas ABFS
+C’est tout.
