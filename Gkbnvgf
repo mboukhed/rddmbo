@@ -1,0 +1,59 @@
+OK 👍 tu veux exactement le rendu de printSchema() dans un fichier.
+✔ Solution simple
+Java
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.charset.StandardCharsets;
+
+public static void writeSchemaPretty(StructType schema, String outputPath) throws Exception {
+
+    StringBuilder sb = new StringBuilder();
+    buildSchemaString(schema, "", sb);
+
+    Files.write(Paths.get(outputPath), sb.toString().getBytes(StandardCharsets.UTF_8));
+}
+✔ Méthode pour reproduire printSchema()
+Java
+private static void buildSchemaString(StructType schema, String indent, StringBuilder sb) {
+
+    for (StructField field : schema.fields()) {
+
+        sb.append(indent)
+          .append("|-- ")
+          .append(field.name())
+          .append(": ")
+          .append(field.dataType().typeName())
+          .append(" (nullable = ")
+          .append(field.nullable())
+          .append(")\n");
+
+        if (field.dataType() instanceof StructType) {
+            buildSchemaString((StructType) field.dataType(), indent + "|   ", sb);
+        }
+    }
+}
+✔ Imports
+Java
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+✔ Utilisation
+Java
+StructType schema = loadSchemaSafe("C:/tmp/schema.txt");
+
+writeSchemaPretty(schema, "C:/tmp/schema_pretty.txt");
+✔ Résultat
+Tu vas avoir exactement :
+Plain text
+|-- rel: string (nullable = true)
+|-- 627799: struct (nullable = true)
+|   |-- href: string (nullable = true)
+|   |-- rel: string (nullable = true)
+✔ Bonus (plus fidèle à Spark)
+Si tu veux le header :
+Java
+sb.insert(0, "root\n");
+Résumé
+✔ reproduit printSchema()
+✔ écrit fichier
+✔ gère struct imbriqué
+Si tu veux : 👉 version qui gère aussi array / map (comme Spark exact)
