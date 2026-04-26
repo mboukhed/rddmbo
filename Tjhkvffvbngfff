@@ -1,0 +1,16 @@
+String argumentsJson = Arrays.stream(sc.sparkContext().getConf().getAll())
+    .filter(t -> {
+        String k = t._1();
+
+        return k.equals("spark.executor.memory")
+            || k.equals("spark.driver.memory")
+            || k.equals("spark.executor.cores")
+            || k.equals("spark.driver.cores")
+            || k.equals("spark.executor.instances")
+            || k.equals("spark.executor.memoryOverhead")
+            || k.equals("spark.local.dir"); // disque
+    })
+    .map(t -> "\"" + t._1() + "\":\"" + escapeJson(t._2()) + "\"")
+    .collect(Collectors.joining(",", "{", "}"));
+
+run.setArguments(argumentsJson);
