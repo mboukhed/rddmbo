@@ -1,0 +1,26 @@
+CREATE TABLE IF NOT EXISTS run
+(
+    environment Nullable(String),
+    type_event Nullable(String),
+
+    application_id Nullable(String),
+    application_name Nullable(String),
+    arguments Nullable(String),
+
+    job_name Nullable(String),
+    step_name Nullable(String),
+    status String,
+
+    start_time Nullable(DateTime64(3)),
+    end_time Nullable(DateTime64(3)),
+
+    message Nullable(String),
+
+    count_name Nullable(String),
+    count Int64,
+
+    spark_master Nullable(String),
+    driver_host Nullable(String)
+)
+ENGINE = MergeTree
+ORDER BY (start_time);
