@@ -1,0 +1,29 @@
+@Service
+public class ClickHouseService {
+
+    private final ClickHouseConnectionService connectionService;
+
+    public ClickHouseService(ClickHouseConnectionService connectionService) {
+        this.connectionService = connectionService;
+    }
+
+    public void insertRunMonitoring(RunMonitoring run) throws SQLException {
+
+        String sql = """
+            INSERT INTO run_monitoring
+            (run_id, job_name, status, event_time)
+            VALUES (?, ?, ?, ?)
+            """;
+
+        try (Connection connection = connectionService.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql)) {
+
+            ps.setString(1, run.getRunId());
+            ps.setString(2, run.getJobName());
+            ps.setString(3, run.getStatus());
+            ps.setObject(4, run.getEventTime());
+
+            ps.executeUpdate();
+        }
+    }
+}
