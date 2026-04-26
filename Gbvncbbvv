@@ -1,0 +1,91 @@
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.*;
+
+import java.io.BufferedWriter;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+
+public class SchemaToParquetMain {
+
+    public static void main(String[] args) throws Exception {
+
+        SparkSession spark = SparkSession.builder()
+                .appName("SchemaToParquet")
+                .getOrCreate();
+
+        // éviter explosion plan
+        spark.conf().set("spark.sql.codegen.wholeStage", "false");
+        spark.conf().set("spark.sql.adaptive.enabled", "false");
+
+        String schemaFilePath = "abfss://container@account.dfs.core.windows.net/schema/schema.txt";
+        String parquetOutputPath = "abfss://container@account.dfs.core.windows.net/schema/output";
+        String schemaPrettyPath = "abfss://container@account.dfs.core.windows.net/schema/schema_pretty.txt";
+
+        // lecture schema
+        String raw = spark.read().textFile(schemaFilePath)
+                .reduce((a, b) -> a + b)
+                .trim();
+
+        if (raw.startsWith("\"") && raw.endsWith("\"")) {
+            raw = raw.substring(1, raw.length() - 1);
+        }
+
+        raw = raw.replace("\\\"", "\"");
+
+        StructType schema = (StructType) DataType.fromJson(raw);
+
+        // write parquet (schema only)
+        Dataset<Row> emptyDf = spark.createDataFrame(
+                new ArrayList<Row>(),
+                schema
+        );
+
+        emptyDf.write()
+                .mode(SaveMode.Overwrite)
+                .parquet(parquetOutputPath);
+
+        // write printSchema dans fichier
+        writeSchemaToAzure(spark, schema, schemaPrettyPath);
+
+        spark.stop();
+    }
+
+    // écriture streaming (pas de StringBuilder → évite OOM)
+    private static void writeSchemaToAzure(
+            SparkSession spark,
+            StructType schema,
+            String path
+    ) throws Exception {
+
+        org.apache.hadoop.fs.Path hadoopPath = new org.apache.hadoop.fs.Path(path);
+        org.apache.hadoop.fs.FileSystem fs = hadoopPath.getFileSystem(spark.sparkContext().hadoopConfiguration());
+
+        try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(fs.create(hadoopPath, true), StandardCharsets.UTF_8)
+        )) {
+            writer.write("root");
+            writer.newLine();
+            writeSchema(schema, "", writer);
+        }
+    }
+
+    private static void writeSchema(
+            StructType schema,
+            String indent,
+            BufferedWriter writer
+    ) throws Exception {
+
+        for (StructField field : schema.fields()) {
+
+            writer.write(indent + "|-- " + field.name() + ": " +
+                    field.dataType().typeName() +
+                    " (nullable = " + field.nullable() + ")");
+            writer.newLine();
+
+            if (field.dataType() instanceof StructType) {
+                writeSchema((StructType) field.dataType(), indent + "|   ", writer);
+            }
+        }
+    }
+}
