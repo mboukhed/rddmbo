@@ -1,0 +1,44 @@
+Version simple Spark Java 👇
+✔ Écrire un schéma en Parquet (dataset vide)
+Java
+StructType schema = new StructType()
+        .add("id", DataTypes.StringType)
+        .add("name", DataTypes.StringType)
+        .add("amount", DataTypes.DoubleType);
+
+Dataset<Row> emptyDf = spark.createDataFrame(
+        new ArrayList<Row>(),
+        schema
+);
+
+emptyDf.write()
+       .mode(SaveMode.Overwrite)
+       .parquet("path/output");
+✔ À partir d’un Dataset existant (juste le schema)
+Java
+Dataset<Row> df = spark.read().parquet("input/path");
+
+Dataset<Row> emptyDf = spark.createDataFrame(
+        spark.sparkContext().emptyRDD(),
+        df.schema()
+);
+
+emptyDf.write()
+       .mode(SaveMode.Overwrite)
+       .parquet("path/output");
+✔ Résultat
+Aucun data
+Mais schema stocké dans le parquet
+⚠️ Important
+Parquet stocke le schéma dans les metadata
+Pas besoin de fichier séparé
+✔ Lire le schéma après
+Java
+StructType schema = spark.read()
+        .parquet("path/output")
+        .schema();
+Résumé
+✔ créer DF vide avec schema
+✔ write parquet
+✔ schema est persisté
+Si tu veux : 👉 exporter le schema en JSON (plus pratique pour toi vu ton use case)
