@@ -1,0 +1,40 @@
+Java
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
+
+public class ClickHouseJdbcMain {
+
+    public static void main(String[] args) throws Exception {
+
+        String jdbcUrl = "jdbc:clickhouse:https://HOST:443/default?ssl=true";
+        String user = "default";
+        String password = "PASSWORD";
+
+        try (Connection connection = DriverManager.getConnection(jdbcUrl, user, password);
+             Statement statement = connection.createStatement()) {
+
+            System.out.println("Connected to ClickHouse");
+
+            ResultSet rs = statement.executeQuery("SELECT 1");
+
+            while (rs.next()) {
+                System.out.println("Result = " + rs.getInt(1));
+            }
+        }
+    }
+}
+Maven :
+XML
+<dependency>
+    <groupId>com.clickhouse</groupId>
+    <artifactId>clickhouse-jdbc</artifactId>
+    <version>0.8.6</version>
+</dependency>
+URL HTTP :
+Java
+String jdbcUrl = "jdbc:clickhouse:http://HOST:8123/default";
+URL HTTPS :
+Java
+String jdbcUrl = "jdbc:clickhouse:https://HOST:443/default?ssl=true";
