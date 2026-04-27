@@ -1,0 +1,54 @@
+Oui, utilise plutôt @Conditional, c’est plus fiable pour ton cas.
+Java
+@Service
+@Conditional(MonitoringNotLocalNotTestCondition.class)
+public class EventListenerUpdateRun implements IEventListenerUpdateRun {
+}
+Condition :
+Java
+import org.springframework.context.annotation.Condition;
+import org.springframework.context.annotation.ConditionContext;
+import org.springframework.core.env.Environment;
+import org.springframework.core.type.AnnotatedTypeMetadata;
+
+import java.util.Arrays;
+
+public class MonitoringNotLocalNotTestCondition implements Condition {
+
+    @Override
+    public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+        Environment env = context.getEnvironment();
+
+        boolean monitoring = Arrays.asList(env.getActiveProfiles()).contains("monitoring");
+        boolean local = Arrays.asList(env.getActiveProfiles()).contains("local");
+        boolean test = Arrays.asList(env.getActiveProfiles()).contains("test");
+
+        return monitoring && !local && !test;
+    }
+}
+Avec constantes :
+Java
+import static com.sgcib.datalab.core.constant.ProfileConstants.*;
+
+public class MonitoringNotLocalNotTestCondition implements Condition {
+
+    @Override
+    public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+        Environment env = context.getEnvironment();
+
+        List<String> profiles = Arrays.asList(env.getActiveProfiles());
+
+        return profiles.contains(MONITORING_PROFILE)
+                && !profiles.contains(LOCAL_PROFILE)
+                && !profiles.contains(TEST_PROFILE);
+    }
+}
+Imports :
+Java
+import org.springframework.context.annotation.Conditional;
+import org.springframework.context.annotation.Condition;
+Le bean sera créé seulement si :
+Plain text
+monitoring actif
+local non actif
+test non actif
