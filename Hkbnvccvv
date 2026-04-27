@@ -1,0 +1,102 @@
+Java
+public void insertRunMonitoring(Run run) throws Exception {
+
+    String sql =
+            "INSERT INTO " + base + "." + table + " (" +
+                    "environment,type_event,application_id,application_name,args_main,conf," +
+                    "step_name,status,start_time,end_time,message,count_name,count," +
+                    "spark_master,driver_host," +
+                    "spark_input_records,spark_output_records,spark_input_bytes,spark_output_bytes," +
+                    "spark_shuffle_read_bytes,spark_shuffle_read_records," +
+                    "spark_shuffle_write_bytes,spark_shuffle_write_records," +
+                    "spark_memory_spilled_bytes,spark_disk_spilled_bytes," +
+                    "spark_executor_run_time_ms,spark_executor_cpu_time_ns," +
+                    "spark_jvm_gc_time_ms,spark_peak_execution_memory_bytes," +
+                    "spark_tasks_count,spark_tasks_failed,spark_stages_count,spark_jobs_count," +
+                    "spark_job_status" +
+                    ") VALUES (" +
+                    "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?," +
+                    "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?" +
+                    ")";
+
+    try (Connection connection = connectionService.getConnection();
+         PreparedStatement ps = connection.prepareStatement(sql)) {
+
+        ps.setString(1, run.getEnvironment());
+        ps.setString(2, run.getTypeEvent());
+        ps.setString(3, run.getApplicationId());
+        ps.setString(4, run.getApplicationName());
+        ps.setString(5, run.getArgsMain());
+        ps.setString(6, run.getConf());
+        ps.setString(7, run.getStepName());
+        ps.setString(8, run.getStatus());
+
+        setTimestampOrNull(ps, 9, run.getStartTime());
+        setTimestampOrNull(ps, 10, run.getEndTime());
+
+        ps.setString(11, run.getMessage());
+        ps.setString(12, run.getCountName());
+        setLongOrNull(ps, 13, run.getCount());
+
+        ps.setString(14, run.getSparkMaster());
+        ps.setString(15, run.getDriverHost());
+
+        setLongOrNull(ps, 16, run.getSparkInputRecords());
+        setLongOrNull(ps, 17, run.getSparkOutputRecords());
+        setLongOrNull(ps, 18, run.getSparkInputBytes());
+        setLongOrNull(ps, 19, run.getSparkOutputBytes());
+
+        setLongOrNull(ps, 20, run.getSparkShuffleReadBytes());
+        setLongOrNull(ps, 21, run.getSparkShuffleReadRecords());
+        setLongOrNull(ps, 22, run.getSparkShuffleWriteBytes());
+        setLongOrNull(ps, 23, run.getSparkShuffleWriteRecords());
+
+        setLongOrNull(ps, 24, run.getSparkMemorySpilledBytes());
+        setLongOrNull(ps, 25, run.getSparkDiskSpilledBytes());
+        setLongOrNull(ps, 26, run.getSparkExecutorRunTimeMs());
+        setLongOrNull(ps, 27, run.getSparkExecutorCpuTimeNs());
+        setLongOrNull(ps, 28, run.getSparkJvmGcTimeMs());
+        setLongOrNull(ps, 29, run.getSparkPeakExecutionMemoryBytes());
+
+        setLongOrNull(ps, 30, run.getSparkTasksCount());
+        setLongOrNull(ps, 31, run.getSparkTasksFailed());
+        setLongOrNull(ps, 32, run.getSparkStagesCount());
+        setLongOrNull(ps, 33, run.getSparkJobsCount());
+
+        ps.setString(34, run.getSparkJobStatus());
+
+        ps.executeUpdate();
+    }
+}
+
+private static void setTimestampOrNull(
+        PreparedStatement ps,
+        int index,
+        LocalDateTime value
+) throws SQLException {
+    if (value == null) {
+        ps.setNull(index, Types.TIMESTAMP);
+    } else {
+        ps.setTimestamp(index, Timestamp.valueOf(value));
+    }
+}
+
+private static void setLongOrNull(
+        PreparedStatement ps,
+        int index,
+        Long value
+) throws SQLException {
+    if (value == null) {
+        ps.setNull(index, Types.BIGINT);
+    } else {
+        ps.setLong(index, value);
+    }
+}
+Imports :
+Java
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.time.LocalDateTime;
