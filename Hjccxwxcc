@@ -1,0 +1,98 @@
+Oui. Mets cette version : elle construit automatiquement le bon nombre de ? et vérifie le nombre de paramètres.
+Java
+public void insertRunMonitoring(Run run) throws Exception {
+
+    String columns =
+            "environment,type_event,application_id,application_name,args_main,conf," +
+            "step_name,status,start_time,end_time,message," +
+            "spark_master,driver_host," +
+            "spark_input_records,spark_output_records,spark_input_bytes,spark_output_bytes," +
+            "spark_shuffle_read_bytes,spark_shuffle_read_records," +
+            "spark_shuffle_write_bytes,spark_shuffle_write_records," +
+            "spark_memory_spilled_bytes,spark_disk_spilled_bytes," +
+            "spark_executor_run_time_ms,spark_executor_cpu_time_ns," +
+            "spark_jvm_gc_time_ms,spark_peak_execution_memory_bytes," +
+            "spark_tasks_count,spark_tasks_failed,spark_stages_count,spark_jobs_count," +
+            "spark_job_status";
+
+    int columnCount = columns.split(",").length;
+    String placeholders = String.join(",", java.util.Collections.nCopies(columnCount, "?"));
+
+    String sql = "INSERT INTO " + base + "." + table +
+            " (" + columns + ") VALUES (" + placeholders + ")";
+
+    try (Connection connection = connectionService.getConnection();
+         PreparedStatement ps = connection.prepareStatement(sql)) {
+
+        int i = 1;
+
+        ps.setString(i++, run.getEnvironment());
+        ps.setString(i++, run.getTypeEvent());
+        ps.setString(i++, run.getApplicationId());
+        ps.setString(i++, run.getApplicationName());
+        ps.setString(i++, run.getArgsMain());
+        ps.setString(i++, run.getConf());
+        ps.setString(i++, run.getStepName());
+        ps.setString(i++, run.getStatus());
+
+        setTimestampOrNull(ps, i++, run.getStartTime());
+        setTimestampOrNull(ps, i++, run.getEndTime());
+
+        ps.setString(i++, run.getMessage());
+
+        ps.setString(i++, run.getSparkMaster());
+        ps.setString(i++, run.getDriverHost());
+
+        setLongOrNull(ps, i++, run.getSparkInputRecords());
+        setLongOrNull(ps, i++, run.getSparkOutputRecords());
+        setLongOrNull(ps, i++, run.getSparkInputBytes());
+        setLongOrNull(ps, i++, run.getSparkOutputBytes());
+
+        setLongOrNull(ps, i++, run.getSparkShuffleReadBytes());
+        setLongOrNull(ps, i++, run.getSparkShuffleReadRecords());
+        setLongOrNull(ps, i++, run.getSparkShuffleWriteBytes());
+        setLongOrNull(ps, i++, run.getSparkShuffleWriteRecords());
+
+        setLongOrNull(ps, i++, run.getSparkMemorySpilledBytes());
+        setLongOrNull(ps, i++, run.getSparkDiskSpilledBytes());
+        setLongOrNull(ps, i++, run.getSparkExecutorRunTimeMs());
+        setLongOrNull(ps, i++, run.getSparkExecutorCpuTimeNs());
+        setLongOrNull(ps, i++, run.getSparkJvmGcTimeMs());
+        setLongOrNull(ps, i++, run.getSparkPeakExecutionMemoryBytes());
+
+        setLongOrNull(ps, i++, run.getSparkTasksCount());
+        setLongOrNull(ps, i++, run.getSparkTasksFailed());
+        setLongOrNull(ps, i++, run.getSparkStagesCount());
+        setLongOrNull(ps, i++, run.getSparkJobsCount());
+
+        ps.setString(i++, run.getSparkJobStatus());
+
+        if (i - 1 != columnCount) {
+            throw new IllegalStateException(
+                    "Mismatch SQL params. Expected=" + columnCount + ", actual=" + (i - 1)
+            );
+        }
+
+        ps.executeUpdate();
+    }
+}
+Helpers :
+Java
+private static void setTimestampOrNull(PreparedStatement ps, int index, LocalDateTime value)
+        throws SQLException {
+    if (value == null) {
+        ps.setNull(index, Types.TIMESTAMP);
+    } else {
+        ps.setTimestamp(index, Timestamp.valueOf(value));
+    }
+}
+
+private static void setLongOrNull(PreparedStatement ps, int index, Long value)
+        throws SQLException {
+    if (value == null) {
+        ps.setNull(index, Types.BIGINT);
+    } else {
+        ps.setLong(index, value);
+    }
+}
+Là tu ne peux plus avoir l’erreur Parameter at position 32 is not set sauf si tu supprimes un setXXX.
