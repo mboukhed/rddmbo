@@ -1,0 +1,51 @@
+OK, simple et propre.
+Tu utilises Spring → profils actifs → récupérables facilement.
+✅ 1. Méthode propre (Spring)
+Injecte Environment :
+Java
+@Autowired
+private org.springframework.core.env.Environment env;
+Puis :
+Java
+String environment = String.join(",", env.getActiveProfiles());
+run.setEnvironment(environment);
+✅ 2. Version simple (si 1 seul profil)
+Java
+String environment = env.getActiveProfiles().length > 0
+    ? env.getActiveProfiles()[0]
+    : "default";
+
+run.setEnvironment(environment);
+⚡ 3. Sans injection (fallback)
+Si jamais Spring pas dispo :
+Java
+String environment = System.getProperty("spring.profiles.active", "dev");
+run.setEnvironment(environment);
+🔥 4. Dans ton cas (vu ton YAML)
+Tu as :
+YAML
+-Dspring.profiles.active=iso,credential-managed,clickhouse
+👉 Résultat :
+Java
+iso,credential-managed,clickhouse
+👍 Reco (propre prod)
+Tu veux probablement juste :
+Java
+String environment = Arrays.stream(env.getActiveProfiles())
+    .filter(p -> p.equals("dev") || p.equals("iso") || p.equals("prod"))
+    .findFirst()
+    .orElse("unknown");
+
+run.setEnvironment(environment);
+🎯 Résumé
+Cas
+Solution
+Spring présent
+env.getActiveProfiles() ✅
+hors Spring
+System.getProperty()
+multi profils
+join
+prod clean
+filtre
+Si tu veux, je peux te faire : 👉 mapping auto dev / iso / prod + fallback AKS namespace (encore plus fiable)
