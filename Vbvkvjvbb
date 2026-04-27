@@ -1,0 +1,128 @@
+Java
+package com.sgcib.datalab.core.listener;
+
+import com.sgcib.datalab.core.model.Run;
+import org.apache.spark.executor.TaskMetrics;
+import org.apache.spark.scheduler.SparkListener;
+import org.apache.spark.scheduler.SparkListenerJobEnd;
+import org.apache.spark.scheduler.SparkListenerJobStart;
+import org.apache.spark.scheduler.SparkListenerStageCompleted;
+import org.apache.spark.scheduler.SparkListenerTaskEnd;
+
+import java.util.concurrent.atomic.AtomicLong;
+
+public class SparkMetricsListener extends SparkListener {
+
+    private final Run run;
+
+    private final AtomicLong inputBytes = new AtomicLong();
+    private final AtomicLong inputRecords = new AtomicLong();
+    private final AtomicLong outputBytes = new AtomicLong();
+    private final AtomicLong outputRecords = new AtomicLong();
+
+    private final AtomicLong shuffleReadBytes = new AtomicLong();
+    private final AtomicLong shuffleReadRecords = new AtomicLong();
+    private final AtomicLong shuffleWriteBytes = new AtomicLong();
+    private final AtomicLong shuffleWriteRecords = new AtomicLong();
+
+    private final AtomicLong memorySpilled = new AtomicLong();
+    private final AtomicLong diskSpilled = new AtomicLong();
+    private final AtomicLong executorRunTimeMs = new AtomicLong();
+    private final AtomicLong executorCpuTimeNs = new AtomicLong();
+    private final AtomicLong jvmGcTimeMs = new AtomicLong();
+    private final AtomicLong peakExecutionMemory = new AtomicLong();
+
+    private final AtomicLong tasksCount = new AtomicLong();
+    private final AtomicLong tasksFailed = new AtomicLong();
+    private final AtomicLong stagesCount = new AtomicLong();
+    private final AtomicLong jobsCount = new AtomicLong();
+
+    public SparkMetricsListener(Run run) {
+        this.run = run;
+    }
+
+    @Override
+    public void onJobStart(SparkListenerJobStart jobStart) {
+        jobsCount.incrementAndGet();
+    }
+
+    @Override
+    public void onStageCompleted(SparkListenerStageCompleted stageCompleted) {
+        stagesCount.incrementAndGet();
+    }
+
+    @Override
+    public void onTaskEnd(SparkListenerTaskEnd taskEnd) {
+        tasksCount.incrementAndGet();
+
+        if (taskEnd.reason() != null
+                && !"Success".equalsIgnoreCase(taskEnd.reason().toString())) {
+            tasksFailed.incrementAndGet();
+        }
+
+        TaskMetrics m = taskEnd.taskMetrics();
+        if (m == null) {
+            return;
+        }
+
+        if (m.inputMetrics() != null) {
+            inputBytes.addAndGet(m.inputMetrics().bytesRead());
+            inputRecords.addAndGet(m.inputMetrics().recordsRead());
+        }
+
+        if (m.outputMetrics() != null) {
+            outputBytes.addAndGet(m.outputMetrics().bytesWritten());
+            outputRecords.addAndGet(m.outputMetrics().recordsWritten());
+        }
+
+        if (m.shuffleReadMetrics() != null) {
+            shuffleReadBytes.addAndGet(
+                    m.shuffleReadMetrics().remoteBytesRead()
+                            + m.shuffleReadMetrics().localBytesRead()
+            );
+            shuffleReadRecords.addAndGet(m.shuffleReadMetrics().recordsRead());
+        }
+
+        if (m.shuffleWriteMetrics() != null) {
+            shuffleWriteBytes.addAndGet(m.shuffleWriteMetrics().bytesWritten());
+            shuffleWriteRecords.addAndGet(m.shuffleWriteMetrics().recordsWritten());
+        }
+
+        memorySpilled.addAndGet(m.memoryBytesSpilled());
+        diskSpilled.addAndGet(m.diskBytesSpilled());
+        executorRunTimeMs.addAndGet(m.executorRunTime());
+        executorCpuTimeNs.addAndGet(m.executorCpuTime());
+        jvmGcTimeMs.addAndGet(m.jvmGCTime());
+        peakExecutionMemory.addAndGet(m.peakExecutionMemory());
+    }
+
+    @Override
+    public void onJobEnd(SparkListenerJobEnd jobEnd) {
+        run.addNav("spark.input.bytes", inputBytes.get());
+        run.addNav("spark.input.records", inputRecords.get());
+        run.addNav("spark.output.bytes", outputBytes.get());
+        run.addNav("spark.output.records", outputRecords.get());
+
+        run.addNav("spark.shuffle.read.bytes", shuffleReadBytes.get());
+        run.addNav("spark.shuffle.read.records", shuffleReadRecords.get());
+        run.addNav("spark.shuffle.write.bytes", shuffleWriteBytes.get());
+        run.addNav("spark.shuffle.write.records", shuffleWriteRecords.get());
+
+        run.addNav("spark.memory.spilled.bytes", memorySpilled.get());
+        run.addNav("spark.disk.spilled.bytes", diskSpilled.get());
+        run.addNav("spark.executor.run.time.ms", executorRunTimeMs.get());
+        run.addNav("spark.executor.cpu.time.ns", executorCpuTimeNs.get());
+        run.addNav("spark.jvm.gc.time.ms", jvmGcTimeMs.get());
+        run.addNav("spark.peak.execution.memory.bytes", peakExecutionMemory.get());
+
+        run.addNav("spark.tasks.count", tasksCount.get());
+        run.addNav("spark.tasks.failed", tasksFailed.get());
+        run.addNav("spark.stages.count", stagesCount.get());
+        run.addNav("spark.jobs.count", jobsCount.get());
+
+        run.addNav("spark.job.status", jobEnd.jobResult().toString());
+    }
+}
+Enregistrement avant l’exécution du pipeline :
+Java
+spark.sparkContext().addSparkListener(new SparkMetricsListener(run));
