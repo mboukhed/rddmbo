@@ -1,0 +1,95 @@
+OK. Voilà méthode complète PROPRE pour dédupliquer un StructType récursivement (nested inclus).
+✅ Méthode complète
+Java
+import org.apache.spark.sql.types.*;
+
+import java.util.*;
+
+public class SchemaUtils {
+
+    public static StructType deduplicateStructType(StructType schema) {
+        List<StructField> newFields = new ArrayList<>();
+        Map<String, Integer> seen = new HashMap<>();
+
+        for (StructField field : schema.fields()) {
+            String name = field.name();
+
+            // gérer doublons
+            if (seen.containsKey(name)) {
+                int count = seen.get(name) + 1;
+                seen.put(name, count);
+                name = name + "__" + count;
+            } else {
+                seen.put(name, 0);
+            }
+
+            DataType newType = deduplicateDataType(field.dataType());
+
+            newFields.add(new StructField(
+                    name,
+                    newType,
+                    field.nullable(),
+                    field.metadata()
+            ));
+        }
+
+        return new StructType(newFields.toArray(new StructField[0]));
+    }
+
+    private static DataType deduplicateDataType(DataType dt) {
+
+        if (dt instanceof StructType) {
+            return deduplicateStructType((StructType) dt);
+        }
+
+        if (dt instanceof ArrayType) {
+            ArrayType at = (ArrayType) dt;
+            return new ArrayType(
+                    deduplicateDataType(at.elementType()),
+                    at.containsNull()
+            );
+        }
+
+        if (dt instanceof MapType) {
+            MapType mt = (MapType) dt;
+            return new MapType(
+                    deduplicateDataType(mt.keyType()),
+                    deduplicateDataType(mt.valueType()),
+                    mt.valueContainsNull()
+            );
+        }
+
+        return dt;
+    }
+}
+🚀 Utilisation
+Java
+StructType schema = dsSc.schema();
+
+schema = SchemaUtils.deduplicateStructType(schema);
+⚠️ Résultat
+Exemple :
+Plain text
+skew_shift
+skew_shift
+skew_shift
+devient :
+Plain text
+skew_shift
+skew_shift__1
+skew_shift__2
+🔥 IMPORTANT (dans ton cas)
+À mettre avant write parquet :
+Java
+StructType schema = inferSchemaOptimized(df, columnName);
+schema = SchemaUtils.deduplicateStructType(schema);
+
+spark.createDataFrame(new ArrayList<Row>(), schema)
+     .write()
+     .mode(SaveMode.Overwrite)
+     .parquet(path);
+🎯 Conclusion
+✔️ règle ton crash parquet
+✔️ marche sur nested JSON
+✔️ pas besoin de toucher ton flatten
+Si tu veux le next level : 👉 éviter les doublons directement dans flatColumn() (meilleur design)
