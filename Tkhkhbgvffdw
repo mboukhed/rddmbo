@@ -1,0 +1,91 @@
+OK, je vois ton flow :
+👉 RunInStartEvent → insert
+👉 RunInSuccessEvent → insert
+👉 RunInErrorEvent → insert
+👉 Tu veux ajouter les metrics Spark (input/output) dans ton Run AVANT insertRunMonitoring
+💥 Le bon endroit
+👉 PAS dans le listener Spring (@EventListener)
+👉 MAIS dans SparkListener (job)
+✅ Étape 1 — stocker metrics dans Run
+Ajoute dans Run :
+Java
+private long sparkInputRecords;
+private long sparkOutputRecords;
+private long sparkInputBytes;
+private long sparkOutputBytes;
+
+public void setSparkMetrics(long inRec, long outRec, long inBytes, long outBytes) {
+    this.sparkInputRecords = inRec;
+    this.sparkOutputRecords = outRec;
+    this.sparkInputBytes = inBytes;
+    this.sparkOutputBytes = outBytes;
+}
+✅ Étape 2 — SparkListener
+Java
+public class SparkMetricsListener extends SparkListener {
+
+    private final Run run;
+
+    private long inRec = 0;
+    private long outRec = 0;
+    private long inBytes = 0;
+    private long outBytes = 0;
+
+    public SparkMetricsListener(Run run) {
+        this.run = run;
+    }
+
+    @Override
+    public void onTaskEnd(SparkListenerTaskEnd taskEnd) {
+
+        TaskMetrics m = taskEnd.taskMetrics();
+        if (m == null) return;
+
+        if (m.inputMetrics() != null) {
+            inBytes += m.inputMetrics().bytesRead();
+            inRec += m.inputMetrics().recordsRead();
+        }
+
+        if (m.outputMetrics() != null) {
+            outBytes += m.outputMetrics().bytesWritten();
+            outRec += m.outputMetrics().recordsWritten();
+        }
+    }
+
+    @Override
+    public void onJobEnd(SparkListenerJobEnd jobEnd) {
+
+        run.setSparkMetrics(inRec, outRec, inBytes, outBytes);
+    }
+}
+✅ Étape 3 — enregistrer AVANT runPipeline
+Dans ton PipelineRunner :
+Java
+spark.sparkContext().addSparkListener(
+    new SparkMetricsListener(run)
+);
+✅ Étape 4 — utiliser dans ton MonitoringService
+Dans ton insert SQL ajoute :
+SQL
+spark_input_records
+spark_output_records
+spark_input_bytes
+spark_output_bytes
+Et dans Java :
+Java
+ps.setLong(XX, run.getSparkInputRecords());
+ps.setLong(XX, run.getSparkOutputRecords());
+ps.setLong(XX, run.getSparkInputBytes());
+ps.setLong(XX, run.getSparkOutputBytes());
+⚠️ Important
+👉 Les metrics seront dispo UNIQUEMENT à la fin du job
+Donc :
+OK dans RunInSuccessEvent
+OK dans RunInErrorEvent
+❌ PAS dans RunInStartEvent
+✔️ Résumé
+Spark metrics → SparkListener
+stocker dans Run
+injecter dans DB dans ton service
+Si tu veux, je peux te faire : 👉 version multi-job safe (reset metrics par jobId)
+👉 version plus fiable avec QueryExecutionListener (SQL)
