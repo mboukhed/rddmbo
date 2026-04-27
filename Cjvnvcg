@@ -1,0 +1,4 @@
+jdbcUrl = String.format(
+    "jdbc:clickhouse://%s:%s/default?ssl=%s",
+    host, port, ssl
+);
