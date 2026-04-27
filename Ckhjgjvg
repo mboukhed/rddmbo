@@ -1,0 +1,46 @@
+CREATE TABLE IF NOT EXISTS run_monitoring
+(
+    environment String,
+    type_event String,
+    application_id String,
+    application_name String,
+    args_main String,
+    conf String,
+    step_name String,
+    status String,
+
+    start_time Nullable(DateTime),
+    end_time Nullable(DateTime),
+
+    message Nullable(String),
+
+    spark_master Nullable(String),
+    driver_host Nullable(String),
+
+    spark_input_records Nullable(Int64),
+    spark_output_records Nullable(Int64),
+    spark_input_bytes Nullable(Int64),
+    spark_output_bytes Nullable(Int64),
+
+    spark_shuffle_read_bytes Nullable(Int64),
+    spark_shuffle_read_records Nullable(Int64),
+    spark_shuffle_write_bytes Nullable(Int64),
+    spark_shuffle_write_records Nullable(Int64),
+
+    spark_memory_spilled_bytes Nullable(Int64),
+    spark_disk_spilled_bytes Nullable(Int64),
+    spark_executor_run_time_ms Nullable(Int64),
+    spark_executor_cpu_time_ns Nullable(Int64),
+    spark_jvm_gc_time_ms Nullable(Int64),
+    spark_peak_execution_memory_bytes Nullable(Int64),
+
+    spark_tasks_count Nullable(Int64),
+    spark_tasks_failed Nullable(Int64),
+    spark_stages_count Nullable(Int64),
+    spark_jobs_count Nullable(Int64),
+    spark_job_status Nullable(String),
+
+    insert_time DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+ORDER BY (environment, application_name, step_name, start_time);
