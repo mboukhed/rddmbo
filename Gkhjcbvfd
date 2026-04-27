@@ -1,0 +1,43 @@
+Ton insert doit être aligné avec ta classe : argsMain + conf.
+Java
+String sql =
+    "INSERT INTO " + base + "." + table + " (" +
+    "environment, " +
+    "type_event, " +
+    "application_id, " +
+    "application_name, " +
+    "args_main, " +
+    "conf, " +
+    "step_name, " +
+    "status, " +
+    "start_time, " +
+    "end_time, " +
+    "message, " +
+    "count_name, " +
+    "count, " +
+    "spark_master, " +
+    "driver_host" +
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+Les set :
+Java
+ps.setString(1, run.getEnvironment());
+ps.setString(2, run.getTypeEvent());
+ps.setString(3, run.getApplicationId());
+ps.setString(4, run.getApplicationName());
+ps.setString(5, run.getArgsMain());
+ps.setString(6, run.getConf());
+ps.setString(7, run.getStepName());
+ps.setString(8, run.getStatus());
+
+ps.setTimestamp(9, run.getStartTime() == null ? null : Timestamp.valueOf(run.getStartTime()));
+ps.setTimestamp(10, run.getEndTime() == null ? null : Timestamp.valueOf(run.getEndTime()));
+
+ps.setString(11, run.getMessage());
+ps.setString(12, run.getCountName());
+ps.setLong(13, run.getCount());
+
+ps.setString(14, run.getSparkMaster());
+ps.setString(15, run.getDriverHost());
+Import :
+Java
+import java.sql.Timestamp;
