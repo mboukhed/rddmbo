@@ -1,0 +1,28 @@
+CREATE TABLE monitoring.run_monitoring
+(
+    environment        String,
+    type_event         String,
+
+    application_id     String,
+    application_name   String,
+
+    args_main          String,
+    conf               String,
+
+    step_name          String,
+    status             String,
+
+    start_time         DateTime,
+    end_time           Nullable(DateTime),
+
+    message            String,
+
+    count_name         String,
+    count              Int64,
+
+    spark_master       String,
+    driver_host        String
+)
+ENGINE = MergeTree
+ORDER BY (application_id, start_time)
+PARTITION BY toDate(start_time);
