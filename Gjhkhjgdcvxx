@@ -1,0 +1,11 @@
+if (run.getStartTime() == null) {
+    ps.setNull(9, Types.TIMESTAMP);
+} else {
+    ps.setTimestamp(9, Timestamp.valueOf(run.getStartTime()));
+}
+
+if (run.getEndTime() == null) {
+    ps.setNull(10, Types.TIMESTAMP);
+} else {
+    ps.setTimestamp(10, Timestamp.valueOf(run.getEndTime()));
+}
