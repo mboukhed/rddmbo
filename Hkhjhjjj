@@ -1,0 +1,246 @@
+Oui. Vu ta classe Run, fais champs fixes, pas NAV.
+1. Champs à ajouter dans Run
+Java
+private Long sparkInputRecords;
+private Long sparkOutputRecords;
+private Long sparkInputBytes;
+private Long sparkOutputBytes;
+
+private Long sparkShuffleReadBytes;
+private Long sparkShuffleReadRecords;
+private Long sparkShuffleWriteBytes;
+private Long sparkShuffleWriteRecords;
+
+private Long sparkMemorySpilledBytes;
+private Long sparkDiskSpilledBytes;
+private Long sparkExecutorRunTimeMs;
+private Long sparkExecutorCpuTimeNs;
+private Long sparkJvmGcTimeMs;
+private Long sparkPeakExecutionMemoryBytes;
+
+private Long sparkTasksCount;
+private Long sparkTasksFailed;
+private Long sparkStagesCount;
+private Long sparkJobsCount;
+private String sparkJobStatus;
+Ajoute méthode pratique :
+Java
+public void setSparkMetrics(
+        Long inputRecords,
+        Long outputRecords,
+        Long inputBytes,
+        Long outputBytes,
+        Long shuffleReadBytes,
+        Long shuffleReadRecords,
+        Long shuffleWriteBytes,
+        Long shuffleWriteRecords,
+        Long memorySpilledBytes,
+        Long diskSpilledBytes,
+        Long executorRunTimeMs,
+        Long executorCpuTimeNs,
+        Long jvmGcTimeMs,
+        Long peakExecutionMemoryBytes,
+        Long tasksCount,
+        Long tasksFailed,
+        Long stagesCount,
+        Long jobsCount,
+        String jobStatus
+) {
+    this.sparkInputRecords = inputRecords;
+    this.sparkOutputRecords = outputRecords;
+    this.sparkInputBytes = inputBytes;
+    this.sparkOutputBytes = outputBytes;
+
+    this.sparkShuffleReadBytes = shuffleReadBytes;
+    this.sparkShuffleReadRecords = shuffleReadRecords;
+    this.sparkShuffleWriteBytes = shuffleWriteBytes;
+    this.sparkShuffleWriteRecords = shuffleWriteRecords;
+
+    this.sparkMemorySpilledBytes = memorySpilledBytes;
+    this.sparkDiskSpilledBytes = diskSpilledBytes;
+    this.sparkExecutorRunTimeMs = executorRunTimeMs;
+    this.sparkExecutorCpuTimeNs = executorCpuTimeNs;
+    this.sparkJvmGcTimeMs = jvmGcTimeMs;
+    this.sparkPeakExecutionMemoryBytes = peakExecutionMemoryBytes;
+
+    this.sparkTasksCount = tasksCount;
+    this.sparkTasksFailed = tasksFailed;
+    this.sparkStagesCount = stagesCount;
+    this.sparkJobsCount = jobsCount;
+    this.sparkJobStatus = jobStatus;
+}
+2. Classe complète SparkMetricsListener
+Java
+import com.sgcib.datalab.core.model.Run;
+import org.apache.spark.executor.TaskMetrics;
+import org.apache.spark.scheduler.*;
+
+import java.util.concurrent.atomic.AtomicLong;
+
+public class SparkMetricsListener extends SparkListener {
+
+    private final Run run;
+
+    private final AtomicLong inputBytes = new AtomicLong();
+    private final AtomicLong inputRecords = new AtomicLong();
+    private final AtomicLong outputBytes = new AtomicLong();
+    private final AtomicLong outputRecords = new AtomicLong();
+
+    private final AtomicLong shuffleReadBytes = new AtomicLong();
+    private final AtomicLong shuffleReadRecords = new AtomicLong();
+    private final AtomicLong shuffleWriteBytes = new AtomicLong();
+    private final AtomicLong shuffleWriteRecords = new AtomicLong();
+
+    private final AtomicLong memorySpilled = new AtomicLong();
+    private final AtomicLong diskSpilled = new AtomicLong();
+    private final AtomicLong executorRunTimeMs = new AtomicLong();
+    private final AtomicLong executorCpuTimeNs = new AtomicLong();
+    private final AtomicLong jvmGcTimeMs = new AtomicLong();
+    private final AtomicLong peakExecutionMemory = new AtomicLong();
+
+    private final AtomicLong tasksCount = new AtomicLong();
+    private final AtomicLong tasksFailed = new AtomicLong();
+    private final AtomicLong stagesCount = new AtomicLong();
+    private final AtomicLong jobsCount = new AtomicLong();
+
+    public SparkMetricsListener(Run run) {
+        this.run = run;
+    }
+
+    @Override
+    public void onJobStart(SparkListenerJobStart jobStart) {
+        jobsCount.incrementAndGet();
+    }
+
+    @Override
+    public void onStageCompleted(SparkListenerStageCompleted stageCompleted) {
+        stagesCount.incrementAndGet();
+    }
+
+    @Override
+    public void onTaskEnd(SparkListenerTaskEnd taskEnd) {
+        tasksCount.incrementAndGet();
+
+        if (taskEnd.reason() != null
+                && !"Success".equalsIgnoreCase(taskEnd.reason().toString())) {
+            tasksFailed.incrementAndGet();
+        }
+
+        TaskMetrics m = taskEnd.taskMetrics();
+        if (m == null) {
+            return;
+        }
+
+        if (m.inputMetrics() != null) {
+            inputBytes.addAndGet(m.inputMetrics().bytesRead());
+            inputRecords.addAndGet(m.inputMetrics().recordsRead());
+        }
+
+        if (m.outputMetrics() != null) {
+            outputBytes.addAndGet(m.outputMetrics().bytesWritten());
+            outputRecords.addAndGet(m.outputMetrics().recordsWritten());
+        }
+
+        if (m.shuffleReadMetrics() != null) {
+            shuffleReadBytes.addAndGet(
+                    m.shuffleReadMetrics().remoteBytesRead()
+                            + m.shuffleReadMetrics().localBytesRead()
+            );
+            shuffleReadRecords.addAndGet(m.shuffleReadMetrics().recordsRead());
+        }
+
+        if (m.shuffleWriteMetrics() != null) {
+            shuffleWriteBytes.addAndGet(m.shuffleWriteMetrics().bytesWritten());
+            shuffleWriteRecords.addAndGet(m.shuffleWriteMetrics().recordsWritten());
+        }
+
+        memorySpilled.addAndGet(m.memoryBytesSpilled());
+        diskSpilled.addAndGet(m.diskBytesSpilled());
+        executorRunTimeMs.addAndGet(m.executorRunTime());
+        executorCpuTimeNs.addAndGet(m.executorCpuTime());
+        jvmGcTimeMs.addAndGet(m.jvmGCTime());
+        peakExecutionMemory.addAndGet(m.peakExecutionMemory());
+    }
+
+    @Override
+    public void onJobEnd(SparkListenerJobEnd jobEnd) {
+        run.setSparkMetrics(
+                inputRecords.get(),
+                outputRecords.get(),
+                inputBytes.get(),
+                outputBytes.get(),
+
+                shuffleReadBytes.get(),
+                shuffleReadRecords.get(),
+                shuffleWriteBytes.get(),
+                shuffleWriteRecords.get(),
+
+                memorySpilled.get(),
+                diskSpilled.get(),
+                executorRunTimeMs.get(),
+                executorCpuTimeNs.get(),
+                jvmGcTimeMs.get(),
+                peakExecutionMemory.get(),
+
+                tasksCount.get(),
+                tasksFailed.get(),
+                stagesCount.get(),
+                jobsCount.get(),
+                jobEnd.jobResult().toString()
+        );
+    }
+}
+3. Enregistrement avant pipeline
+Java
+spark.sparkContext().addSparkListener(new SparkMetricsListener(run));
+4. Script ClickHouse
+SQL
+CREATE TABLE IF NOT EXISTS run_monitoring
+(
+    environment String,
+    type_event String,
+    application_id String,
+    application_name String,
+    args_main String,
+    conf String,
+    step_name String,
+    status String,
+
+    start_time Nullable(DateTime),
+    end_time Nullable(DateTime),
+
+    message Nullable(String),
+    count_name Nullable(String),
+    count Nullable(Int64),
+
+    spark_master Nullable(String),
+    driver_host Nullable(String),
+
+    spark_input_records Nullable(Int64),
+    spark_output_records Nullable(Int64),
+    spark_input_bytes Nullable(Int64),
+    spark_output_bytes Nullable(Int64),
+
+    spark_shuffle_read_bytes Nullable(Int64),
+    spark_shuffle_read_records Nullable(Int64),
+    spark_shuffle_write_bytes Nullable(Int64),
+    spark_shuffle_write_records Nullable(Int64),
+
+    spark_memory_spilled_bytes Nullable(Int64),
+    spark_disk_spilled_bytes Nullable(Int64),
+    spark_executor_run_time_ms Nullable(Int64),
+    spark_executor_cpu_time_ns Nullable(Int64),
+    spark_jvm_gc_time_ms Nullable(Int64),
+    spark_peak_execution_memory_bytes Nullable(Int64),
+
+    spark_tasks_count Nullable(Int64),
+    spark_tasks_failed Nullable(Int64),
+    spark_stages_count Nullable(Int64),
+    spark_jobs_count Nullable(Int64),
+    spark_job_status Nullable(String),
+
+    insert_time DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+ORDER BY (environment, application_name, step_name, start_time);
+Dans ton PreparedStatement, ajoute juste les ps.setLong(...) après tes champs actuels.
