@@ -1,0 +1,23 @@
+@Override
+public String toString() {
+    StringBuilder sb = new StringBuilder();
+
+    sb.append("pipeline=").append(pipeline).append(",");
+    sb.append("typePipeline=").append(typePipeline).append(",");
+    sb.append("stepsPipeline=").append(stepsPipeline).append(",");
+    sb.append("mode=").append(mode).append(",");
+    sb.append("archive=").append(archive).append(",");
+    sb.append("exportClickhouse=").append(exportClickhouse).append(",");
+    sb.append("filterClickhouse=").append(filterClickhouse).append(",");
+    sb.append("clientId=").append(clientId).append(",");
+    sb.append("clientSecret=").append(clientSecret).append(",");
+    sb.append("tenantId=").append(tenantId).append(",");
+
+    if (dynamicParams != null && !dynamicParams.isEmpty()) {
+        sb.append("dynamicParams={");
+        dynamicParams.forEach((k, v) -> sb.append(k).append("=").append(v).append(","));
+        sb.append("}");
+    }
+
+    return sb.toString();
+}
