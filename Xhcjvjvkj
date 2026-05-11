@@ -1,0 +1,49 @@
+Alors dans ton cas :
+id = clé métier
+version = version de la ligne
+tu veux garder la ligne ayant la version max pour chaque id.
+Java
+import static org.apache.spark.sql.functions.*;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.expressions.Window;
+import org.apache.spark.sql.expressions.WindowSpec;
+
+WindowSpec window = Window
+        .partitionBy("id")
+        .orderBy(col("version").desc());
+
+Dataset<Row> result = dataset
+        .withColumn("rn", row_number().over(window))
+        .filter(col("rn").equalTo(1))
+        .drop("rn");
+Exemple :
+id
+version
+nom
+1
+1
+A
+1
+2
+B
+2
+1
+C
+2
+5
+D
+Résultat :
+id
+version
+nom
+1
+2
+B
+2
+5
+D
+Si version est un string, caste-la :
+Java
+orderBy(col("version").cast("int").desc())
