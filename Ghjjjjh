@@ -1,0 +1,31 @@
+Dataset<Row> base = dsInstruments
+        .select(
+                col("label"),
+                col("country_name"),
+                col("type_name"),
+                col("local_code"),
+                col("version"),
+                col("instrument__ingestion_date"),
+                col("instrument__integration_date")
+        );
+
+Dataset<Row> maxVersion = base
+        .groupBy(col("local_code"))
+        .agg(max(col("version")).alias("max_version"));
+
+Dataset<Row> underlyingDS = base.alias("d")
+        .join(
+                maxVersion.alias("m"),
+                col("d.local_code").equalTo(col("m.local_code"))
+                        .and(col("d.version").equalTo(col("m.max_version"))),
+                "inner"
+        )
+        .select(
+                col("d.label").alias("underlying_instrument__label"),
+                col("d.country_name").alias("underlying_instrument__country_name"),
+                col("d.type_name").alias("underlying_instrument__type_name"),
+                col("d.local_code").alias("underlying_instrument__local_code"),
+                col("d.version").alias("underlying_instrument__version"),
+                col("d.instrument__ingestion_date").alias("underlying_instrument__ingestion_date"),
+                col("d.instrument__integration_date").alias("underlying_instrument__integration_date")
+        );
