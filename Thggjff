@@ -1,0 +1,35 @@
+public static Dataset<Row> keepOnlyJsonPaths(
+        Dataset<Row> df,
+        String jsonColumn,
+        List<String> pathsToKeep) {
+
+    List<String> finalPaths = new ArrayList<>();
+    finalPaths.add("id");
+    finalPaths.addAll(pathsToKeep);
+
+    Column[] entries = finalPaths.stream()
+            .map(path -> struct(
+                    lit(path.replace(".", "__")),
+                    get_json_object(
+                            col(jsonColumn),
+                            toJsonPath(path)
+                    )
+            ))
+            .toArray(Column[]::new);
+
+    return df.withColumn(
+            jsonColumn,
+            to_json(map_from_entries(array(entries)))
+    );
+}
+
+private static String toJsonPath(String path) {
+    String[] parts = path.split("\\.");
+    StringBuilder sb = new StringBuilder("$");
+
+    for (String part : parts) {
+        sb.append("['").append(part).append("']");
+    }
+
+    return sb.toString();
+}
