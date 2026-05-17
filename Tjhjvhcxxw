@@ -1,0 +1,93 @@
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.Column;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.apache.spark.sql.functions.*;
+
+public static Dataset<Row> transformPriceTicketJson(
+        Dataset<Row> df,
+        String jsonColumn,
+        List<String> pathsToKeep) {
+
+    String arrayJsonColumn = jsonColumn + "_array";
+
+    // 1) Transforme :
+    // "ICOM/PRICE_TICKET/A1": {
+    // en :
+    // {"id":"ICOM/PRICE_TICKET/A1",
+    Dataset<Row> withArrayJson = df.withColumn(
+            arrayJsonColumn,
+            concat(
+                    lit("["),
+                    regexp_replace(
+                            regexp_replace(
+                                    regexp_replace(
+                                            col(jsonColumn),
+                                            "\"(ICOM/PRICE_TICKET/[^\"]+)\"\\s*:\\s*\\{",
+                                            "{\"id\":\"$1\","
+                                    ),
+                                    "^\\s*\\{",
+                                    ""
+                            ),
+                            "\\}\\s*$",
+                            ""
+                    ),
+                    lit("]")
+            )
+    );
+
+    // 2) Parse en array<map<string,string>>
+    Column parsed = from_json(
+            col(arrayJsonColumn),
+            "array<map<string,string>>"
+    );
+
+    // 3) Pour chaque objet, garder id + champs demandés
+    List<String> keep = new ArrayList<>();
+    keep.add("id");
+    keep.addAll(pathsToKeep);
+
+    StringBuilder expr = new StringBuilder();
+    expr.append("transform(from_json(")
+            .append(arrayJsonColumn)
+            .append(", 'array<map<string,string>>'), x -> named_struct(");
+
+    for (int i = 0; i < keep.size(); i++) {
+        String path = keep.get(i);
+        String outputName = path.replace(".", "__");
+
+        if (i > 0) {
+            expr.append(", ");
+        }
+
+        expr.append("'").append(outputName).append("', ");
+
+        if ("id".equals(path)) {
+            expr.append("x['id']");
+        } else {
+            expr.append("get_json_object(to_json(x), '")
+                    .append(toJsonPath(path))
+                    .append("')");
+        }
+    }
+
+    expr.append("))");
+
+    return withArrayJson
+            .withColumn(jsonColumn, to_json(expr(expr.toString())))
+            .drop(arrayJsonColumn);
+}
+
+private static String toJsonPath(String path) {
+    String[] parts = path.split("\\.");
+    StringBuilder sb = new StringBuilder("$");
+
+    for (String part : parts) {
+        sb.append("['").append(part).append("']");
+    }
+
+    return sb.toString();
+}
