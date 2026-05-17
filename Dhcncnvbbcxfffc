@@ -1,0 +1,25 @@
+Dataset<Row> result = df.withColumn(
+    "json_col",
+    concat(
+        lit("["),
+        regexp_replace(
+            regexp_replace(
+                regexp_replace(
+                    col("json_col"),
+
+                    // UNIQUEMENT clé PRICE_TICKET
+                    "\"(ICOM/PRICE_TICKET/[^\"]+)\"\\s*:\\s*\\{",
+
+                    "{\"id\":\"$1\","
+                ),
+
+                "^\\{",
+                ""
+            ),
+
+            "\\}$",
+            ""
+        ),
+        lit("]")
+    )
+);
