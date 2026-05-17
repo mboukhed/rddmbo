@@ -1,0 +1,108 @@
+import org.apache.hadoop.fs.*;
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.*;
+import org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.parquet.hadoop.util.HadoopInputFile;
+import org.apache.parquet.schema.MessageType;
+import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaConverter;
+
+import java.util.*;
+
+public static Dataset<Row> readParquetWithRealMergedSchema(
+        SparkSession spark,
+        String basePath) throws Exception {
+
+    StructType mergedSchema = mergeAllParquetFileSchemas(spark, basePath);
+
+    return spark.read()
+            .schema(mergedSchema)
+            .parquet(basePath);
+}
+
+public static StructType mergeAllParquetFileSchemas(
+        SparkSession spark,
+        String basePath) throws Exception {
+
+    Configuration conf = spark.sparkContext().hadoopConfiguration();
+    FileSystem fs = new Path(basePath).getFileSystem(conf);
+
+    List<Path> parquetFiles = new ArrayList<>();
+    collectParquetFiles(fs, new Path(basePath), parquetFiles);
+
+    if (parquetFiles.isEmpty()) {
+        throw new IllegalArgumentException("No parquet files found: " + basePath);
+    }
+
+    StructType merged = new StructType();
+
+    ParquetToSparkSchemaConverter converter =
+            new ParquetToSparkSchemaConverter(
+                    spark.sessionState().conf()
+            );
+
+    for (Path file : parquetFiles) {
+        MessageType parquetSchema = ParquetFileReader
+                .open(HadoopInputFile.fromPath(file, conf))
+                .getFooter()
+                .getFileMetaData()
+                .getSchema();
+
+        StructType sparkSchema = converter.convert(parquetSchema);
+        merged = mergeStructTypes(merged, sparkSchema);
+    }
+
+    return merged;
+}
+
+private static void collectParquetFiles(
+        FileSystem fs,
+        Path path,
+        List<Path> result) throws Exception {
+
+    for (FileStatus status : fs.listStatus(path)) {
+        if (status.isDirectory()) {
+            collectParquetFiles(fs, status.getPath(), result);
+        } else if (status.getPath().getName().endsWith(".parquet")) {
+            result.add(status.getPath());
+        }
+    }
+}
+
+private static StructType mergeStructTypes(
+        StructType left,
+        StructType right) {
+
+    Map<String, StructField> fields = new LinkedHashMap<>();
+
+    for (StructField f : left.fields()) {
+        fields.put(f.name(), f);
+    }
+
+    for (StructField f : right.fields()) {
+        if (!fields.containsKey(f.name())) {
+            fields.put(f.name(), f);
+        } else {
+            StructField existing = fields.get(f.name());
+
+            DataType mergedType;
+            if (existing.dataType().sameType(f.dataType())) {
+                mergedType = existing.dataType();
+            } else {
+                // sécurité si même colonne mais type différent selon partition
+                mergedType = DataTypes.StringType;
+            }
+
+            fields.put(
+                    f.name(),
+                    new StructField(
+                            f.name(),
+                            mergedType,
+                            existing.nullable() || f.nullable(),
+                            Metadata.empty()
+                    )
+            );
+        }
+    }
+
+    return new StructType(fields.values().toArray(new StructField[0]));
+}
