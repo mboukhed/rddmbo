@@ -1,0 +1,81 @@
+public static Dataset<Row> normalizeIDColumnNMP(
+        Dataset<Row> df,
+        String jsonColumn,
+        List<String> pathsToKeep) {
+
+    String tmpCol = jsonColumn + "_tmp_price_ticket_array";
+
+    Dataset<Row> tmpDf = df.withColumn(
+            tmpCol,
+            concat(
+                    lit("["),
+                    regexp_replace(
+                            regexp_replace(
+                                    regexp_replace(
+                                            col(jsonColumn),
+                                            "\"(ICOM/PRICE_TICKET/[^\"]+)\"\\s*:\\s*\\{",
+                                            "{\"id\":\"$1\","
+                                    ),
+                                    "^\\s*\\{",
+                                    ""
+                            ),
+                            "\\}\\s*$",
+                            ""
+                    ),
+                    lit("]")
+            )
+    );
+
+    List<String> finalPaths = new ArrayList<>();
+    finalPaths.add("id");
+
+    if (pathsToKeep != null) {
+        finalPaths.addAll(pathsToKeep);
+    }
+
+    StringBuilder sql = new StringBuilder();
+
+    sql.append("transform(")
+            .append("from_json(")
+            .append(tmpCol)
+            .append(", 'array<map<string,string>>'), ")
+            .append("x -> named_struct(");
+
+    for (int i = 0; i < finalPaths.size(); i++) {
+        String path = finalPaths.get(i);
+        String outputName = "id".equals(path) ? "id" : path.replace(".", "__");
+
+        if (i > 0) {
+            sql.append(", ");
+        }
+
+        sql.append("`").append(outputName).append("`, ");
+
+        if ("id".equals(path)) {
+            sql.append("x['id']");
+        } else {
+            sql.append("get_json_object(to_json(x), '")
+                    .append(toJsonPath(path))
+                    .append("')");
+        }
+    }
+
+    sql.append("))");
+
+    return tmpDf
+            .withColumn(jsonColumn, to_json(expr(sql.toString())))
+            .drop(tmpCol);
+}
+
+private static String toJsonPath(String path) {
+    String[] parts = path.split("\\.");
+    StringBuilder sb = new StringBuilder("$");
+
+    for (String part : parts) {
+        sb.append("['")
+                .append(part)
+                .append("']");
+    }
+
+    return sb.toString();
+}
