@@ -1,0 +1,194 @@
+package com.sgcib.datalab.generator;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.*;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+public class ParquetJavaClassGenerator {
+
+    public static void main(String[] args) throws IOException {
+
+        SparkSession spark = SparkSession.builder()
+                .appName("ParquetJavaClassGenerator")
+                .master("local[*]")
+                .getOrCreate();
+
+        String parquetPath = "C:/data/parquet";
+        String packageName = "com.sgcib.datalab.model.equity.parquet";
+        String className = "IcomPriceTicket";
+
+        String generatedCode = generateJavaClassFromParquet(
+                spark,
+                parquetPath,
+                packageName,
+                className
+        );
+
+        Path outputPath = Paths.get(
+                "src/main/java/"
+                        + packageName.replace(".", "/")
+                        + "/"
+                        + className
+                        + ".java"
+        );
+
+        Files.createDirectories(outputPath.getParent());
+
+        Files.write(
+                outputPath,
+                generatedCode.getBytes(StandardCharsets.UTF_8)
+        );
+
+        System.out.println("Classe générée : " + outputPath);
+
+        spark.stop();
+    }
+
+    public static String generateJavaClassFromParquet(
+            SparkSession spark,
+            String parquetPath,
+            String packageName,
+            String className
+    ) {
+
+        Dataset<Row> dataset = spark.read()
+                .parquet(parquetPath);
+
+        StructType schema = dataset.schema();
+
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("package ")
+                .append(packageName)
+                .append(";\n\n");
+
+        sb.append("import lombok.Getter;\n");
+        sb.append("import lombok.Setter;\n");
+        sb.append("import java.sql.Date;\n");
+        sb.append("import java.sql.Timestamp;\n");
+        sb.append("import java.math.BigDecimal;\n");
+        sb.append("import com.sgcib.datalab.annotation.Column;\n");
+        sb.append("import com.sgcib.datalab.model.AbstractRecord;\n\n");
+
+        sb.append("@Getter\n");
+        sb.append("@Setter\n");
+
+        sb.append("public class ")
+                .append(className)
+                .append(" extends AbstractRecord {\n\n");
+
+        StructField[] fields = schema.fields();
+
+        for (int i = 0; i < fields.length; i++) {
+
+            StructField field = fields[i];
+
+            String parquetColumnName = field.name();
+            String javaFieldName = toCamelCase(parquetColumnName);
+            String javaType = toJavaType(field.dataType());
+
+            sb.append("    @Column(index = ")
+                    .append(i + 1)
+                    .append(", columnName = \"")
+                    .append(parquetColumnName)
+                    .append("\")\n");
+
+            sb.append("    private ")
+                    .append(javaType)
+                    .append(" ")
+                    .append(javaFieldName)
+                    .append(";\n\n");
+        }
+
+        sb.append("}\n");
+
+        return sb.toString();
+    }
+
+    private static String toJavaType(DataType dataType) {
+
+        if (dataType instanceof StringType) {
+            return "String";
+        }
+
+        if (dataType instanceof IntegerType) {
+            return "Integer";
+        }
+
+        if (dataType instanceof LongType) {
+            return "Long";
+        }
+
+        if (dataType instanceof DoubleType) {
+            return "Double";
+        }
+
+        if (dataType instanceof FloatType) {
+            return "Float";
+        }
+
+        if (dataType instanceof BooleanType) {
+            return "Boolean";
+        }
+
+        if (dataType instanceof DateType) {
+            return "Date";
+        }
+
+        if (dataType instanceof TimestampType) {
+            return "Timestamp";
+        }
+
+        if (dataType instanceof DecimalType) {
+            return "BigDecimal";
+        }
+
+        if (dataType instanceof ShortType) {
+            return "Short";
+        }
+
+        if (dataType instanceof ByteType) {
+            return "Byte";
+        }
+
+        if (dataType instanceof BinaryType) {
+            return "byte[]";
+        }
+
+        return "String";
+    }
+
+    private static String toCamelCase(String input) {
+
+        if (input == null || input.trim().isEmpty()) {
+            return input;
+        }
+
+        input = input.replace(".", "_");
+
+        String[] parts = input.toLowerCase().split("_");
+
+        StringBuilder sb = new StringBuilder(parts[0]);
+
+        for (int i = 1; i < parts.length; i++) {
+
+            if (!parts[i].trim().isEmpty()) {
+
+                sb.append(Character.toUpperCase(parts[i].charAt(0)));
+
+                if (parts[i].length() > 1) {
+                    sb.append(parts[i].substring(1));
+                }
+            }
+        }
+
+        return sb.toString();
+    }
+}
