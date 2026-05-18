@@ -1,0 +1,16 @@
+SELECT
+    query_id,
+    user,
+    address,
+    port,
+    client_name,
+    client_hostname,
+    elapsed,
+    memory_usage,
+    read_rows,
+    read_bytes,
+    written_rows,
+    written_bytes,
+    query
+FROM system.processes
+ORDER BY elapsed DESC;
