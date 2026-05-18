@@ -1,0 +1,9 @@
+public static Dataset<Row> toLowerCaseColumns(Dataset<Row> dataset) {
+
+    List<Column> columns = Arrays.stream(dataset.columns())
+            .map(column -> functions.col(column)
+                    .alias(column.toLowerCase()))
+            .collect(Collectors.toList());
+
+    return dataset.select(columns.toArray(new Column[0]));
+}
