@@ -1,0 +1,2 @@
+spark.sql.adaptive.advisoryPartitionSizeInBytes: "256MB"
+spark.sql.files.maxPartitionBytes: "256MB"
