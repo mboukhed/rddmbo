@@ -1,0 +1,5 @@
+spark.network.timeout=800s
+spark.executor.heartbeatInterval=60s
+spark.storage.blockManagerHeartbeatTimeoutMs=800000
+spark.rpc.askTimeout=600s
+spark.shuffle.io.connectionTimeout=600s
