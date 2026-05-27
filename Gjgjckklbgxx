@@ -1,0 +1,53 @@
+Voici le correctif complet à mettre dans ton Deployment, sous spec.template.spec.
+YAML
+spec:
+  template:
+    spec:
+      securityContext:
+        fsGroup: 101
+        fsGroupChangePolicy: "OnRootMismatch"
+
+      initContainers:
+        - name: fix-clickhouse-permissions
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /data/clickhouse
+              chown -R 101:101 /data
+              chmod -R 775 /data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: clickhouse-storage
+              mountPath: /data
+
+      containers:
+        - name: clickhouse
+          image: registry.gbis.azure-socgen.com/cdm/clickhouse-server:26.4.2-debian13
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+Dans ton YAML actuel, tu dois donc ajouter :
+securityContext au niveau pod.
+initContainers avant containers.
+securityContext dans le container clickhouse.
+Le volume est bien celui-là chez toi :
+YAML
+volumeMounts:
+  - name: clickhouse-storage
+    mountPath: /data
+Donc l’initContainer doit utiliser exactement :
+YAML
+volumeMounts:
+  - name: clickhouse-storage
+    mountPath: /data
+Puis déploie :
+Bash
+kubectl apply -f clickhouse.yaml
+kubectl rollout restart deployment clickhouse -n poweredqosk8s-prd
+Vérifie :
+Bash
+kubectl logs -f deployment/clickhouse -n poweredqosk8s-prd
+Si ça bloque encore, remplace 101 par l’UID réel de la nouvelle image.
