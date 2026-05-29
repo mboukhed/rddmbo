@@ -1,0 +1,50 @@
+Il te manque probablement azure-storage-file-datalake (vu que DataLakeServiceClient est rouge).
+Ajoute juste ça :
+XML
+<dependency>
+    <groupId>com.azure</groupId>
+    <artifactId>azure-storage-file-datalake</artifactId>
+    <version>12.21.0</version>
+</dependency>
+Et aussi celle-là si NettyAsyncHttpClientBuilder est rouge :
+XML
+<dependency>
+    <groupId>com.azure</groupId>
+    <artifactId>azure-core-http-netty</artifactId>
+    <version>1.15.0</version>
+</dependency>
+Si ClientSecretCredentialBuilder est rouge :
+XML
+<dependency>
+    <groupId>com.azure</groupId>
+    <artifactId>azure-identity</artifactId>
+    <version>1.11.3</version>
+</dependency>
+Version minimaliste qui marche en Java 11 :
+XML
+<dependencies>
+
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-storage-file-datalake</artifactId>
+        <version>12.21.0</version>
+    </dependency>
+
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-identity</artifactId>
+        <version>1.11.3</version>
+    </dependency>
+
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-core-http-netty</artifactId>
+        <version>1.15.0</version>
+    </dependency>
+
+</dependencies>
+Puis :
+Bash
+mvn clean install -U
+ou dans IntelliJ :
+Maven → Reload Project.
