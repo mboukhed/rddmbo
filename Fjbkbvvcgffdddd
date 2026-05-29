@@ -1,0 +1,47 @@
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.ProxyOptions;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.storage.file.datalake.DataLakeServiceClient;
+import com.azure.storage.file.datalake.DataLakeServiceClientBuilder;
+
+import java.net.InetSocketAddress;
+
+public final class DataLakeClientFactory {
+
+    private DataLakeClientFactory() {
+    }
+
+    public static DataLakeServiceClient createClient(
+            String tenantId,
+            String clientId,
+            String clientSecret,
+            String dataLakeEndpoint,
+            String proxyHost,
+            int proxyPort
+    ) {
+
+        ProxyOptions proxyOptions = new ProxyOptions(
+                ProxyOptions.Type.SOCKS5,
+                new InetSocketAddress(proxyHost, proxyPort)
+        );
+
+        TokenCredential credential = new ClientSecretCredentialBuilder()
+                .tenantId(tenantId)
+                .clientId(clientId)
+                .clientSecret(clientSecret)
+                .proxyOptions(proxyOptions)
+                .build();
+
+        HttpClient httpClient = new NettyAsyncHttpClientBuilder()
+                .proxy(proxyOptions)
+                .build();
+
+        return new DataLakeServiceClientBuilder()
+                .endpoint(dataLakeEndpoint)
+                .credential(credential)
+                .httpClient(httpClient)
+                .buildClient();
+    }
+}
