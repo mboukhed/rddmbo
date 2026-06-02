@@ -1,0 +1,57 @@
+Tu peux activer le debug Azure SDK + Netty + proxy SOCKS5 pour voir exactement où ça bloque (auth, proxy, DNS, timeout, TLS, socket).
+Ajoute ça au début du main() :
+Java
+System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "debug");
+System.setProperty("org.slf4j.simpleLogger.showDateTime", "true");
+System.setProperty("org.slf4j.simpleLogger.showThreadName", "true");
+System.setProperty("org.slf4j.simpleLogger.showShortLogName", "true");
+Ensuite ajoute les logs spécifiques :
+Java
+System.setProperty("org.slf4j.simpleLogger.log.com.azure", "trace");
+System.setProperty("org.slf4j.simpleLogger.log.com.azure.identity", "trace");
+System.setProperty("org.slf4j.simpleLogger.log.com.azure.storage", "trace");
+System.setProperty("org.slf4j.simpleLogger.log.reactor.netty", "debug");
+System.setProperty("org.slf4j.simpleLogger.log.io.netty", "debug");
+Et ajoute le wiretap Netty sur le client HTTP :
+Java
+HttpClient nettyClient = HttpClient.create()
+        .wiretap(true);
+
+var httpClient = new NettyAsyncHttpClientBuilder(nettyClient)
+        .proxy(proxyOptions)
+        .build();
+Ajoute aussi un try/catch détaillé :
+Java
+try {
+    dataLakeServiceClient.listFileSystems()
+            .forEach(fs -> System.out.println(fs.getName()));
+
+} catch (Exception e) {
+    e.printStackTrace();
+
+    Throwable cause = e.getCause();
+    while (cause != null) {
+        System.err.println("CAUSE => " + cause.getClass().getName());
+        System.err.println("MESSAGE => " + cause.getMessage());
+        cause = cause.getCause();
+    }
+}
+Et teste le proxy avant Azure :
+Java
+try (Socket socket = new Socket()) {
+    socket.connect(new InetSocketAddress(proxyHost, 443), 5000);
+    System.out.println("Proxy OK");
+} catch (Exception e) {
+    System.out.println("Proxy KO");
+    e.printStackTrace();
+}
+Vu ta capture, je pense à 3 causes probables :
+SOCKS5 avec auth non supportée par le proxy d’entreprise
+DNS résolu côté client au lieu du proxy (aqwimut...blob.core.windows.net)
+Proxy bloque login Microsoft (login.microsoftonline.com) pour récupérer le token avant d’aller sur Blob.
+Avec le trace, tu verras immédiatement si ça bloque :
+avant token Azure,
+pendant proxy connect,
+pendant TLS,
+ou sur le blob endpoint.
+Et au passage sur ta capture je vois un warning SLF4J / Log4j binding, ça peut masquer des logs. Vérifie que tu n’as pas un conflit de logger dans le pom.
