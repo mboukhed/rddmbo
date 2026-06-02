@@ -1,0 +1,11 @@
+ça ne marche pas, fais le test ultime :
+Java
+System.setProperty("socksProxyHost", proxyHost);
+System.setProperty("socksProxyPort", "443");
+System.setProperty("java.net.socks.username", user);
+System.setProperty("java.net.socks.password", password);
+System.setProperty("jdk.net.socksRemoteDns", "true");
+avant tout le code Azure.
+Le plus important est celui-ci :
+Java
+System.setProperty("jdk.net.socksRemoteDns", "true");
