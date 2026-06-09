@@ -1,0 +1,19 @@
+Set<String> existingCols = new HashSet<>(Arrays.asList(df.columns()));
+
+for (Map.Entry<String, List<String>> e : fieldsByJsonColumn.entrySet()) {
+    String jsonCol = e.getKey();
+
+    if (!existingCols.contains(jsonCol)) {
+        continue;
+    }
+
+    for (String fieldPath : e.getValue()) {
+        String jsonPath = "$." + fieldPath;
+        String outputCol = jsonCol + SEP + fieldPath.replace(".", SEP);
+
+        cols.add(
+            get_json_object(col(jsonCol), jsonPath)
+                .alias(outputCol)
+        );
+    }
+}
