@@ -1,0 +1,32 @@
+Oui. Solution Helm sans rebuild image : monter un fichier vide non exécutable par-dessus /usr/bin/mkdir.
+Dans values.yaml, ajoute :
+YAML
+extraVolumeMounts:
+  - name: blocked-commands
+    mountPath: /usr/bin/mkdir
+    subPath: mkdir
+    readOnly: true
+
+extraVolumes:
+  - name: blocked-commands
+    configMap:
+      name: blocked-commands
+      defaultMode: 0000
+Ajoute un template Helm :
+templates/blocked-commands-configmap.yaml
+YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blocked-commands
+data:
+  mkdir: ""
+Puis redéploie.
+Test dans Coder :
+Bash
+ls -l /usr/bin/mkdir
+mkdir test
+Attendu :
+Plain text
+Permission denied
+Tu peux ajouter pareil pour touch, rm, cp, mv.
