@@ -1,0 +1,17 @@
+# Block sensitive/basic creation commands for coder
+RUN chmod 000 /usr/bin/mkdir || true \
+ && chmod 000 /bin/mkdir || true \
+ && chmod 000 /usr/bin/touch || true \
+ && chmod 000 /bin/touch || true \
+ && chmod 000 /usr/bin/rm || true \
+ && chmod 000 /bin/rm || true \
+ && chmod 000 /usr/bin/mv || true \
+ && chmod 000 /bin/mv || true \
+ && chmod 000 /usr/bin/cp || true \
+ && chmod 000 /bin/cp || true \
+ && chmod 000 /usr/bin/sudo || true \
+ && chmod 000 /usr/bin/su || true \
+ && chmod 000 /usr/bin/dnf || true \
+ && chmod 000 /usr/bin/yum || true \
+ && chmod 000 /usr/bin/curl || true \
+ && chmod 000 /usr/bin/wget || true
