@@ -1,0 +1,10 @@
+extraVars:
+  - name: PATH
+    value: "/opt/blocked-bin:/usr/lib/code-server/lib/vscode/bin/remote-cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+extraConfigmapMounts:
+  - name: blocked-commands
+    mountPath: /opt/blocked-bin
+    configMap: blocked-commands
+    defaultMode: 0555
+    readOnly: true
