@@ -1,0 +1,66 @@
+Mets ça.
+values.yaml
+YAML
+extraVars:
+  - name: ENV_TYPE
+    value: "${ENV_TYPE}"
+  - name: PATH
+    value: "/opt/blocked-bin:/usr/lib/code-server/lib/vscode/bin/remote-cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  - name: SHELL
+    value: "/bin/rbash"
+
+extraConfigmapMounts:
+  - name: blocked-commands
+    mountPath: /opt/blocked-bin
+    configMap: blocked-commands
+    defaultMode: 0555
+    readOnly: true
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blocked-commands
+data:
+  mkdir: |
+    #!/bin/sh
+    echo "Command mkdir is blocked"
+    exit 126
+  touch: |
+    #!/bin/sh
+    echo "Command touch is blocked"
+    exit 126
+  rm: |
+    #!/bin/sh
+    echo "Command rm is blocked"
+    exit 126
+  cp: |
+    #!/bin/sh
+    echo "Command cp is blocked"
+    exit 126
+  mv: |
+    #!/bin/sh
+    echo "Command mv is blocked"
+    exit 126
+  curl: |
+    #!/bin/sh
+    echo "Command curl is blocked"
+    exit 126
+  wget: |
+    #!/bin/sh
+    echo "Command wget is blocked"
+    exit 126
+  bash: |
+    #!/bin/sh
+    echo "Command bash is blocked"
+    exit 126
+  sh: |
+    #!/bin/sh
+    echo "Command sh is blocked"
+    exit 126
+templates/blocked-commands-configmap.yaml
+YAML
+Test :
+Bash
+echo $SHELL
+echo $PATH
+mkdir test
+export PATH=/usr/bin:/bin
