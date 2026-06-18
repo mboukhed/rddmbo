@@ -1,0 +1,61 @@
+OK. Solution Helm simple : on surcharge le PATH avec des scripts bloquants.
+1. values.yaml
+YAML
+extraEnvVars:
+  - name: PATH
+    value: "/opt/blocked-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+extraVolumeMounts:
+  - name: blocked-commands
+    mountPath: /opt/blocked-bin
+    readOnly: true
+
+extraVolumes:
+  - name: blocked-commands
+    configMap:
+      name: blocked-commands
+      defaultMode: 0555
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blocked-commands
+data:
+  mkdir: |
+    #!/bin/sh
+    echo "Command mkdir is blocked"
+    exit 126
+  touch: |
+    #!/bin/sh
+    echo "Command touch is blocked"
+    exit 126
+  rm: |
+    #!/bin/sh
+    echo "Command rm is blocked"
+    exit 126
+  cp: |
+    #!/bin/sh
+    echo "Command cp is blocked"
+    exit 126
+  mv: |
+    #!/bin/sh
+    echo "Command mv is blocked"
+    exit 126
+  curl: |
+    #!/bin/sh
+    echo "Command curl is blocked"
+    exit 126
+  wget: |
+    #!/bin/sh
+    echo "Command wget is blocked"
+    exit 126
+2. templates/blocked-commands-configmap.yaml
+YAML
+Test dans Coder
+Bash
+mkdir test
+touch a.txt
+rm a.txt
+Résultat attendu :
+Plain text
+Command mkdir is blocked
+ls, cd, cat, python, spark restent OK.
