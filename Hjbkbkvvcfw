@@ -1,0 +1,6 @@
+extraConfigmapMounts:
+  - name: blocked-commands
+    mountPath: /opt/blocked-bin
+    configMap: blocked-commands
+    defaultMode: 0555
+    readOnly: true
