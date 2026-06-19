@@ -1,0 +1,2 @@
+- name: TERMINAL_SHELL_ARGS
+  value: "--restricted --noprofile --norc"
