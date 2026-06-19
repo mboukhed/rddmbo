@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: code-server-settings
+data:
+  settings.json: |
+    {
+      "terminal.integrated.defaultProfile.linux": "restricted",
+      "terminal.integrated.profiles.linux": {
+        "restricted": {
+          "path": "/bin/bash",
+          "args": ["--restricted", "--noprofile", "--norc"]
+        }
+      },
+      "terminal.integrated.automationProfile.linux": {
+        "path": "/bin/bash",
+        "args": ["--restricted", "--noprofile", "--norc"]
+      },
+      "terminal.integrated.env.linux": {
+        "PATH": "/opt/blocked-bin:/usr/lib/code-server/lib/vscode/bin/remote-cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      }
+    }
