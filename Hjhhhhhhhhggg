@@ -1,0 +1,13 @@
+extraConfigmapMounts:
+  - name: blocked-commands
+    mountPath: /opt/blocked-bin
+    configMap: blocked-commands
+    defaultMode: 0555
+    readOnly: true
+
+  - name: code-server-settings
+    mountPath: /home/coder/.local/share/code-server/User/settings.json
+    subPath: settings.json
+    configMap: code-server-settings
+    defaultMode: 0444
+    readOnly: true
