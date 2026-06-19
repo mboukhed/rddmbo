@@ -1,0 +1,12 @@
+{
+  "terminal.integrated.defaultProfile.linux": "restricted",
+  "terminal.integrated.profiles.linux": {
+    "restricted": {
+      "path": "/bin/rbash",
+      "args": ["--noprofile", "--norc"]
+    }
+  },
+  "terminal.integrated.env.linux": {
+    "PATH": "/opt/blocked-bin:/usr/lib/code-server/lib/vscode/bin/remote-cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  }
+}
