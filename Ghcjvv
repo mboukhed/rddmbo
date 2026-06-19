@@ -1,0 +1,48 @@
+Oui. Le settings.json est déjà dans ton Dockerfile :
+Dockerfile
+COPY settings.json /tmp/settings.json
+cp /tmp/settings.json /home/coder/.local/share/code-server/User/settings.json
+Sans modifier l’image, fais-le via Helm avec un ConfigMap monté sur ce fichier.
+Ajoute un template :
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: code-server-settings
+data:
+  settings.json: |
+    {
+      "terminal.integrated.defaultProfile.linux": "restricted",
+      "terminal.integrated.profiles.linux": {
+        "restricted": {
+          "path": "/bin/bash",
+          "args": ["--noprofile", "--norc"]
+        }
+      },
+      "terminal.integrated.env.linux": {
+        "PATH": "/opt/blocked-bin:/usr/lib/code-server/lib/vscode/bin/remote-cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      }
+    }
+YAML
+Et dans values.yaml :
+YAML
+extraConfigmapMounts:
+  - name: blocked-commands
+    mountPath: /opt/blocked-bin
+    configMap: blocked-commands
+    defaultMode: 0555
+    readOnly: true
+
+  - name: code-server-settings
+    mountPath: /home/coder/.local/share/code-server/User/settings.json
+    subPath: settings.json
+    configMap: code-server-settings
+    defaultMode: 0444
+    readOnly: true
+Garde aussi :
+YAML
+extraVars:
+  - name: ENV_TYPE
+    value: "${ENV_TYPE}"
+  - name: PATH
+    value: "/opt/blocked-bin:/usr/lib/code-server/lib/vscode/bin/remote-cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Ne mets pas SHELL=/bin/rbash.
